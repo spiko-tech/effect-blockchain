@@ -52,3 +52,21 @@ export const STELLAR_NETWORK_PASSPHRASES: { readonly [N in StellarNetwork]: stri
   Stellar: "Public Global Stellar Network ; September 2015",
   StellarTestnet: "Test SDF Network ; September 2015"
 }
+
+const DEFAULT_CONFIRMATIONS: { readonly [N in StellarNetwork]: number } = {
+  // SCP gives deterministic finality, a closed ledger is never reverted:
+  // https://developers.stellar.org/docs/learn/fundamentals/stellar-consensus-protocol
+  Stellar: 0,
+  // Same consensus as mainnet (testnet resets wipe all history, they do not reorganise closed ledgers)
+  StellarTestnet: 0
+}
+
+/**
+ * Default number of ledgers to wait behind the latest closed ledger before treating it as confirmed.
+ *
+ * Stellar has no forks: a ledger is final once closed by SCP, so the default is `0`.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
+export const defaultConfirmations = (network: StellarNetwork): number => DEFAULT_CONFIRMATIONS[network]

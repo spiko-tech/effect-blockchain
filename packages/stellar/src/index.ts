@@ -12,6 +12,11 @@ export * as StellarAddress from "./StellarAddress.ts"
 /**
  * @since 0.1.0
  */
+export * as StellarIndexer from "./StellarIndexer.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as StellarNetwork from "./StellarNetwork.ts"
 
 /**
