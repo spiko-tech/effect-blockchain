@@ -12,6 +12,11 @@ export * as SolanaAddress from "./SolanaAddress.ts"
 /**
  * @since 0.1.0
  */
+export * as SolanaIndexer from "./SolanaIndexer.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as SolanaNetwork from "./SolanaNetwork.ts"
 
 /**

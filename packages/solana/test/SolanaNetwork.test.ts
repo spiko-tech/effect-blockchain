@@ -1,4 +1,9 @@
-import { isSolanaNetwork, SOLANA_NETWORK_KINDS, SolanaNetwork } from "@effect-blockchain/solana/SolanaNetwork"
+import {
+  defaultConfirmations,
+  isSolanaNetwork,
+  SOLANA_NETWORK_KINDS,
+  SolanaNetwork
+} from "@effect-blockchain/solana/SolanaNetwork"
 import { describe, expect, it } from "@effect/vitest"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -23,5 +28,11 @@ describe("SolanaNetwork", () => {
       SolanaDevnet: "testnet",
       SolanaTestnet: "testnet"
     })
+  })
+
+  it("has default confirmations per network", () => {
+    expect(defaultConfirmations("Solana")).toBe(32)
+    expect(defaultConfirmations("SolanaDevnet")).toBe(0)
+    expect(defaultConfirmations("SolanaTestnet")).toBe(0)
   })
 })

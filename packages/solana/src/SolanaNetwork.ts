@@ -56,3 +56,25 @@ export const SOLANA_NETWORK_KINDS: { readonly [N in SolanaNetwork]: SolanaNetwor
  * @category Guards
  */
 export const isSolanaNetwork: (u: unknown) => u is SolanaNetwork = Schema.is(SolanaNetwork)
+
+/**
+ * Default number of slots to wait behind the `confirmed` slot before treating a slot as final.
+ *
+ * The indexer reads at `confirmed` commitment (supermajority of stake voted), and a block becomes `finalized`
+ * once 31+ confirmed blocks are built on top of it, so 32 slots behind `confirmed` approximates `finalized`
+ * (skipped slots make it slightly weaker). Test clusters carry no value, so `confirmed` alone is enough.
+ *
+ * @since 0.1.0
+ * @category Constants
+ */
+export const defaultConfirmations = (network: SolanaNetwork): number => {
+  switch (network) {
+    // finalized depth: "31+ confirmed blocks built atop block" (https://docs.anza.xyz/consensus/commitments)
+    case "Solana":
+      return 32
+    // confirmed commitment: "block has received a super majority of votes" (https://docs.anza.xyz/consensus/commitments)
+    case "SolanaDevnet":
+    case "SolanaTestnet":
+      return 0
+  }
+}
