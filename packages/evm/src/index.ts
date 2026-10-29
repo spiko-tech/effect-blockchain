@@ -17,7 +17,17 @@ export * as EvmHexData from "./EvmHexData.ts"
 /**
  * @since 0.1.0
  */
+export * as EvmLog from "./EvmLog.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as EvmNetwork from "./EvmNetwork.ts"
+
+/**
+ * @since 0.1.0
+ */
+export * as EvmRpc from "./EvmRpc.ts"
 
 /**
  * @since 0.1.0
