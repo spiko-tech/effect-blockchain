@@ -17,4 +17,9 @@ export * as SolanaNetwork from "./SolanaNetwork.ts"
 /**
  * @since 0.1.0
  */
+export * as SolanaRpc from "./SolanaRpc.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as SolanaTransactionHash from "./SolanaTransactionHash.ts"
