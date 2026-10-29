@@ -12,6 +12,11 @@ export * as StarknetAddress from "./StarknetAddress.ts"
 /**
  * @since 0.1.0
  */
+export * as StarknetIndexer from "./StarknetIndexer.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as StarknetNetwork from "./StarknetNetwork.ts"
 
 /**
