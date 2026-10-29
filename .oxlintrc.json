@@ -86,13 +86,6 @@
   },
   "overrides": [
     {
-      // shortcut: barrels stay empty until each package gets its first module, remove this override then
-      "files": ["packages/*/src/index.ts"],
-      "rules": {
-        "unicorn/no-empty-file": "off"
-      }
-    },
-    {
       "files": ["**/{test,dtslint,examples,scripts}/**"],
       "rules": {
         "effect/no-bigint-literals": "off",

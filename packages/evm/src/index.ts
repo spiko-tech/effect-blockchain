@@ -17,6 +17,11 @@ export * as EvmHexData from "./EvmHexData.ts"
 /**
  * @since 0.1.0
  */
+export * as EvmIndexer from "./EvmIndexer.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as EvmNetwork from "./EvmNetwork.ts"
 
 /**
