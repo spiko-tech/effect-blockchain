@@ -11,7 +11,7 @@ const redactValue = (value: unknown, pattern: RegExp, replacement: string): unkn
 // viem writes the full RPC URL into its errors and only strips basic-auth credentials,
 // while providers usually carry their API key in the URL path or query
 /** @internal */
-export const redactRpcUrl = (error: unknown, url: string): unknown => {
+export const redactRpcUrl = <E>(error: E, url: string): E => {
   if (!(error instanceof Error) || !URL.canParse(url)) return error
   const { origin } = new URL(url)
   // the raw URL first: with basic-auth credentials it does not start with the origin

@@ -205,7 +205,7 @@ export const layer = (options: {
         }))
       type Endpoint = typeof endpoints[number]
 
-      const fail = (endpoint: Endpoint, method: string, reason: EvmRpcErrorReason, cause: unknown) =>
+      const fail = (endpoint: Endpoint, method: string, reason: EvmRpcErrorReason, cause: Error) =>
         new EvmRpcError({ reason, method, endpoint: endpoint.name, cause })
 
       const send = <Params, A>(endpoint: Endpoint, method: RpcMethods.RpcMethod<Params, A>, params: Params) =>
@@ -214,10 +214,7 @@ export const layer = (options: {
             Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
           )
           const raw = yield* Effect.tryPromise({
-            try: (signal) =>
-              endpoint.transport.request({ method: method.name, params: encoded } as never, { signal }) as Promise<
-                unknown
-              >,
+            try: (signal) => endpoint.transport.request({ method: method.name, params: encoded }, { signal }),
             catch: (error) =>
               new EvmRpcError({
                 ...classify(error),
