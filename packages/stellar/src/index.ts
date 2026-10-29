@@ -12,7 +12,17 @@ export * as StellarAddress from "./StellarAddress.ts"
 /**
  * @since 0.1.0
  */
+export * as StellarContractEvent from "./StellarContractEvent.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as StellarNetwork from "./StellarNetwork.ts"
+
+/**
+ * @since 0.1.0
+ */
+export * as StellarRpc from "./StellarRpc.ts"
 
 /**
  * @since 0.1.0
