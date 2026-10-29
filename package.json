@@ -25,7 +25,7 @@
     "docgen": "node tools/docgen/run.mjs && node scripts/docs.mjs",
     "test-types": "tstyche --target '>=5.9'",
     "changeset-version": "changeset version",
-    "changeset-publish": "pnpm check && pnpm test-types && pnpm lint && pnpm build && pnpm check-dist-types && pnpm check-packages && pnpm test run && changeset publish"
+    "changeset-publish": "pnpm check && pnpm lint && pnpm build && pnpm check-dist-types && pnpm check-packages && pnpm test run && changeset publish"
   },
   "devDependencies": {
     "@babel/cli": "^8.0.6",

@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         uses: ./.github/actions/setup
       - run: pnpm check
-      - run: pnpm test-types
+      # shortcut: tstyche fails when no dtslint/*.tst.ts exists, add `pnpm test-types` back with the first type test
 
   lint:
     name: Lint
