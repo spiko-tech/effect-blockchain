@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "references": [{ "path": "tsconfig.packages.json" }],
+  "include": [
+    "**/vitest.*.ts", // All vitest config files across all packages
+    "./scripts/test/**/*.ts",
+    "./packages/*/test/**/*.ts",
+    "./packages/*/test/**/*.json",
+    "./packages/*/typetest/**/*.ts",
+    "./packages/*/dtslint/**/*.ts",
+    "./packages/*/examples/**/*.ts",
+    "./packages/**/test/**/*.ts",
+    "./packages/**/test/**/*.json",
+    "./packages/**/typetest/**/*.ts",
+    "./packages/**/dtslint/**/*.ts",
+    "./packages/**/examples/**/*.ts"
+  ],
+  "exclude": ["**/node_modules/**", "**/dist/**", "**/build/**"],
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": false,
+    // Tests/examples/dtslint import package sources relatively and are never
+    // emitted, so the rewrite-based safety check (TS2878) does not apply.
+    "rewriteRelativeImportExtensions": false,
+    "resolveJsonModule": true,
+    "types": ["node"],
+    "paths": {
+      // These path aliases allow us to load workspace packages in tests and examples.
+      "@effect-blockchain/evm": ["./packages/evm/src/index.ts"],
+      "@effect-blockchain/evm/*": ["./packages/evm/src/*.ts"],
+      "@effect-blockchain/solana": ["./packages/solana/src/index.ts"],
+      "@effect-blockchain/solana/*": ["./packages/solana/src/*.ts"],
+      "@effect-blockchain/starknet": ["./packages/starknet/src/index.ts"],
+      "@effect-blockchain/starknet/*": ["./packages/starknet/src/*.ts"],
+      "@effect-blockchain/stellar": ["./packages/stellar/src/index.ts"],
+      "@effect-blockchain/stellar/*": ["./packages/stellar/src/*.ts"]
+    },
+    "plugins": [{
+      "name": "@effect/language-service",
+      "namespaceImportPackages": [],
+      "includeSuggestionsInTsc": false,
+      "ignoreEffectWarningsInTscExitCode": true,
+      "ignoreEffectErrorsInTscExitCode": true,
+      "overrides": [
+        {
+          "include": ["**/dtslint/**/*.ts", "**/typetest/**/*.ts"],
+          "options": {
+            "diagnosticSeverity": {
+              "floatingEffect": "off"
+            }
+          }
+        }
+      ],
+      "diagnosticSeverity": {
+        "unknownInEffectCatch": "off",
+        "multipleEffectProvide": "off"
+      }
+    }]
+  }
+}
