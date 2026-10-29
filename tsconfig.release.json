@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "include": [],
+  "references": [
+    { "path": "packages/evm/tsconfig.release.json" },
+    { "path": "packages/solana/tsconfig.release.json" },
+    { "path": "packages/starknet/tsconfig.release.json" },
+    { "path": "packages/stellar/tsconfig.release.json" }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "name": "@effect-blockchain/solana",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Solana blockchain toolkit for Effect",
+  "keywords": [
+    "typescript",
+    "effect",
+    "blockchain",
+    "solana"
+  ],
+  "homepage": "https://github.com/spiko-tech/effect-blockchain",
+  "bugs": {
+    "url": "https://github.com/spiko-tech/effect-blockchain/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spiko-tech/effect-blockchain.git",
+    "directory": "packages/solana"
+  },
+  "license": "MIT",
+  "sideEffects": [],
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts",
+    "./internal/*": null,
+    "./index": null,
+    "./*/index": null
+  },
+  "files": [
+    "src/**/*.ts",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map"
+  ],
+  "scripts": {
+    "codegen": "node ../../scripts/codegen.mjs . 'src/**/index.ts'",
+    "build": "tsc -b tsconfig.json tsconfig.release.json && pnpm babel",
+    "babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps",
+    "check": "tsc -b tsconfig.json",
+    "test": "vitest",
+    "coverage": "vitest --coverage"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.1.0",
+    "@solana/kit": "^8.5.0",
+    "effect": "4.1.0"
+  },
+  "peerDependencies": {
+    "@solana/kit": "^8.5.0",
+    "effect": "^4.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "exports": {
+      "./package.json": "./package.json",
+      ".": "./dist/index.js",
+      "./*": "./dist/*.js",
+      "./internal/*": null,
+      "./index": null,
+      "./*/index": null
+    }
+  },
+  "tags": [
+    "typescript",
+    "effect",
+    "blockchain",
+    "solana"
+  ]
+}
