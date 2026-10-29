@@ -2,20 +2,23 @@ import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import { EvmLog } from "@effect-blockchain/evm/EvmLog"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
-import { describe, expect, it } from "@effect/vitest"
-import type * as Arr from "effect/Array"
+import { assert, describe, expect, it } from "@effect/vitest"
+import * as Arr from "effect/Array"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 
-type Reply = { readonly result: unknown } | { readonly error: { code: number; message: string } } | Response
-type Node = Record<string, (params: ReadonlyArray<unknown>, signal: AbortSignal) => Reply | Promise<Reply>>
+type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
+type Node = Record<
+  string,
+  (params: ReadonlyArray<Schema.Json>, signal: AbortSignal | null | undefined) => Reply | Promise<Reply>
+>
 
 const TOKEN = EvmAddress.make("0x1111111111111111111111111111111111111111")
 const OTHER = EvmAddress.make("0x2222222222222222222222222222222222222222")
 
-const rawLog = (overrides: Record<string, unknown> = {}) => ({
+const baseLog = {
   address: TOKEN,
   topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],
   data: "0x",
@@ -24,9 +27,15 @@ const rawLog = (overrides: Record<string, unknown> = {}) => ({
   transactionHash: "0x" + "cd".repeat(32),
   transactionIndex: "0x0",
   logIndex: "0x0",
-  removed: false,
+  removed: false
+}
+
+const rawLog = (overrides: { readonly [K in keyof typeof baseLog]?: Schema.Json } = {}) => ({
+  ...baseLog,
   ...overrides
 })
+
+const defaults: Node = { eth_chainId: () => ({ result: "0x1" }) }
 
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
@@ -34,20 +43,21 @@ const setup = (
   options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
 ) => {
   const calls: Array<string> = []
-  const fetch = (async (url: string, init: RequestInit) => {
-    const name = new URL(url).hostname.split(".")[0]
-    const body = JSON.parse(String(init.body))
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const name = new URL(String(input)).hostname.split(".")[0]
+    const body: { id: number; method: string; params: ReadonlyArray<Schema.Json> } = JSON.parse(String(init?.body))
     calls.push(`${name}:${body.method}`)
-    const handler = nodes[name][body.method] ?? (body.method === "eth_chainId" ? () => ({ result: "0x1" }) : undefined)
-    const reply = await handler(body.params, init.signal!)
+    const handler = nodes[name]?.[body.method] ?? defaults[body.method]
+    const reply = handler === undefined
+      ? { error: { code: -32601, message: "method not found" } }
+      : await handler(body.params, init?.signal)
     return reply instanceof Response ? reply : Response.json({ jsonrpc: "2.0", id: body.id, ...reply })
-  }) as unknown as typeof globalThis.fetch
+  }
+  const names = Object.keys(nodes)
+  if (!Arr.isReadonlyArrayNonEmpty(names)) throw new Error("setup needs at least one endpoint")
   const layer = EvmRpc.layer({
     network: "Ethereum",
-    endpoints: Object.keys(nodes).map((name) => ({
-      name,
-      url: Redacted.make(`https://${name}.rpc.test/secret-key`)
-    })) as unknown as Arr.NonEmptyReadonlyArray<EvmRpc.EvmRpcEndpoint>,
+    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
     retries: options.retries ?? 0,
     retryDelay: "1 millis",
     timeout: options.timeout,
@@ -92,7 +102,7 @@ describe("EvmRpc", () => {
   })
 
   it.effect("encodes getLogs params as hex quantities", () => {
-    let params: unknown
+    let params: ReadonlyArray<Schema.Json> = []
     const { run } = setup({
       a: {
         eth_blockNumber: head(20),
@@ -111,7 +121,10 @@ describe("EvmRpc", () => {
             toBlock: "0x14",
             topics: [null, ["0xab"]]
           }])
-        )
+        ),
+        Effect.andThen(rpc.getLogs({ ...filter, topics: undefined })),
+        // undefined is not JSON: the key is left out
+        Effect.map(() => expect(params).toStrictEqual([{ address: TOKEN, fromBlock: "0xa", toBlock: "0x14" }]))
       )
     )
   })
@@ -130,8 +143,8 @@ describe("EvmRpc", () => {
   it.effect("classifies a timeout as Unavailable", () =>
     Effect.gen(function*() {
       // like fetch, hang until aborted
-      const hang = (_: unknown, signal: AbortSignal) =>
-        new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)))
+      const hang: Node[string] = (_, signal) =>
+        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
       const error = yield* failure(hang, { timeout: "20 millis" })
       expect(error.reason).toBe("Unavailable")
     }))
@@ -155,7 +168,8 @@ describe("EvmRpc", () => {
         const reply of [() => new Response("busy", { status: 503 }), () => ({ error: { code: 3, message: "no" } })]
       ) {
         const error = yield* failure(reply)
-        const cause = error.cause as Error
+        const cause = error.cause
+        assert.instanceOf(cause, Error)
         expect(`${cause.message} ${cause.stack} ${JSON.stringify(cause)}`).not.toContain("secret-key")
         expect(cause.message).toContain("https://a.rpc.test/[REDACTED]")
       }
@@ -193,10 +207,8 @@ describe("EvmRpc", () => {
       })
       const error = yield* run((rpc) => Effect.flip(rpc.blockNumber))
       expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
-      expect((error.cause as AggregateError).errors.map((e: EvmRpc.EvmRpcError) => e.endpoint)).toStrictEqual([
-        "a",
-        "b"
-      ])
+      assert.instanceOf(error.cause, AggregateError)
+      expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
     }))
 
   it.effect("checks the network once per endpoint and caches a mismatch", () =>
