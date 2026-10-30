@@ -19,7 +19,7 @@ const isSolanaSignature = (value: string): boolean => {
  * A Solana transaction hash: a base58-encoded Ed25519 signature, validated with `@solana/kit`.
  *
  * @since 0.1.0
- * @category Schemas
+ * @category schemas
  */
 export const SolanaTransactionHash = Schema.String.annotate({
   title: "Solana transaction hash",
@@ -36,6 +36,6 @@ export const SolanaTransactionHash = Schema.String.annotate({
 
 /**
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export type SolanaTransactionHash = typeof SolanaTransactionHash.Type

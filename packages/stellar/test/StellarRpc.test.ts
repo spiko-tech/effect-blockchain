@@ -1,6 +1,6 @@
 import { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
 import { StellarContractEvent } from "@effect-blockchain/stellar/StellarContractEvent"
-import { STELLAR_NETWORK_PASSPHRASES } from "@effect-blockchain/stellar/StellarNetwork"
+import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { StrKey } from "@stellar/stellar-sdk"
@@ -57,7 +57,7 @@ const page = (events: Array<Schema.Json>, cursor: string, latestLedger = 100) =>
 })
 
 const defaults: Node = {
-  getNetwork: () => ({ result: { passphrase: STELLAR_NETWORK_PASSPHRASES.Stellar, protocolVersion: 23 } }),
+  getNetwork: () => ({ result: { passphrase: toPassphrase("Stellar"), protocolVersion: 23 } }),
   getHealth: health(100),
   getEvents: page([], windowEnd(20))
 }
@@ -142,7 +142,7 @@ describe("StellarRpc", () => {
     return run((rpc) =>
       Effect.gen(function*() {
         expect(yield* rpc.getNetwork).toStrictEqual({
-          passphrase: STELLAR_NETWORK_PASSPHRASES.Stellar,
+          passphrase: toPassphrase("Stellar"),
           protocolVersion: 23
         })
         expect(yield* rpc.getLatestLedger).toStrictEqual({
@@ -312,7 +312,7 @@ describe("StellarRpc", () => {
       expect(ok.calls.filter((call) => call.endsWith("getNetwork"))).toHaveLength(1)
 
       const testnet = () => ({
-        result: { passphrase: STELLAR_NETWORK_PASSPHRASES.StellarTestnet, protocolVersion: 23 }
+        result: { passphrase: toPassphrase("StellarTestnet"), protocolVersion: 23 }
       })
       const wrong = setup({ a: { getNetwork: testnet }, b: {} })
       const errors = yield* wrong.run((rpc) =>

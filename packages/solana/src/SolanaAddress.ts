@@ -10,7 +10,7 @@ const solanaAddressOf32BytesPattern = "^[2-9A-H][1-9A-HJ-NP-Za-km-z]{43}$"
  * A base58-encoded Solana address (32 bytes), validated with `@solana/kit`.
  *
  * @since 0.1.0
- * @category Schemas
+ * @category schemas
  */
 export const SolanaAddress = Schema.String.annotate({
   title: "Solana address",
@@ -27,7 +27,7 @@ export const SolanaAddress = Schema.String.annotate({
 
 /**
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export type SolanaAddress = typeof SolanaAddress.Type
 
@@ -35,6 +35,6 @@ export type SolanaAddress = typeof SolanaAddress.Type
  * The Solana System Program address.
  *
  * @since 0.1.0
- * @category Constants
+ * @category constants
  */
 export const SYSTEM_PROGRAM_ADDRESS: SolanaAddress = SolanaAddress.make("11111111111111111111111111111111")

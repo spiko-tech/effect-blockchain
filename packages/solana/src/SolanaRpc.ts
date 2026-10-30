@@ -53,14 +53,14 @@ import * as SynchronizedRef from "effect/SynchronizedRef"
 import { redactRpcUrl } from "./internal/redactRpcUrl.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { SolanaAddress } from "./SolanaAddress.ts"
-import type { SolanaNetwork } from "./SolanaNetwork.ts"
+import { type SolanaNetwork, toGenesisHash } from "./SolanaNetwork.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
 
 /**
  * A JSON-RPC endpoint. The `name` is shown in errors and spans, the `url` is never logged.
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export interface SolanaRpcEndpoint {
   readonly name: string
@@ -80,7 +80,7 @@ export interface SolanaRpcEndpoint {
  * | `WrongNetwork` | the endpoint's genesis hash is not the configured network's | no |
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export const SolanaRpcErrorReason = Schema.Literals([
   "Unavailable",
@@ -93,7 +93,7 @@ export const SolanaRpcErrorReason = Schema.Literals([
 
 /**
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export type SolanaRpcErrorReason = typeof SolanaRpcErrorReason.Type
 
@@ -103,7 +103,7 @@ export type SolanaRpcErrorReason = typeof SolanaRpcErrorReason.Type
  * `AggregateError` of every endpoint's error, in order.
  *
  * @since 0.1.0
- * @category Errors
+ * @category errors
  */
 export class SolanaRpcError extends Schema.TaggedError<SolanaRpcError>()("SolanaRpcError", {
   reason: SolanaRpcErrorReason,
@@ -126,7 +126,7 @@ export class SolanaRpcError extends Schema.TaggedError<SolanaRpcError>()("Solana
  * The commitment a read waits for. `processed` is left out: a processed block can still be dropped.
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export type SolanaCommitment = "confirmed" | "finalized"
 
@@ -135,7 +135,7 @@ export type SolanaCommitment = "confirmed" | "finalized"
  * `until` when given, at most `limit` (the node's default and maximum is 1000).
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export interface SolanaSignaturesQuery {
   readonly address: SolanaAddress
@@ -152,7 +152,7 @@ export interface SolanaSignaturesQuery {
  * it. `err` is the raw transaction error as JSON (integers as decimal strings), `null` when the transaction succeeded.
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export interface SolanaSignatureInfo {
   readonly signature: SolanaTransactionHash
@@ -168,7 +168,7 @@ export interface SolanaSignatureInfo {
  * exact and the value can be stored as is. It is `null` when the node does not have it.
  *
  * @since 0.1.0
- * @category Models
+ * @category models
  */
 export interface SolanaTransactionInfo {
   readonly slot: bigint
@@ -179,7 +179,7 @@ export interface SolanaTransactionInfo {
 
 /**
  * @since 0.1.0
- * @category Services
+ * @category services
  */
 export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly network: SolanaNetwork
@@ -199,13 +199,6 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
     readonly commitment: SolanaCommitment
   }) => Effect.Effect<SolanaTransactionInfo, SolanaRpcError>
 }>()("@effect-blockchain/solana/SolanaRpc") {}
-
-// `--expected-genesis-hash` of each cluster, https://docs.anza.xyz/clusters/available
-const genesisHashes: { readonly [N in SolanaNetwork]: string } = {
-  Solana: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
-  SolanaDevnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-  SolanaTestnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
-}
 
 const fallbackReasons: ReadonlySet<SolanaRpcErrorReason> = new Set([
   "Unavailable",
@@ -258,7 +251,7 @@ type NetworkCheck = "Unchecked" | "Checked" | SolanaRpcError
  * Requests use the global `fetch`.
  *
  * @since 0.1.0
- * @category Layers
+ * @category layers
  */
 export const layer = (options: {
   readonly network: SolanaNetwork
@@ -271,7 +264,7 @@ export const layer = (options: {
     SolanaRpc,
     Effect.gen(function*() {
       const { network } = options
-      const expectedGenesisHash = genesisHashes[network]
+      const expectedGenesisHash = toGenesisHash(network)
       const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
       const retry = {
         times: options.retries ?? 3,
