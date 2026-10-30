@@ -179,7 +179,7 @@ export interface StarknetTransactionReceipt {
 export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly network: StarknetNetwork.StarknetNetwork
   /** `starknet_chainId`, verified against `network` once per endpoint then served from that check. */
-  readonly chainId: Effect.Effect<StarknetNetwork.StarknetNetworkInfo["chainId"], StarknetRpcError>
+  readonly chainId: Effect.Effect<StarknetNetwork.StarknetChainId, StarknetRpcError>
   /** `starknet_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, StarknetRpcError>
   /**
@@ -270,7 +270,7 @@ export const layer = (options: {
     StarknetRpc,
     Effect.gen(function*() {
       const { network } = options
-      const expectedChainId = StarknetNetwork.starknetNetworks[network].chainId
+      const expectedChainId = StarknetNetwork.toChainId(network)
       const timeout = options.timeout ?? Duration.seconds(30)
 
       const client = (yield* HttpClient.HttpClient).pipe(

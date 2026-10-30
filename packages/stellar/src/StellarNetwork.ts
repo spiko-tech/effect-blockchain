@@ -1,5 +1,5 @@
 /**
- * Stellar networks and their passphrases.
+ * Named Stellar networks and their passphrases.
  *
  * @since 0.1.0
  */
@@ -9,19 +9,21 @@ import * as Schema from "effect/Schema"
  * @since 0.1.0
  * @category constants
  */
-export const STELLAR_MAINNET_NETWORKS = ["Stellar"] as const
+export const mainnets = ["Stellar"] as const
 
 /**
  * @since 0.1.0
  * @category constants
  */
-export const STELLAR_TESTNET_NETWORKS = ["StellarTestnet"] as const
+export const testnets = ["StellarTestnet"] as const
 
 /**
+ * Every supported network, mainnets first.
+ *
  * @since 0.1.0
  * @category constants
  */
-export const STELLAR_NETWORKS = [...STELLAR_MAINNET_NETWORKS, ...STELLAR_TESTNET_NETWORKS] as const
+export const networks = [...mainnets, ...testnets] as const
 
 /**
  * A named Stellar network: `Stellar` (public mainnet) or `StellarTestnet`.
@@ -29,7 +31,7 @@ export const STELLAR_NETWORKS = [...STELLAR_MAINNET_NETWORKS, ...STELLAR_TESTNET
  * @since 0.1.0
  * @category schemas
  */
-export const StellarNetwork = Schema.Literals(STELLAR_NETWORKS).annotate({
+export const StellarNetwork = Schema.Literals(networks).annotate({
   identifier: "StellarNetwork",
   title: "StellarNetwork",
   description: "a Stellar network name"
@@ -41,14 +43,23 @@ export const StellarNetwork = Schema.Literals(STELLAR_NETWORKS).annotate({
  */
 export type StellarNetwork = typeof StellarNetwork.Type
 
-/**
- * Network passphrases, used to sign transactions (same values as `Networks.PUBLIC` / `Networks.TESTNET` in
- * `@stellar/stellar-sdk`).
- *
- * @since 0.1.0
- * @category constants
- */
-export const STELLAR_NETWORK_PASSPHRASES: { readonly [N in StellarNetwork]: string } = {
+// same values as `Networks.PUBLIC` / `Networks.TESTNET` in `@stellar/stellar-sdk`
+const passphrases: Record<StellarNetwork, string> = {
   Stellar: "Public Global Stellar Network ; September 2015",
   StellarTestnet: "Test SDF Network ; September 2015"
 }
+
+/**
+ * The network passphrase, used to sign transactions and reported by `getNetwork`.
+ *
+ * @since 0.1.0
+ * @category conversions
+ */
+export const toPassphrase = (network: StellarNetwork): string => passphrases[network]
+
+/**
+ * @since 0.1.0
+ * @category predicates
+ */
+export const isTestnet = (network: StellarNetwork): boolean =>
+  (testnets as ReadonlyArray<StellarNetwork>).includes(network)

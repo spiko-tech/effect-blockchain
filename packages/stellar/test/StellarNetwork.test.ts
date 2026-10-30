@@ -1,4 +1,11 @@
-import { STELLAR_NETWORK_PASSPHRASES, StellarNetwork } from "@effect-blockchain/stellar/StellarNetwork"
+import {
+  isTestnet,
+  mainnets,
+  networks,
+  StellarNetwork,
+  testnets,
+  toPassphrase
+} from "@effect-blockchain/stellar/StellarNetwork"
 import { describe, expect, it } from "@effect/vitest"
 import { Networks } from "@stellar/stellar-sdk"
 import * as Schema from "effect/Schema"
@@ -14,6 +21,11 @@ describe("StellarNetwork", () => {
   })
 
   it("should match the stellar-sdk passphrases", () => {
-    expect(STELLAR_NETWORK_PASSPHRASES).toStrictEqual({ Stellar: Networks.PUBLIC, StellarTestnet: Networks.TESTNET })
+    expect(networks.map(toPassphrase)).toStrictEqual([Networks.PUBLIC, Networks.TESTNET])
+  })
+
+  it("should tag testnets", () => {
+    expect(networks.map(isTestnet)).toStrictEqual([false, true])
+    expect(networks.length).toBe(mainnets.length + testnets.length)
   })
 })

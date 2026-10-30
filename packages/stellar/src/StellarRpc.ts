@@ -254,7 +254,7 @@ export const layer = (options: {
     StellarRpc,
     Effect.gen(function*() {
       const { network } = options
-      const passphrase = StellarNetwork.STELLAR_NETWORK_PASSPHRASES[network]
+      const passphrase = StellarNetwork.toPassphrase(network)
       const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,

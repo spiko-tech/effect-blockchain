@@ -1,4 +1,11 @@
-import { isSolanaNetwork, SOLANA_NETWORK_KINDS, SolanaNetwork } from "@effect-blockchain/solana/SolanaNetwork"
+import {
+  isTestnet,
+  mainnets,
+  networks,
+  SolanaNetwork,
+  testnets,
+  toGenesisHash
+} from "@effect-blockchain/solana/SolanaNetwork"
 import { describe, expect, it } from "@effect/vitest"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
@@ -14,14 +21,16 @@ describe("SolanaNetwork", () => {
     expect(Schema.decodeUnknownResult(SolanaNetwork)("Ethereum")).toStrictEqual(
       Result.fail(expect.objectContaining({ _tag: "SchemaError" }))
     )
-    expect(isSolanaNetwork("solana")).toBe(false)
+    expect(Schema.is(SolanaNetwork)("solana")).toBe(false)
   })
 
   it("tags mainnet and testnets", () => {
-    expect(SOLANA_NETWORK_KINDS).toStrictEqual({
-      Solana: "mainnet",
-      SolanaDevnet: "testnet",
-      SolanaTestnet: "testnet"
-    })
+    expect(networks.map(isTestnet)).toStrictEqual([false, true, true])
+    expect(networks.length).toBe(mainnets.length + testnets.length)
+  })
+
+  it("has a distinct genesis hash per network", () => {
+    expect(toGenesisHash("Solana")).toBe("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
+    expect(new Set(networks.map(toGenesisHash)).size).toBe(networks.length)
   })
 })

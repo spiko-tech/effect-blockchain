@@ -1,17 +1,35 @@
 /**
- * Starknet networks.
+ * Named Starknet networks and their chain IDs.
  *
  * @since 0.1.0
  */
 import * as Schema from "effect/Schema"
 
 /**
- * A named Starknet network.
+ * @since 0.1.0
+ * @category constants
+ */
+export const mainnets = ["Starknet"] as const
+
+/**
+ * @since 0.1.0
+ * @category constants
+ */
+export const testnets = ["StarknetSepolia"] as const
+
+/**
+ * Every supported network, mainnets first.
  *
+ * @since 0.1.0
+ * @category constants
+ */
+export const networks = [...mainnets, ...testnets] as const
+
+/**
  * @since 0.1.0
  * @category schemas
  */
-export const StarknetNetwork = Schema.Literals(["Starknet", "StarknetSepolia"]).annotate({
+export const StarknetNetwork = Schema.Literals(networks).annotate({
   identifier: "StarknetNetwork",
   title: "StarknetNetwork",
   description: "a Starknet network name: \"Starknet\" (mainnet) or \"StarknetSepolia\" (testnet)"
@@ -24,25 +42,37 @@ export const StarknetNetwork = Schema.Literals(["Starknet", "StarknetSepolia"]).
 export type StarknetNetwork = typeof StarknetNetwork.Type
 
 /**
- * Static metadata of a Starknet network. `chainId` is the protocol chain
- * identifier as a short string.
+ * A Starknet chain ID, the short string `starknet_chainId` returns.
  *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const StarknetChainId = Schema.Literals(["SN_MAIN", "SN_SEPOLIA"]).annotate({
+  identifier: "StarknetChainId",
+  title: "Starknet chain ID",
+  description: "a Starknet chain ID as a short string: \"SN_MAIN\" or \"SN_SEPOLIA\""
+})
+
+/**
  * @since 0.1.0
  * @category models
  */
-export interface StarknetNetworkInfo {
-  readonly name: string
-  readonly chainId: "SN_MAIN" | "SN_SEPOLIA"
-  readonly type: "mainnet" | "testnet"
+export type StarknetChainId = typeof StarknetChainId.Type
+
+const chainIds: Record<StarknetNetwork, StarknetChainId> = {
+  Starknet: "SN_MAIN",
+  StarknetSepolia: "SN_SEPOLIA"
 }
 
 /**
- * Metadata of every Starknet network, keyed by network.
- *
  * @since 0.1.0
- * @category constants
+ * @category conversions
  */
-export const starknetNetworks: { readonly [N in StarknetNetwork]: StarknetNetworkInfo } = {
-  Starknet: { name: "Starknet", chainId: "SN_MAIN", type: "mainnet" },
-  StarknetSepolia: { name: "Starknet Sepolia", chainId: "SN_SEPOLIA", type: "testnet" }
-}
+export const toChainId = (network: StarknetNetwork): StarknetChainId => chainIds[network]
+
+/**
+ * @since 0.1.0
+ * @category predicates
+ */
+export const isTestnet = (network: StarknetNetwork): boolean =>
+  (testnets as ReadonlyArray<StarknetNetwork>).includes(network)
