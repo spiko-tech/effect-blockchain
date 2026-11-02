@@ -43,7 +43,8 @@ const defaults: Node = { starknet_chainId: () => ({ result: SN_MAIN }) }
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
   nodes: Record<string, Node>,
-  options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
+  // `defaults` builds the layer without retries, retryDelay and timeout
+  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly defaults?: boolean } = {}
 ) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -63,9 +64,7 @@ const setup = (
   const layer = StarknetRpc.layer({
     network: "Starknet",
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    retries: options.retries ?? 0,
-    retryDelay: "1 millis",
-    timeout: options.timeout
+    ...(!options.defaults && { retries: options.retries ?? 0, retryDelay: "1 millis", timeout: options.timeout })
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: StarknetRpc.StarknetRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
@@ -118,7 +117,7 @@ describe("StarknetRpc", () => {
           events: [Schema.decodeUnknownSync(StarknetEvent)(rawEvent())],
           cursor: undefined
         })
-        expect(yield* rpc.getTransactionReceipt(TX)).toStrictEqual({
+        expect(yield* rpc.getTransactionReceipt({ transactionHash: TX })).toStrictEqual({
           transactionHash: TX,
           blockNumber: BigInt(10),
           blockHash: baseEvent.block_hash,
@@ -228,13 +227,17 @@ describe("StarknetRpc", () => {
       }
     }))
 
+  // like fetch, hang until aborted
+  const hang: Node[string] = (_, signal) =>
+    new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
+
   // live clock: the timeout and the retry backoff sleep for real
   it.live("classifies a timeout and a transport error as Unavailable", () =>
     Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      const timedOut = yield* failure(hang, { timeout: "20 millis" })
+      expect(timedOut.reason).toBe("Unavailable")
+      assert.instanceOf(timedOut.cause, Error)
+      expect(timedOut.cause.message).toBe("timed out after 20ms")
       expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
     }))
 
@@ -308,6 +311,46 @@ describe("StarknetRpc", () => {
         "a:starknet_blockNumber",
         "b:starknet_chainId",
         "b:starknet_blockNumber"
+      ])
+    }))
+  })
+
+  it.live("does not retry a timeout and falls back", () => {
+    let aborted = 0
+    const { calls, run } = setup({
+      a: {
+        starknet_blockNumber: (params, signal) => {
+          signal?.addEventListener("abort", () => aborted++)
+          return hang(params, signal)
+        }
+      },
+      b: { starknet_blockNumber: head(7) }
+    }, { retries: 2, timeout: "20 millis" })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(aborted).toBe(1)
+      expect(calls).toStrictEqual([
+        "a:starknet_chainId",
+        "a:starknet_blockNumber",
+        "b:starknet_chainId",
+        "b:starknet_blockNumber"
+      ])
+    }))
+  })
+
+  // live clock: the default backoff from 500 millis sleeps for real
+  it.live("uses the default retries and retry delay", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: { starknet_blockNumber: () => ++attempts <= 2 ? new Response("down", { status: 503 }) : head(7)() }
+    }, { defaults: true })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual([
+        "a:starknet_chainId",
+        "a:starknet_blockNumber",
+        "a:starknet_blockNumber",
+        "a:starknet_blockNumber"
       ])
     }))
   })
@@ -435,7 +478,7 @@ describe("StarknetRpc", () => {
         a: { starknet_getTransactionReceipt: missing },
         b: { starknet_getTransactionReceipt: () => ({ result: { transaction_hash: TX, events: [] } }) }
       })
-      const error = yield* run((rpc) => Effect.flip(rpc.getTransactionReceipt(TX)))
+      const error = yield* run((rpc) => Effect.flip(rpc.getTransactionReceipt({ transactionHash: TX })))
       // b's receipt is pre-confirmed: no block
       expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
       assert.instanceOf(error.cause, AggregateError)
