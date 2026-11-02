@@ -5,10 +5,10 @@
  * {@link SolanaRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`getGenesisHash`), once.
  *
- * Requests go through `@solana/kit`'s HTTP transport, which reads every JSON integer as an exact `bigint`: lamport
+ * Requests go through the provided `HttpClient`. Every JSON integer in a reply is read as an exact `bigint`: lamport
  * amounts above 2^53 are never rounded.
  *
- * Every method is a read and safe to repeat, which is what makes the fallback and the retries sound. A future write
+ * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future write
  * method (e.g. `sendTransaction`) must take a transaction signed outside this module, resend the same signed bytes on
  * fallback, never retry blindly after an unclear failure and confirm the outcome by signature.
  *
@@ -23,9 +23,6 @@
  * @since 0.1.0
  */
 import {
-  createDefaultRpcTransport,
-  getSolanaErrorFromJsonRpcError,
-  isSolanaError,
   SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_CLEANED_UP,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_NOT_AVAILABLE,
@@ -36,13 +33,19 @@ import {
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SLOT_SKIPPED,
-  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE,
-  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR
+  SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE
 } from "@solana/kit"
 import type * as Arr from "effect/Array"
+import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
+import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import { constTrue } from "effect/Function"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientError from "effect/http/HttpClientError"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import type * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Redacted from "effect/Redacted"
@@ -50,7 +53,7 @@ import * as Result from "effect/Result"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import * as SynchronizedRef from "effect/SynchronizedRef"
-import { redactRpcUrl } from "./internal/redactRpcUrl.ts"
+import * as BigIntJson from "./internal/bigIntJson.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { SolanaAddress } from "./SolanaAddress.ts"
 import { type SolanaNetwork, toGenesisHash } from "./SolanaNetwork.ts"
@@ -73,7 +76,7 @@ export interface SolanaRpcEndpoint {
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
  * | `Unavailable` | transport error, timeout, any HTTP error status, node unhealthy or internal error, after retries | yes |
- * | `InvalidResponse` | the result fails its schema | yes |
+ * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
  * | `Lagging` | the endpoint has not reached `minContextSlot`, or the block is not available yet | yes |
  * | `Pruned` | the endpoint lacks the requested history, e.g. `getTransaction` returns `null` | yes |
  * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
@@ -223,32 +226,58 @@ const codeReasons: ReadonlyMap<number, SolanaRpcErrorReason> = new Map([
   [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_KEY_EXCLUDED_FROM_SECONDARY_INDEX, "Pruned"]
 ])
 
-// a 4xx other than 408 / 429 (e.g. a bad API key) will not change on retry, but the next endpoint may accept it
-const isRetryable = (error: SolanaRpcError) =>
-  error.reason === "Unavailable" &&
-  !(error.code !== undefined && error.code >= 400 && error.code < 500 && error.code !== 408 && error.code !== 429)
+class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
 
-// `Retry-After` in seconds or as an HTTP date
-const retryAfter = (error: SolanaRpcError, now: number): Duration.Duration => {
-  if (!isSolanaError(error.cause, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR)) return Duration.zero
-  const header = error.cause.context.headers.get("retry-after")
-  if (header === null) return Duration.zero
-  const seconds = Number(header)
-  const millis = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - now
-  return millis > 0 ? Duration.millis(millis) : Duration.zero
+type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+
+// the `Unavailable` codes: the endpoint is struggling, retry then fall back
+const isTransientRpcError = (error: unknown) =>
+  error instanceof JsonRpcError && codeReasons.get(error.code) === "Unavailable"
+
+// the reply body, every JSON integer as an exact `bigint`
+const bodyOf = (response: HttpClientResponse.HttpClientResponse) =>
+  Effect.flatMap(response.text, (text) =>
+    Effect.try({
+      try: () => BigIntJson.parse(text),
+      catch: (cause) =>
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.DecodeError({ request: response.request, response, cause })
+        })
+    }))
+
+const classify = (
+  error: SendError
+): { readonly reason: SolanaRpcErrorReason; readonly code?: number | undefined } => {
+  if (error instanceof JsonRpcError) return { reason: codeReasons.get(error.code) ?? "Rejected", code: error.code }
+  if (HttpClientError.isHttpClientError(error)) {
+    switch (error.reason._tag) {
+      case "StatusCodeError":
+        return { reason: "Unavailable", code: error.reason.response.status }
+      case "DecodeError":
+      case "EmptyBodyError":
+        return { reason: "InvalidResponse" }
+    }
+  }
+  return { reason: "Unavailable" }
 }
+
+// HttpClientError messages and causes can carry the request URL: keep the reason and status only
+const withoutUrl = (error: SendError): Error =>
+  HttpClientError.isHttpClientError(error)
+    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
+    : error
 
 type NetworkCheck = "Unchecked" | "Checked" | SolanaRpcError
 
 /**
- * Builds a {@link SolanaRpc} over `endpoints`, tried in order.
+ * Builds a {@link SolanaRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
+ * (e.g. `FetchHttpClient.layer`).
  *
- * - `timeout` bounds each attempt and aborts its request, default 30 seconds.
- * - `retries` is the number of retries per endpoint before falling back, default 3. `Unavailable` failures are
- *   retried, except HTTP 4xx statuses other than 408 and 429, with an exponential backoff from `retryDelay`
- *   (default 500 millis) with jitter, waiting at least `Retry-After` when the endpoint sends it.
- *
- * Requests use the global `fetch`.
+ * - `timeout` bounds each attempt, default 30 seconds.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (429, -32603, -32005, -32019) are retried with an
+ *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
+ *   status (e.g. 403) is not retried and falls back at once.
  *
  * @since 0.1.0
  * @category layers
@@ -259,32 +288,43 @@ export const layer = (options: {
   readonly timeout?: Duration.Input | undefined
   readonly retries?: number | undefined
   readonly retryDelay?: Duration.Input | undefined
-}): Layer.Layer<SolanaRpc> =>
+}): Layer.Layer<SolanaRpc, never, HttpClient.HttpClient> =>
   Layer.effect(
     SolanaRpc,
     Effect.gen(function*() {
       const { network } = options
       const expectedGenesisHash = toGenesisHash(network)
-      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
-      const retry = {
-        times: options.retries ?? 3,
-        while: isRetryable,
-        schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(
-          Schedule.jittered,
-          Schedule.setInputType<SolanaRpcError>(),
-          Schedule.modifyDelay(({ duration, input, now }) =>
-            Effect.succeed(Duration.max(duration, retryAfter(input, now)))
+      const timeout = options.timeout ?? Duration.seconds(30)
+
+      const client = (yield* HttpClient.HttpClient).pipe(
+        HttpClient.filterStatusOk,
+        // a JSON-RPC error comes with HTTP 200: lift it into the error channel so that it can be retried
+        HttpClient.transformResponse((response) =>
+          response.pipe(
+            Effect.tap((response) =>
+              Effect.flatMap(bodyOf(response), (json) =>
+                Option.match(Schema.decodeUnknownOption(RpcMethods.ErrorReply)(json), {
+                  onNone: () => Effect.void,
+                  onSome: ({ error }) =>
+                    Effect.fail(new JsonRpcError({ code: Number(error.code), message: error.message }))
+                }))
+            ),
+            Effect.timeout(timeout)
           )
-        )
-      }
+        ),
+        HttpClient.retryTransient({
+          retryOn: "errors-only",
+          while: isTransientRpcError,
+          schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(Schedule.jittered),
+          times: options.retries ?? 3
+        })
+      )
 
       const endpoints = yield* Effect.forEach(options.endpoints, (endpoint) =>
         Effect.gen(function*() {
-          const url = Redacted.value(endpoint.url)
           return {
             name: endpoint.name,
-            url,
-            transport: createDefaultRpcTransport({ url }),
+            url: Redacted.value(endpoint.url),
             networkCheck: yield* SynchronizedRef.make<NetworkCheck>("Unchecked")
           }
         }))
@@ -299,50 +339,25 @@ export const layer = (options: {
             Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
           )
           // one request per HTTP call: the id is never matched
-          const payload = { jsonrpc: "2.0", id: 0, method: method.name, params: encoded }
-          const response = yield* Effect.tryPromise({
-            try: (signal) => endpoint.transport({ payload, signal }),
-            catch: (error) =>
+          const json = yield* HttpClientRequest.post(endpoint.url).pipe(
+            HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: method.name, params: encoded }),
+            client.execute,
+            Effect.flatMap(bodyOf),
+            Effect.mapError((error) =>
               new SolanaRpcError({
-                reason: "Unavailable",
-                code: isSolanaError(error, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR)
-                  ? error.context.statusCode
-                  : undefined,
+                ...classify(error),
                 method: method.name,
                 endpoint: endpoint.name,
-                cause: redactRpcUrl(error, endpoint.url)
-              })
-          }).pipe(
-            Effect.timeoutOrElse({
-              duration: timeout,
-              orElse: () =>
-                Effect.fail(
-                  fail(endpoint, method.name, "Unavailable", new Error(`timed out after ${Duration.format(timeout)}`))
-                )
-            }),
-            Effect.flatMap((response) =>
-              Option.match(Schema.decodeUnknownOption(RpcMethods.JsonRpcError)(response), {
-                onNone: () => Effect.succeed(response),
-                onSome: ({ error }) => {
-                  const code = Number(error.code)
-                  return Effect.fail(
-                    new SolanaRpcError({
-                      reason: codeReasons.get(code) ?? "Rejected",
-                      code,
-                      method: method.name,
-                      endpoint: endpoint.name,
-                      cause: getSolanaErrorFromJsonRpcError(error)
-                    })
-                  )
-                }
+                cause: withoutUrl(error)
               })
             ),
-            Effect.retry(retry)
+            // the client span would record the URL
+            Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
           )
-          const decoded = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(response).pipe(
+          const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
             Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
           )
-          return decoded.result
+          return reply.result
         }).pipe(
           Effect.withSpan(`SolanaRpc.${method.name}`, {
             attributes: { network, endpoint: endpoint.name, method: method.name }

@@ -6,7 +6,7 @@ import { SolanaAddress } from "../SolanaAddress.ts"
 import { SolanaTransactionHash } from "../SolanaTransactionHash.ts"
 
 /**
- * JSON as `@solana/kit`'s transport writes and reads it: every integer is a `bigint`, so u64 values stay exact.
+ * JSON as `internal/bigIntJson.ts` reads it: every integer is a `bigint`, so u64 values stay exact.
  *
  * @internal
  */
@@ -26,7 +26,7 @@ export type RpcJson =
  */
 export interface RpcMethod<Params, Result> {
   readonly name: string
-  readonly params: Schema.Codec<Params, ReadonlyArray<RpcJson>>
+  readonly params: Schema.Codec<Params, ReadonlyArray<Schema.Json>>
   readonly result: Schema.Codec<Result, RpcJson>
 }
 
@@ -69,12 +69,17 @@ const optionalOmitted = <S extends Schema.Top>(schema: S) =>
     )
   )
 
+// a `bigint` param sent as a JSON integer, e.g. a slot: encoding fails beyond the safe integers
+const BigIntFromInt = Schema.Int.pipe(
+  Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
+)
+
 const NoParams = Schema.Tuple([])
 
 const Commitment = Schema.Literals(["confirmed", "finalized"])
 
 /** @internal */
-export const JsonRpcError = Schema.Struct({
+export const ErrorReply = Schema.Struct({
   error: Schema.Struct({
     code: Schema.Union([Schema.BigInt, Schema.Number]),
     message: Schema.String,
@@ -102,7 +107,7 @@ export const getSignaturesForAddress = make({
       until: optionalOmitted(SolanaTransactionHash),
       limit: optionalOmitted(Schema.Int),
       commitment: Commitment,
-      minContextSlot: optionalOmitted(Schema.BigInt)
+      minContextSlot: optionalOmitted(BigIntFromInt)
     })
   ]),
   result: Schema.Array(Schema.Struct({
