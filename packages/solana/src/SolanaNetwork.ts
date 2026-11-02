@@ -3,6 +3,7 @@
  *
  * @since 0.1.0
  */
+import { isBlockhash } from "@solana/kit"
 import * as Schema from "effect/Schema"
 
 /**
@@ -43,11 +44,39 @@ export const SolanaNetwork = Schema.Literals(networks).annotate({
  */
 export type SolanaNetwork = typeof SolanaNetwork.Type
 
+// like `SolanaAddress`: always 32 bytes once decoded
+const solanaGenesisHashPattern = "^[2-9A-H][1-9A-HJ-NP-Za-km-z]{43}$"
+
+/**
+ * A Solana genesis hash: a base58-encoded 32-byte hash, validated with `@solana/kit`.
+ *
+ * @since 0.1.0
+ * @category schemas
+ */
+export const SolanaGenesisHash = Schema.String.annotate({
+  title: "Solana genesis hash",
+  description: "a valid Solana genesis hash (base58-encoded 32-byte hash)"
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((s: string) => isBlockhash(s) || `${s} is not a valid Solana genesis hash`, {
+      arbitraryConstraint: { patterns: [{ source: solanaGenesisHashPattern, flags: "" }] }
+    })
+  ),
+  Schema.brand("SolanaGenesisHash"),
+  Schema.annotate({ identifier: "SolanaGenesisHash" })
+)
+
+/**
+ * @since 0.1.0
+ * @category models
+ */
+export type SolanaGenesisHash = typeof SolanaGenesisHash.Type
+
 // `--expected-genesis-hash` of each cluster, https://docs.anza.xyz/clusters/available
-const genesisHashes: Record<SolanaNetwork, string> = {
-  Solana: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
-  SolanaDevnet: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-  SolanaTestnet: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+const genesisHashes: Record<SolanaNetwork, SolanaGenesisHash> = {
+  Solana: SolanaGenesisHash.make("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"),
+  SolanaDevnet: SolanaGenesisHash.make("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"),
+  SolanaTestnet: SolanaGenesisHash.make("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY")
 }
 
 /**
@@ -56,7 +85,7 @@ const genesisHashes: Record<SolanaNetwork, string> = {
  * @since 0.1.0
  * @category conversions
  */
-export const toGenesisHash = (network: SolanaNetwork): string => genesisHashes[network]
+export const toGenesisHash = (network: SolanaNetwork): SolanaGenesisHash => genesisHashes[network]
 
 /**
  * @since 0.1.0
