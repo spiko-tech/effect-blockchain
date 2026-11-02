@@ -22,7 +22,6 @@
  * @since 0.1.0
  */
 import type * as Arr from "effect/Array"
-import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
@@ -61,7 +60,7 @@ export interface StarknetRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, timeout, HTTP error status, `UNEXPECTED_ERROR` (63), internal or rate-limit error codes, after the retries | yes |
+ * | `Unavailable` | transport, HTTP error status, `UNEXPECTED_ERROR` (63), internal or rate-limit error codes, after the retries, or a timeout (not retried) | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or an event fails the `getEvents` checks | yes |
  * | `Lagging` | the endpoint's head is below the requested `toBlock`, or it answers `BLOCK_NOT_FOUND` (24) or `TXN_HASH_NOT_FOUND` (29) | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on Starknet for now) | yes |
@@ -191,7 +190,7 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly getEvents: (filter: StarknetEventsFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
   /** `starknet_getTransactionReceipt`. A pre-confirmed receipt fails with `InvalidResponse`. */
   readonly getTransactionReceipt: (
-    transactionHash: StarknetTransactionHash
+    params: { readonly transactionHash: StarknetTransactionHash }
   ) => Effect.Effect<StarknetTransactionReceipt, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
 
@@ -210,7 +209,14 @@ const laggingCodes: ReadonlySet<number> = new Set([24, 29])
 
 class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
 
-type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+// not a Cause.TimeoutError, which retryTransient would retry: a timed-out attempt falls back at once
+class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeout: Duration.Duration }> {
+  override get message(): string {
+    return `timed out after ${Duration.format(this.timeout)}`
+  }
+}
+
+type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
 
 const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
 
@@ -249,8 +255,9 @@ type NetworkCheck = "Unchecked" | "Checked" | StarknetRpcError
  * Builds a {@link StarknetRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
  * (e.g. `FetchHttpClient.layer`).
  *
- * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
+ *   endpoint at once.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
  *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (63, -32603, -32005, 429) are retried with an
  *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
  *   status (e.g. 403) is not retried and falls back at once.
@@ -270,7 +277,7 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const expectedChainId = StarknetNetwork.toChainId(network)
-      const timeout = options.timeout ?? Duration.seconds(30)
+      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
 
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,
@@ -284,7 +291,11 @@ export const layer = (options: {
                   onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
                 }))
             ),
-            Effect.timeout(timeout)
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(new AttemptTimeout({ timeout }))
+            })
           )
         ),
         HttpClient.retryTransient({
@@ -460,7 +471,7 @@ export const layer = (options: {
         chainId: withFallback((endpoint) => checkNetwork(endpoint).pipe(Effect.as(expectedChainId))),
         blockNumber: withFallback(blockNumberOn),
         getEvents,
-        getTransactionReceipt: (transactionHash) =>
+        getTransactionReceipt: ({ transactionHash }) =>
           withFallback((endpoint) =>
             call(endpoint, RpcMethods.getTransactionReceipt, { transaction_hash: transactionHash })
           )
