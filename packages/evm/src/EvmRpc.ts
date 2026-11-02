@@ -20,7 +20,6 @@
  * @since 0.1.0
  */
 import * as Arr from "effect/Array"
-import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
@@ -60,7 +59,7 @@ export interface EvmRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, timeout, HTTP error status, rate-limit or internal error codes, after the retries | yes |
+ * | `Unavailable` | transport, attempt timeout, HTTP error status, rate-limit or internal error codes, after the retries | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or a log fails the `getLogs` checks | yes |
  * | `Lagging` | the endpoint's head is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
@@ -116,7 +115,7 @@ export class EvmRpcError extends Schema.TaggedError<EvmRpcError>()("EvmRpcError"
  * @since 0.1.0
  * @category models
  */
-export interface EvmLogFilter {
+export interface EvmLogsFilter {
   readonly address: EvmAddress | ReadonlyArray<EvmAddress>
   readonly fromBlock: bigint
   readonly toBlock: bigint
@@ -130,7 +129,7 @@ export interface EvmLogFilter {
 export class EvmRpc extends Context.Service<EvmRpc, {
   readonly network: EvmNetwork.EvmNetwork
   /** `eth_chainId`, verified against `network` once per endpoint then served from that check. */
-  readonly chainId: Effect.Effect<number, EvmRpcError>
+  readonly chainId: Effect.Effect<EvmNetwork.EvmChainId, EvmRpcError>
   /** `eth_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, EvmRpcError>
   /**
@@ -138,7 +137,7 @@ export class EvmRpc extends Context.Service<EvmRpc, {
    * sorted by block then log index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty
    * range returns `[]`.
    */
-  readonly getLogs: (filter: EvmLogFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpcError>
+  readonly getLogs: (filter: EvmLogsFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRpc") {}
 
 const fallbackReasons: ReadonlySet<EvmRpcErrorReason> = new Set([
@@ -154,7 +153,14 @@ const unavailableCodes: ReadonlySet<number> = new Set([-32005, -32603, -32007, -
 
 class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
 
-type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+// not a `Cause.TimeoutError`, which `retryTransient` always retries: a timed-out attempt falls back at once
+class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeout: Duration.Duration }> {
+  override get message(): string {
+    return `timed out after ${Duration.format(this.timeout)}`
+  }
+}
+
+type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
 
 const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
 
@@ -193,10 +199,11 @@ type NetworkCheck = "Unchecked" | "Checked" | EvmRpcError
  * Builds an {@link EvmRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
  * (e.g. `FetchHttpClient.layer`).
  *
- * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (-32005, -32603, -32007, -1, 429) are retried with
- *   an exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
+ * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
+ *   endpoint at once.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
+ *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (-32005, -32603, -32007, -1, 429) are retried with an
+ *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
  *   status (e.g. 403) is not retried and falls back at once.
  *
  * @since 0.1.0
@@ -214,7 +221,7 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const expectedChainId = EvmNetwork.toChainId(network)
-      const timeout = options.timeout ?? Duration.seconds(30)
+      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
 
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,
@@ -228,7 +235,11 @@ export const layer = (options: {
                   onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
                 }))
             ),
-            Effect.timeout(timeout)
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(new AttemptTimeout({ timeout }))
+            })
           )
         ),
         HttpClient.retryTransient({
@@ -341,7 +352,7 @@ export const layer = (options: {
           }
         })
 
-      const getLogsOn = (endpoint: Endpoint, filter: EvmLogFilter) =>
+      const getLogsOn = (endpoint: Endpoint, filter: EvmLogsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getLogs.name
           yield* guard(endpoint, method, filter.toBlock)

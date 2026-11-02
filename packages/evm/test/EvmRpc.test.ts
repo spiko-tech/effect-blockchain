@@ -1,6 +1,7 @@
 import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import { EvmLog } from "@effect-blockchain/evm/EvmLog"
+import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
@@ -44,7 +45,7 @@ const defaults: Node = { eth_chainId: () => ({ result: "0x1" }) }
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
   nodes: Record<string, Node>,
-  options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
+  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly defaults?: boolean } = {}
 ) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -64,9 +65,8 @@ const setup = (
   const layer = EvmRpc.layer({
     network: "Ethereum",
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    retries: options.retries ?? 0,
-    retryDelay: "1 millis",
-    timeout: options.timeout
+    // `defaults` leaves out `retries`, `retryDelay` and `timeout`
+    ...(options.defaults ? {} : { retries: options.retries ?? 0, retryDelay: "1 millis", timeout: options.timeout })
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: EvmRpc.EvmRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
@@ -105,7 +105,7 @@ describe("EvmRpc", () => {
     const { run } = setup({ a: { eth_blockNumber: head(20), eth_getLogs: () => ({ result: [rawLog()] }) } })
     return run((rpc) =>
       Effect.gen(function*() {
-        expect(yield* rpc.chainId).toBe(1)
+        expect(yield* rpc.chainId).toBe(EvmNetwork.toChainId("Ethereum"))
         expect(yield* rpc.blockNumber).toBe(BigInt(20))
         const logs = yield* rpc.getLogs(filter)
         expect(logs).toStrictEqual([Schema.decodeUnknownSync(EvmLog)(rawLog())])
@@ -145,6 +145,10 @@ describe("EvmRpc", () => {
     setup({ a: { eth_blockNumber: reply } }, options).run((rpc) => Effect.flip(rpc.blockNumber))
 
   const down = () => new Response("down", { status: 503 })
+
+  // like fetch, hang until aborted
+  const hang: Node[string] = (_, signal) =>
+    new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
 
   it.effect("falls back in order and stops on Rejected", () =>
     Effect.gen(function*() {
@@ -238,6 +242,35 @@ describe("EvmRpc", () => {
     }))
   })
 
+  it.live("does not retry a timeout and falls back", () => {
+    let aborted = false
+    const { calls, run } = setup({
+      a: {
+        eth_blockNumber: (params, signal) => {
+          signal?.addEventListener("abort", () => aborted = true)
+          return hang(params, signal)
+        }
+      },
+      b: { eth_blockNumber: head(7) }
+    }, { retries: 2, timeout: "20 millis" })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(aborted).toBe(true)
+      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "b:eth_chainId", "b:eth_blockNumber"])
+    }))
+  })
+
+  it.live("uses the default retries and retry delay", () => {
+    let attempts = 0
+    const { calls, run } = setup({ a: { eth_blockNumber: () => ++attempts <= 2 ? down() : head(7)() } }, {
+      defaults: true
+    })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "a:eth_blockNumber", "a:eth_blockNumber"])
+    }))
+  })
+
   it.live("waits for Retry-After", () => {
     let attempts = 0
     const { calls, run } = setup({
@@ -276,10 +309,10 @@ describe("EvmRpc", () => {
   // live clock: the timeout sleeps for real
   it.live("classifies a timeout and a transport error as Unavailable", () =>
     Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      const timeout = yield* failure(hang, { timeout: "20 millis" })
+      expect(timeout.reason).toBe("Unavailable")
+      assert.instanceOf(timeout.cause, Error)
+      expect(timeout.cause.message).toBe("timed out after 20ms")
       expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
     }))
 
