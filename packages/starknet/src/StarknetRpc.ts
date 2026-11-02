@@ -120,7 +120,7 @@ export class StarknetRpcError extends Schema.TaggedError<StarknetRpcError>()("St
  */
 export const StarknetEventsCursor = Schema.Struct({
   endpoint: Schema.String,
-  continuationToken: Schema.String
+  cursor: Schema.String
 }).pipe(Schema.brand("StarknetEventsCursor"))
 
 /**
@@ -139,7 +139,7 @@ export type StarknetEventsCursor = typeof StarknetEventsCursor.Type
  * @since 0.1.0
  * @category models
  */
-export interface StarknetEventFilter {
+export interface StarknetEventsFilter {
   readonly address: StarknetAddress
   readonly fromBlock: bigint
   readonly toBlock: bigint
@@ -183,11 +183,12 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   /** `starknet_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, StarknetRpcError>
   /**
-   * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events keep the
-   * provider's order. A pre-confirmed or out-of-filter event fails with `InvalidResponse`. An empty range returns no
-   * events. With a `cursor`, only the endpoint that returned it is asked.
+   * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events are in chain
+   * order: the provider's order, which is chain order (they are not sorted, as `event_index` is not always returned).
+   * A pre-confirmed or out-of-filter event fails with `InvalidResponse`. An empty range returns no events. With a
+   * `cursor`, only the endpoint that returned it is asked.
    */
-  readonly getEvents: (filter: StarknetEventFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
+  readonly getEvents: (filter: StarknetEventsFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
   /** `starknet_getTransactionReceipt`. A pre-confirmed receipt fails with `InvalidResponse`. */
   readonly getTransactionReceipt: (
     transactionHash: StarknetTransactionHash
@@ -236,13 +237,10 @@ const classify = (
   return { reason: "Unavailable" }
 }
 
-// HttpClientError messages carry the request URL: keep the reason and status only
+// HttpClientError messages and causes can carry the request URL: keep the reason and status only
 const withoutUrl = (error: SendError): Error =>
   HttpClientError.isHttpClientError(error)
-    ? new Error(
-      `${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`,
-      { cause: error.cause }
-    )
+    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
     : error
 
 type NetworkCheck = "Unchecked" | "Checked" | StarknetRpcError
@@ -253,8 +251,9 @@ type NetworkCheck = "Unchecked" | "Checked" | StarknetRpcError
  *
  * - `timeout` bounds each attempt, default 30 seconds.
  * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
- *   408/429/5xx and the `Unavailable` JSON-RPC codes are retried with an exponential backoff from `retryDelay`
- *   (default 500 millis) with jitter, honoring `Retry-After`.
+ *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (63, -32603, -32005, 429) are retried with an
+ *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
+ *   status (e.g. 403) is not retried and falls back at once.
  *
  * @since 0.1.0
  * @category layers
@@ -388,20 +387,35 @@ export const layer = (options: {
           Effect.tap((head) => Ref.update(endpoint.head, (known) => head > known ? head : known))
         )
 
-      const getEventsOn = (endpoint: Endpoint, filter: StarknetEventFilter) =>
+      // an endpoint must have reached toBlock, its head is cached and only refreshed when it is below
+      const guard = (endpoint: Endpoint, method: string, toBlock: bigint) =>
+        Effect.gen(function*() {
+          if ((yield* Ref.get(endpoint.head)) >= toBlock) return
+          const head = yield* blockNumberOn(endpoint)
+          if (head < toBlock) {
+            return yield* fail(endpoint, method, "Lagging", new Error(`head ${head} is below toBlock ${toBlock}`))
+          }
+        })
+
+      // a cursor only means something to the endpoint that issued it
+      const endpointOf = (method: string, cursor: StarknetEventsCursor): Effect.Effect<Endpoint, StarknetRpcError> => {
+        const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
+        return endpoint === undefined
+          ? Effect.fail(
+            new StarknetRpcError({
+              reason: "Rejected",
+              method,
+              endpoint: cursor.endpoint,
+              cause: new Error(`no endpoint named ${cursor.endpoint}`)
+            })
+          )
+          : Effect.succeed(endpoint)
+      }
+
+      const getEventsOn = (endpoint: Endpoint, filter: StarknetEventsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getEvents.name
-          if ((yield* Ref.get(endpoint.head)) < filter.toBlock) {
-            const head = yield* blockNumberOn(endpoint)
-            if (head < filter.toBlock) {
-              return yield* fail(
-                endpoint,
-                method,
-                "Lagging",
-                new Error(`head ${head} is below toBlock ${filter.toBlock}`)
-              )
-            }
-          }
+          yield* guard(endpoint, method, filter.toBlock)
           const page = yield* call(endpoint, RpcMethods.getEvents, {
             filter: {
               address: filter.address,
@@ -409,7 +423,7 @@ export const layer = (options: {
               to_block: { block_number: filter.toBlock },
               ...(filter.keys !== undefined && { keys: filter.keys }),
               chunk_size: filter.chunkSize ?? 1000,
-              ...(filter.cursor !== undefined && { continuation_token: filter.cursor.continuationToken })
+              ...(filter.cursor !== undefined && { continuation_token: filter.cursor.cursor })
             }
           })
           const invalid = page.events.find((event) =>
@@ -428,27 +442,17 @@ export const layer = (options: {
             events: page.events,
             cursor: page.continuation_token === undefined ? undefined : StarknetEventsCursor.make({
               endpoint: endpoint.name,
-              continuationToken: page.continuation_token
+              cursor: page.continuation_token
             })
           }
         })
 
-      const getEvents = (filter: StarknetEventFilter): Effect.Effect<StarknetEventsPage, StarknetRpcError> => {
-        const { cursor } = filter
+      const getEvents = (filter: StarknetEventsFilter): Effect.Effect<StarknetEventsPage, StarknetRpcError> => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
-        if (cursor === undefined) return withFallback((endpoint) => getEventsOn(endpoint, filter))
-        // a continuation token only means something to the endpoint that issued it
-        const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
-        return endpoint === undefined
-          ? Effect.fail(
-            new StarknetRpcError({
-              reason: "Rejected",
-              method: RpcMethods.getEvents.name,
-              endpoint: cursor.endpoint,
-              cause: new Error(`unknown endpoint ${cursor.endpoint} in cursor`)
-            })
-          )
-          : getEventsOn(endpoint, filter)
+        if (filter.cursor === undefined) return withFallback((endpoint) => getEventsOn(endpoint, filter))
+        return endpointOf(RpcMethods.getEvents.name, filter.cursor).pipe(
+          Effect.flatMap((endpoint) => getEventsOn(endpoint, filter))
+        )
       }
 
       return StarknetRpc.of({
