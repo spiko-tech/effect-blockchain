@@ -275,6 +275,10 @@ importers:
         version: 2.57.11(typescript@7.0.2)
 
   packages/solana:
+    dependencies:
+      '@effect-blockchain/core':
+        specifier: workspace:^
+        version: link:../core
     devDependencies:
       '@effect/vitest':
         specifier: 4.1.0
