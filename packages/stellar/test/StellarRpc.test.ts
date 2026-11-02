@@ -67,7 +67,7 @@ const defaults: Node = {
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
   nodes: Record<string, Node>,
-  options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
+  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly layerDefaults?: boolean } = {}
 ) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -85,9 +85,9 @@ const setup = (
   const layer = StellarRpc.layer({
     network: "Stellar",
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    retries: options.retries ?? 0,
-    retryDelay: "1 millis",
-    timeout: options.timeout
+    ...(options.layerDefaults
+      ? {}
+      : { retries: options.retries ?? 0, retryDelay: "1 millis", timeout: options.timeout })
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: StellarRpc.StellarRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
@@ -95,6 +95,10 @@ const setup = (
     }).pipe(Effect.provide(layer))
   return { calls, run }
 }
+
+// like fetch, hang until aborted
+const hang: Node[string] = (_, signal) =>
+  new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
 
 const filter = { contractIds: [CONTRACT] as const, fromBlock: BigInt(10), toBlock: BigInt(20) }
 
@@ -220,10 +224,10 @@ describe("StellarRpc", () => {
 
   it.live("classifies a timeout and a transport error as Unavailable", () =>
     Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      const timedOut = yield* failure(hang, { timeout: "20 millis" })
+      expect(timedOut.reason).toBe("Unavailable")
+      assert.instanceOf(timedOut.cause, Error)
+      expect(timedOut.cause.message).toBe("timed out after 20ms")
       const down = () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
       expect((yield* failure(down)).reason).toBe("Unavailable")
     }))
@@ -303,6 +307,38 @@ describe("StellarRpc", () => {
       )
       yield* rejected.run((rpc) => Effect.flip(rpc.getLatestLedger))
       expect(rejected.calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger"])
+    }))
+
+  it.live("does not retry a timeout and falls back", () =>
+    Effect.gen(function*() {
+      let aborted = false
+      const { calls, run } = setup({
+        a: {
+          getLatestLedger: (params, signal) => {
+            signal?.addEventListener("abort", () => aborted = true)
+            return hang(params, signal)
+          }
+        },
+        b: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
+      }, { retries: 2, timeout: "20 millis" })
+      expect((yield* run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
+      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "b:getNetwork", "b:getLatestLedger"])
+      expect(aborted).toBe(true)
+    }))
+
+  it.live("uses the default retries and retry delay", () =>
+    Effect.gen(function*() {
+      let attempts = 0
+      const { calls, run } = setup({
+        a: {
+          getLatestLedger: () =>
+            ++attempts <= 2
+              ? new Response("busy", { status: 503 })
+              : { result: { id: "ab", protocolVersion: 23, sequence: 5 } }
+        }
+      }, { layerDefaults: true })
+      expect((yield* run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
+      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "a:getLatestLedger", "a:getLatestLedger"])
     }))
 
   it.live("waits for Retry-After", () =>
