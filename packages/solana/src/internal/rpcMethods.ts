@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Option from "effect/Option"
 import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
@@ -19,18 +20,7 @@ export type RpcJson =
   | ReadonlyArray<RpcJson>
   | { readonly [key: string]: RpcJson }
 
-/**
- * A JSON-RPC method: its name, the codec of its positional params and the codec of its result.
- *
- * @internal
- */
-export interface RpcMethod<Params, Result> {
-  readonly name: string
-  readonly params: Schema.Codec<Params, ReadonlyArray<Schema.Json>>
-  readonly result: Schema.Codec<Result, RpcJson>
-}
-
-const make = <Params, Result>(method: RpcMethod<Params, Result>): RpcMethod<Params, Result> => method
+const make = <Params, Result>(method: JsonRpc.Method<Params, Result, RpcJson>) => method
 
 const RpcJson: Schema.Codec<RpcJson> = Schema.Union([
   Schema.Null,
@@ -77,15 +67,6 @@ const BigIntFromInt = Schema.Int.pipe(
 const NoParams = Schema.Tuple([])
 
 const Commitment = Schema.Literals(["confirmed", "finalized"])
-
-/** @internal */
-export const ErrorReply = Schema.Struct({
-  error: Schema.Struct({
-    code: Schema.Union([Schema.BigInt, Schema.Number]),
-    message: Schema.String,
-    data: Schema.optionalKey(RpcJson)
-  })
-})
 
 /** @internal */
 export const getGenesisHash = make({ name: "getGenesisHash", params: NoParams, result: Schema.String })
