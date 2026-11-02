@@ -63,3 +63,10 @@ export const getEvents = make({
   }),
   result: Schema.Struct({ events: Schema.Array(StellarContractEvent), cursor: Cursor, latestLedger: LedgerFromNumber })
 })
+
+/**
+ * A JSON-RPC error reply.
+ *
+ * @internal
+ */
+export const ErrorReply = Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) })
