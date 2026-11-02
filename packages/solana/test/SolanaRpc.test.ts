@@ -32,7 +32,7 @@ const defaults: Node = { getGenesisHash: () => ({ result: MAINNET_GENESIS }) }
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
   nodes: Record<string, Node>,
-  options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
+  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly defaults?: boolean } = {}
 ) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -49,13 +49,18 @@ const setup = (
   }
   const names = Object.keys(nodes)
   if (!Arr.isReadonlyArrayNonEmpty(names)) throw new Error("setup needs at least one endpoint")
-  const layer = SolanaRpc.layer({
-    network: "Solana",
-    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    retries: options.retries ?? 0,
-    retryDelay: "1 millis",
-    timeout: options.timeout
-  }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
+  const endpoints = Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) }))
+  const layer = SolanaRpc.layer(
+    options.defaults
+      ? { network: "Solana", endpoints }
+      : {
+        network: "Solana",
+        endpoints,
+        retries: options.retries ?? 0,
+        retryDelay: "1 millis",
+        timeout: options.timeout
+      }
+  ).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: SolanaRpc.SolanaRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
       return yield* f(yield* SolanaRpc.SolanaRpc)
@@ -339,6 +344,15 @@ describe("SolanaRpc", () => {
     }))
   })
 
+  // like fetch, hang until aborted, then reject with the abort reason
+  const hang = (aborted: Array<boolean> = []): Node[string] => (_, signal) =>
+    new Promise((_, reject) =>
+      signal?.addEventListener("abort", () => {
+        aborted.push(signal.aborted)
+        reject(signal.reason)
+      })
+    )
+
   const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
     setup({ a: { getSlot: reply } }, options).run((rpc) => Effect.flip(rpc.getSlot(confirmed)))
 
@@ -353,12 +367,37 @@ describe("SolanaRpc", () => {
   // live clock: the timeout sleeps for real
   it.live("classifies a timeout and a transport error as Unavailable", () =>
     Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      const timedOut = yield* failure(hang(), { timeout: "20 millis" })
+      expect(timedOut.reason).toBe("Unavailable")
+      expect(timedOut.cause).toMatchObject({ _tag: "AttemptTimeout", message: "timed out after 20ms" })
       expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
     }))
+
+  // live clock: the timeout sleeps for real
+  it.live("does not retry a timeout and falls back", () =>
+    Effect.gen(function*() {
+      const aborted: Array<boolean> = []
+      const { calls, run } = setup({ a: { getSlot: hang(aborted) }, b: { getSlot: slot(7) } }, {
+        retries: 2,
+        timeout: "20 millis"
+      })
+      expect(yield* run((rpc) => rpc.getSlot(confirmed))).toBe(BigInt(7))
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "b:getGenesisHash", "b:getSlot"])
+      // the timed-out request was really interrupted
+      expect(aborted).toStrictEqual([true])
+    }))
+
+  // live clock: the default retry delay sleeps for real
+  it.live("uses the default retries and retry delay", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: { getSlot: () => ++attempts <= 2 ? new Response("busy", { status: 503 }) : { result: 5 } }
+    }, { defaults: true })
+    return run((rpc) => rpc.getSlot(confirmed)).pipe(Effect.map((value) => {
+      expect(value).toBe(BigInt(5))
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "a:getSlot", "a:getSlot"])
+    }))
+  })
 
   it.effect("classifies JSON-RPC codes", () =>
     Effect.gen(function*() {

@@ -36,7 +36,6 @@ import {
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE
 } from "@solana/kit"
 import type * as Arr from "effect/Array"
-import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
@@ -56,7 +55,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef"
 import * as BigIntJson from "./internal/bigIntJson.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { SolanaAddress } from "./SolanaAddress.ts"
-import { type SolanaNetwork, toGenesisHash } from "./SolanaNetwork.ts"
+import { type SolanaGenesisHash, type SolanaNetwork, toGenesisHash } from "./SolanaNetwork.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
 
 /**
@@ -75,7 +74,7 @@ export interface SolanaRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport error, timeout, any HTTP error status, node unhealthy or internal error, after retries | yes |
+ * | `Unavailable` | transport error, any HTTP error status, node unhealthy or internal error after retries, or a timeout | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
  * | `Lagging` | the endpoint has not reached `minContextSlot`, or the block is not available yet | yes |
  * | `Pruned` | the endpoint lacks the requested history, e.g. `getTransaction` returns `null` | yes |
@@ -187,7 +186,7 @@ export interface SolanaTransactionInfo {
 export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly network: SolanaNetwork
   /** `getGenesisHash`, verified against `network` once per endpoint then served from that check. */
-  readonly getGenesisHash: Effect.Effect<string, SolanaRpcError>
+  readonly getGenesisHash: Effect.Effect<SolanaGenesisHash, SolanaRpcError>
   /** `getSlot` */
   readonly getSlot: (options: {
     readonly commitment: SolanaCommitment
@@ -228,7 +227,14 @@ const codeReasons: ReadonlyMap<number, SolanaRpcErrorReason> = new Map([
 
 class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
 
-type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+// not a `Cause.TimeoutError`: `retryTransient` would retry it on the same endpoint
+class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeout: Duration.Duration }> {
+  override get message(): string {
+    return `timed out after ${Duration.format(this.timeout)}`
+  }
+}
+
+type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
 
 // the `Unavailable` codes: the endpoint is struggling, retry then fall back
 const isTransientRpcError = (error: unknown) =>
@@ -273,8 +279,9 @@ type NetworkCheck = "Unchecked" | "Checked" | SolanaRpcError
  * Builds a {@link SolanaRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
  * (e.g. `FetchHttpClient.layer`).
  *
- * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
+ *   endpoint at once.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
  *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (429, -32603, -32005, -32019) are retried with an
  *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
  *   status (e.g. 403) is not retried and falls back at once.
@@ -294,7 +301,7 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const expectedGenesisHash = toGenesisHash(network)
-      const timeout = options.timeout ?? Duration.seconds(30)
+      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
 
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,
@@ -309,7 +316,11 @@ export const layer = (options: {
                     Effect.fail(new JsonRpcError({ code: Number(error.code), message: error.message }))
                 }))
             ),
-            Effect.timeout(timeout)
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(new AttemptTimeout({ timeout }))
+            })
           )
         ),
         HttpClient.retryTransient({
