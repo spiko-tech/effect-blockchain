@@ -22,7 +22,6 @@
  */
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
-import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
@@ -62,7 +61,7 @@ export interface StellarRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, timeout, HTTP error status, JSON-RPC internal error `-32603`, after the retries | yes |
+ * | `Unavailable` | transport, HTTP error status, JSON-RPC internal error `-32603`, after the retries, or a timeout (not retried) | yes |
  * | `InvalidResponse` | the body is not a JSON-RPC reply, the result fails its schema, or an event fails the `getEvents` checks | yes |
  * | `Lagging` | the endpoint's latest ledger is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint's oldest retained ledger is above the requested `fromBlock` (or cursor) | yes |
@@ -229,7 +228,14 @@ const ledgerRangeError = /startLedger must be \D*(\d+)\D+(\d+)/u
 
 class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
 
-type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+// not a `Cause.TimeoutError`: `retryTransient` retries those, a timed-out attempt falls back at once instead
+class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeout: Duration.Duration }> {
+  override get message(): string {
+    return `timed out after ${Duration.format(this.timeout)}`
+  }
+}
+
+type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
 
 const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
 
@@ -267,8 +273,9 @@ type NetworkCheck = "Unchecked" | StellarNetworkInfo | StellarRpcError
 /**
  * Builds a {@link StellarRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`.
  *
- * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
+ *   endpoint at once.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
  *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (`-32603`) are retried with an exponential backoff
  *   from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status (e.g. 403) is not
  *   retried and falls back at once.
@@ -288,7 +295,7 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const passphrase = StellarNetwork.toPassphrase(network)
-      const timeout = options.timeout ?? Duration.seconds(30)
+      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
 
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,
@@ -302,7 +309,11 @@ export const layer = (options: {
                   onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
                 }))
             ),
-            Effect.timeout(timeout)
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () =>
+                Effect.fail(new AttemptTimeout({ timeout }))
+            })
           )
         ),
         HttpClient.retryTransient({
