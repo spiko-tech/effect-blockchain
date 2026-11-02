@@ -13,7 +13,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const allPackages = ["evm", "solana", "starknet", "stellar"]
+const allPackages = ["core", "evm", "solana", "starknet", "stellar"]
 const packages = process.argv.length > 2 ? process.argv.slice(2) : allPackages
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "effect-blockchain-packages-"))
 const specifiers = []

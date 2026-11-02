@@ -9,7 +9,7 @@ import * as Path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const root = Path.resolve(Path.dirname(fileURLToPath(import.meta.url)), "..")
-const packageNames = ["evm", "solana", "starknet", "stellar"]
+const packageNames = ["core", "evm", "solana", "starknet", "stellar"]
 
 /** Collects the specifiers of every public module emitted to `dist`. */
 const collectPublicModules = (packageName, directory, prefix = "") => {
