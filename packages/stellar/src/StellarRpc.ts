@@ -21,16 +21,18 @@
  * @since 0.1.0
  */
 import * as Arr from "effect/Array"
-import * as Brand from "effect/Brand"
-import * as Cause from "effect/Cause"
+import * as BigInt_ from "effect/BigInt"
+import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
+import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import { constTrue } from "effect/Function"
 import * as HttpClient from "effect/http/HttpClient"
-import type * as HttpClientError from "effect/http/HttpClientError"
+import * as HttpClientError from "effect/http/HttpClientError"
 import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Order from "effect/Order"
 import * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
@@ -60,7 +62,7 @@ export interface StellarRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, timeout, HTTP error status, JSON-RPC internal error `-32603`, after the HTTP retries | yes |
+ * | `Unavailable` | transport, timeout, HTTP error status, JSON-RPC internal error `-32603`, after the retries | yes |
  * | `InvalidResponse` | the body is not a JSON-RPC reply, the result fails its schema, or an event fails the `getEvents` checks | yes |
  * | `Lagging` | the endpoint's latest ledger is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint's oldest retained ledger is above the requested `fromBlock` (or cursor) | yes |
@@ -117,14 +119,18 @@ export class StellarRpcError extends Schema.TaggedError<StellarRpcError>()("Stel
  * `getEvents` with the same filter.
  *
  * @since 0.1.0
+ * @category schemas
+ */
+export const StellarEventsCursor = Schema.Struct({
+  endpoint: Schema.String,
+  cursor: Schema.String
+}).pipe(Schema.brand("StellarEventsCursor"))
+
+/**
+ * @since 0.1.0
  * @category models
  */
-export type StellarEventsCursor = Brand.Branded<{
-  readonly endpoint: string
-  readonly cursor: string
-}, "StellarEventsCursor">
-
-const StellarEventsCursor = Brand.nominal<StellarEventsCursor>()
+export type StellarEventsCursor = typeof StellarEventsCursor.Type
 
 /**
  * A `getEvents` filter over the inclusive ledger range `[fromBlock, toBlock]`.
@@ -148,7 +154,7 @@ export interface StellarEventsFilter {
 }
 
 /**
- * One `getEvents` page, sorted by event id. `cursor` is `undefined` once the range is done.
+ * One `getEvents` page, in chain order (sorted by event id). `cursor` is `undefined` once the range is done.
  *
  * @since 0.1.0
  * @category models
@@ -193,9 +199,10 @@ export class StellarRpc extends Context.Service<StellarRpc, {
   readonly getLatestLedger: Effect.Effect<StellarLatestLedger, StellarRpcError>
   /**
    * `getEvents` for contract events, one page. Without a cursor, only answered by an endpoint whose latest ledger has
-   * reached `toBlock` and that still retains `fromBlock`. Events above `toBlock` are dropped. An event of another
-   * type, of another contract or below `fromBlock` fails with `InvalidResponse`. An empty range returns no events and
-   * no cursor.
+   * reached `toBlock` and that still retains `fromBlock`. Events are returned in chain order: sorted by event id, which
+   * orders them by ledger, transaction, operation and event index. Events above `toBlock` are dropped. An event of
+   * another type, of another contract or below `fromBlock` fails with `InvalidResponse`. An empty range returns no
+   * events and no cursor.
    *
    * The range is done (`cursor: undefined`) when the RPC cursor is past `toBlock`. The RPC cursor is the last event's
    * id when the page is full, otherwise the end of the scanned ledgers (the RPC scans at most 10000 ledgers per
@@ -213,17 +220,42 @@ const fallbackReasons: ReadonlySet<StellarRpcErrorReason> = new Set([
   "Pruned"
 ])
 
-// JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures
+// JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures, retry then fall back
 const unavailableCodes: ReadonlySet<number> = new Set([-32603])
 
 // stellar-rpc's out-of-range start, current ("startLedger must be within the ledger range: X - Y") and older
 // ("startLedger must be between the oldest ledger: X and the latest ledger: Y ...")
 const ledgerRangeError = /startLedger must be \D*(\d+)\D+(\d+)/u
 
-const JsonRpcReply = Schema.Union([
-  Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) }),
-  Schema.Struct({ result: Schema.Json })
-])
+class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
+
+type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+
+const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
+
+const classify = (
+  error: SendError
+): { readonly reason: StellarRpcErrorReason; readonly code?: number | undefined } => {
+  if (error instanceof JsonRpcError) {
+    return { reason: unavailableCodes.has(error.code) ? "Unavailable" : "Rejected", code: error.code }
+  }
+  if (HttpClientError.isHttpClientError(error)) {
+    switch (error.reason._tag) {
+      case "StatusCodeError":
+        return { reason: "Unavailable", code: error.reason.response.status }
+      case "DecodeError":
+      case "EmptyBodyError":
+        return { reason: "InvalidResponse" }
+    }
+  }
+  return { reason: "Unavailable" }
+}
+
+// HttpClientError messages and causes can carry the request URL: keep the reason and status only
+const withoutUrl = (error: SendError): Error =>
+  HttpClientError.isHttpClientError(error)
+    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
+    : error
 
 // the ledger of a TOID cursor: ledger << 32 | transaction << 12 | operation
 const cursorLedger = (cursor: string) => BigInt(cursor.slice(0, 19)) >> BigInt(32)
@@ -236,9 +268,10 @@ type NetworkCheck = "Unchecked" | StellarNetworkInfo | StellarRpcError
  * Builds a {@link StellarRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`.
  *
  * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of HTTP retries per endpoint before falling back, default 3. `HttpClient.retryTransient`
- *   retries timeouts, transport errors and HTTP 408/429/500/502/503/504 with an exponential backoff from `retryDelay`
- *   (default 500 millis) with jitter, honoring `Retry-After`.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (`-32603`) are retried with an exponential backoff
+ *   from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status (e.g. 403) is not
+ *   retried and falls back at once.
  *
  * @since 0.1.0
  * @category layers
@@ -255,11 +288,26 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const passphrase = StellarNetwork.toPassphrase(network)
-      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
+      const timeout = options.timeout ?? Duration.seconds(30)
+
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.filterStatusOk,
-        HttpClient.transformResponse(Effect.timeout(timeout)),
+        // a JSON-RPC error comes with HTTP 200: lift it into the error channel so that it can be retried
+        HttpClient.transformResponse((response) =>
+          response.pipe(
+            Effect.tap((response) =>
+              Effect.flatMap(response.json, (json) =>
+                Option.match(Schema.decodeUnknownOption(RpcMethods.ErrorReply)(json), {
+                  onNone: () => Effect.void,
+                  onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
+                }))
+            ),
+            Effect.timeout(timeout)
+          )
+        ),
         HttpClient.retryTransient({
+          retryOn: "errors-only",
+          while: isTransientRpcError,
           schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(Schedule.jittered),
           times: options.retries ?? 3
         })
@@ -279,36 +327,12 @@ export const layer = (options: {
       const fail = (endpoint: Endpoint, method: string, reason: StellarRpcErrorReason, cause: Error) =>
         new StellarRpcError({ reason, method, endpoint: endpoint.name, cause })
 
-      // HttpClient errors carry the request, hence the URL: keep only a description of what failed
-      // shortcut: a transport error loses its underlying cause (e.g. ECONNREFUSED), redact it if that is ever needed
-      const httpError = (
-        endpoint: Endpoint,
-        method: string,
-        error: HttpClientError.HttpClientError | Cause.TimeoutError
-      ) => {
-        if (Cause.isTimeoutError(error)) {
-          return fail(endpoint, method, "Unavailable", new Error(`timed out after ${Duration.format(timeout)}`))
-        }
-        const { reason } = error
-        if (reason._tag === "DecodeError" || reason._tag === "EmptyBodyError") {
-          return fail(endpoint, method, "InvalidResponse", new Error(`${reason._tag}: the body is not JSON`))
-        }
-        const status = error.response?.status
-        return new StellarRpcError({
-          reason: "Unavailable",
-          method,
-          endpoint: endpoint.name,
-          code: status,
-          cause: new Error(status === undefined ? reason._tag : `HTTP ${status}`)
-        })
-      }
-
       const send = <Params, A>(endpoint: Endpoint, method: RpcMethods.RpcMethod<Params, A>, params: Params) =>
         Effect.gen(function*() {
           const encoded = yield* Schema.encodeEffect(method.params)(params).pipe(
             Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
           )
-          const body = yield* HttpClientRequest.post(endpoint.url).pipe(
+          const json = yield* HttpClientRequest.post(endpoint.url).pipe(
             HttpClientRequest.bodyJsonUnsafe({
               jsonrpc: "2.0",
               id: 1,
@@ -317,26 +341,21 @@ export const layer = (options: {
             }),
             client.execute,
             Effect.flatMap((response) => response.json),
+            Effect.mapError((error) =>
+              new StellarRpcError({
+                ...classify(error),
+                method: method.name,
+                endpoint: endpoint.name,
+                cause: withoutUrl(error)
+              })
+            ),
             // the client span would record the URL: this module's span replaces it
-            Effect.provideService(HttpClient.TracerDisabledWhen, constTrue),
-            Effect.mapError((error) => httpError(endpoint, method.name, error))
+            Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
           )
-          const reply = yield* Schema.decodeUnknownEffect(JsonRpcReply)(body).pipe(
+          const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
             Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
           )
-          if ("error" in reply) {
-            const { code, message } = reply.error
-            return yield* new StellarRpcError({
-              reason: unavailableCodes.has(code) ? "Unavailable" : "Rejected",
-              method: method.name,
-              endpoint: endpoint.name,
-              code,
-              cause: new Error(message)
-            })
-          }
-          return yield* Schema.decodeEffect(method.result)(reply.result).pipe(
-            Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
-          )
+          return reply.result
         }).pipe(
           Effect.withSpan(`StellarRpc.${method.name}`, {
             attributes: { network, endpoint: endpoint.name, method: method.name }
@@ -388,15 +407,13 @@ export const layer = (options: {
         })
       })
 
-      const seeHead = (endpoint: Endpoint, head: bigint) =>
-        Ref.update(endpoint.head, (known) => head > known ? head : known)
-
+      // every answer that tells a latest ledger raises the endpoint's known head, the guard only asks when it is behind
       // retention is not cached (the oldest ledger moves): getHealth checks it when the head is checked, the RPC
       // checks it on every getEvents call and its out-of-range error is mapped back to Pruned or Lagging
       const guard = Effect.fnUntraced(function*(endpoint: Endpoint, fromBlock: bigint, toBlock: bigint) {
         if ((yield* Ref.get(endpoint.head)) >= toBlock) return
         const health = yield* call(endpoint, RpcMethods.getHealth, undefined)
-        yield* seeHead(endpoint, health.latestLedger)
+        yield* Ref.update(endpoint.head, BigInt_.max(health.latestLedger))
         const method = RpcMethods.getEvents.name
         if (health.latestLedger < toBlock) {
           return yield* fail(
@@ -416,13 +433,29 @@ export const layer = (options: {
         }
       })
 
-      const outOfRange = (error: StellarRpcError, start: bigint): StellarRpcError => {
+      // a cursor is only valid on the endpoint that issued it
+      const endpointOf = (method: string, cursor: StellarEventsCursor): Effect.Effect<Endpoint, StellarRpcError> => {
+        const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
+        return endpoint === undefined
+          ? Effect.fail(
+            new StellarRpcError({
+              reason: "Rejected",
+              method,
+              endpoint: cursor.endpoint,
+              cause: new Error(`no endpoint named ${cursor.endpoint}`)
+            })
+          )
+          : Effect.succeed(endpoint)
+      }
+
+      // `start` is lazy: a cursor that failed to encode is not a TOID
+      const outOfRange = (error: StellarRpcError, start: () => bigint): StellarRpcError => {
         const match = error.reason === "Rejected" && error.cause instanceof Error
           ? ledgerRangeError.exec(error.cause.message)
           : null
         if (match === null) return error
         return new StellarRpcError({
-          reason: start < BigInt(match[1]) ? "Pruned" : "Lagging",
+          reason: start() < BigInt(match[1]) ? "Pruned" : "Lagging",
           method: error.method,
           endpoint: error.endpoint,
           code: error.code,
@@ -444,9 +477,11 @@ export const layer = (options: {
           }],
           pagination: { limit, ...(cursor === undefined ? {} : { cursor: cursor.cursor }) }
         }).pipe(
-          Effect.mapError((error) => outOfRange(error, cursor === undefined ? fromBlock : cursorLedger(cursor.cursor)))
+          Effect.mapError((error) =>
+            outOfRange(error, () => cursor === undefined ? fromBlock : cursorLedger(cursor.cursor))
+          )
         )
-        yield* seeHead(endpoint, page.latestLedger)
+        yield* Ref.update(endpoint.head, BigInt_.max(page.latestLedger))
 
         const contracts = new Set<string>(filter.contractIds)
         const invalid = page.events.find((event) =>
@@ -474,7 +509,7 @@ export const layer = (options: {
         const done = last > toBlock || (!full && last === toBlock)
         return {
           events: Arr.sort(page.events.filter((event) => event.blockNumber <= toBlock), byId),
-          cursor: done ? undefined : StellarEventsCursor({ endpoint: endpoint.name, cursor: page.cursor })
+          cursor: done ? undefined : StellarEventsCursor.make({ endpoint: endpoint.name, cursor: page.cursor })
         }
       })
 
@@ -483,28 +518,16 @@ export const layer = (options: {
         getNetwork: withFallback(checkNetwork),
         getLatestLedger: withFallback((endpoint) =>
           call(endpoint, RpcMethods.getLatestLedger, undefined).pipe(
-            Effect.tap((ledger) => seeHead(endpoint, ledger.sequence))
+            Effect.tap((ledger) => Ref.update(endpoint.head, BigInt_.max(ledger.sequence)))
           )
         ),
         getEvents: (filter) => {
           const { cursor } = filter
-          if (cursor === undefined) {
-            return filter.fromBlock > filter.toBlock
-              ? Effect.succeed({ events: [], cursor: undefined })
-              : withFallback((endpoint) => getEventsOn(endpoint, filter))
-          }
-          // a cursor is only valid on the endpoint that issued it
-          const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
-          return endpoint === undefined
-            ? Effect.fail(
-              new StellarRpcError({
-                reason: "Rejected",
-                method: RpcMethods.getEvents.name,
-                endpoint: cursor.endpoint,
-                cause: new Error(`no endpoint named ${cursor.endpoint}`)
-              })
-            )
-            : getEventsOn(endpoint, filter)
+          if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
+          if (cursor === undefined) return withFallback((endpoint) => getEventsOn(endpoint, filter))
+          return endpointOf(RpcMethods.getEvents.name, cursor).pipe(
+            Effect.flatMap((endpoint) => getEventsOn(endpoint, filter))
+          )
         }
       })
     })
