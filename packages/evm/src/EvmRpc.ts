@@ -5,9 +5,9 @@
  * {@link EvmRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`eth_chainId`), once.
  *
- * Every method is a read and safe to repeat, which is what makes the fallback and viem's retries sound. A future write
- * method (e.g. `eth_sendRawTransaction`) must take a transaction signed outside this module, resend the same signed
- * bytes on fallback, never retry blindly after an unclear failure and confirm the outcome by transaction hash.
+ * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future
+ * write method (e.g. `eth_sendRawTransaction`) must take a transaction signed outside this module, resend the same
+ * signed bytes on fallback, never retry blindly after an unclear failure and confirm the outcome by transaction hash.
  *
  * Adding a method takes three steps:
  * 1. define it once in `internal/rpcMethods.ts`: its JSON-RPC name, a params codec and a result codec,
@@ -20,22 +20,28 @@
  * @since 0.1.0
  */
 import * as Arr from "effect/Array"
+import type * as Cause from "effect/Cause"
 import * as Context from "effect/Context"
+import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import { constTrue } from "effect/Function"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientError from "effect/http/HttpClientError"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Order from "effect/Order"
 import * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
 import * as Result from "effect/Result"
+import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import * as SynchronizedRef from "effect/SynchronizedRef"
-import { BaseError, http, HttpRequestError, TimeoutError, UnknownRpcError } from "viem"
 import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmHexData } from "./EvmHexData.ts"
 import type { EvmLog } from "./EvmLog.ts"
 import * as EvmNetwork from "./EvmNetwork.ts"
-import { redactRpcUrl } from "./internal/redactRpcUrl.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 
 /**
@@ -54,8 +60,8 @@ export interface EvmRpcEndpoint {
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, timeout, HTTP error status, rate-limit or internal error codes, after viem's retries | yes |
- * | `InvalidResponse` | the result fails its schema, or a log fails the `getLogs` checks | yes |
+ * | `Unavailable` | transport, timeout, HTTP error status, rate-limit or internal error codes, after the retries | yes |
+ * | `InvalidResponse` | the reply is not JSON or fails its schema, or a log fails the `getLogs` checks | yes |
  * | `Lagging` | the endpoint's head is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
  * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
@@ -128,8 +134,9 @@ export class EvmRpc extends Context.Service<EvmRpc, {
   /** `eth_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, EvmRpcError>
   /**
-   * `eth_getLogs`, only answered by an endpoint whose head has reached `toBlock`. Logs are sorted by block then log
-   * index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty range returns `[]`.
+   * `eth_getLogs`, only answered by an endpoint whose head has reached `toBlock`. Logs are returned in chain order:
+   * sorted by block then log index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty
+   * range returns `[]`.
    */
   readonly getLogs: (filter: EvmLogFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRpc") {}
@@ -141,17 +148,39 @@ const fallbackReasons: ReadonlySet<EvmRpcErrorReason> = new Set([
   "Pruned"
 ])
 
-// viem retries these codes, so they mean the endpoint is struggling, not that the request is wrong
-const unavailableCodes: ReadonlySet<number> = new Set([-32005, -32603, 429, -32007, -1])
+// the JSON-RPC codes viem 2.57.11 retries (`utils/buildRequest.ts`, `shouldRetry`): limit exceeded, internal error,
+// QuickNode rate limit, unknown error and Alchemy's batch rate limit. The endpoint is struggling: retry then fall back
+const unavailableCodes: ReadonlySet<number> = new Set([-32005, -32603, -32007, -1, 429])
 
-const classify = (error: unknown): { readonly reason: EvmRpcErrorReason; readonly code?: number | undefined } => {
-  if (error instanceof HttpRequestError) return { reason: "Unavailable", code: error.status }
-  if (error instanceof TimeoutError || error instanceof UnknownRpcError) return { reason: "Unavailable" }
-  if (error instanceof BaseError && "code" in error && typeof error.code === "number") {
+class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
+
+type SendError = HttpClientError.HttpClientError | Cause.TimeoutError | JsonRpcError
+
+const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
+
+const classify = (
+  error: SendError
+): { readonly reason: EvmRpcErrorReason; readonly code?: number | undefined } => {
+  if (error instanceof JsonRpcError) {
     return { reason: unavailableCodes.has(error.code) ? "Unavailable" : "Rejected", code: error.code }
+  }
+  if (HttpClientError.isHttpClientError(error)) {
+    switch (error.reason._tag) {
+      case "StatusCodeError":
+        return { reason: "Unavailable", code: error.reason.response.status }
+      case "DecodeError":
+      case "EmptyBodyError":
+        return { reason: "InvalidResponse" }
+    }
   }
   return { reason: "Unavailable" }
 }
+
+// HttpClientError messages and causes can carry the request URL: keep the reason and status only
+const withoutUrl = (error: SendError): Error =>
+  HttpClientError.isHttpClientError(error)
+    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
+    : error
 
 const byBlockThenIndex = Order.combine(
   Order.mapInput(Order.BigInt, (log: EvmLog) => log.blockNumber),
@@ -161,13 +190,14 @@ const byBlockThenIndex = Order.combine(
 type NetworkCheck = "Unchecked" | "Checked" | EvmRpcError
 
 /**
- * Builds an {@link EvmRpc} over `endpoints`, tried in order.
+ * Builds an {@link EvmRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
+ * (e.g. `FetchHttpClient.layer`).
  *
  * - `timeout` bounds each attempt, default 30 seconds.
- * - `retries` is the number of viem retries per endpoint before falling back, default 3. viem retries rate limits,
- *   timeouts, HTTP 403/408/413/429/5xx and a few internal or rate-limit JSON-RPC codes with an exponential backoff
- *   from `retryDelay` (default 150 millis), honoring `Retry-After`.
- * - `fetch` replaces the global `fetch`, e.g. for a proxy or in tests.
+ * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, timeouts, HTTP
+ *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (-32005, -32603, -32007, -1, 429) are retried with
+ *   an exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
+ *   status (e.g. 403) is not retried and falls back at once.
  *
  * @since 0.1.0
  * @category layers
@@ -178,27 +208,42 @@ export const layer = (options: {
   readonly timeout?: Duration.Input | undefined
   readonly retries?: number | undefined
   readonly retryDelay?: Duration.Input | undefined
-  readonly fetch?: typeof globalThis.fetch | undefined
-}): Layer.Layer<EvmRpc> =>
+}): Layer.Layer<EvmRpc, never, HttpClient.HttpClient> =>
   Layer.effect(
     EvmRpc,
     Effect.gen(function*() {
       const { network } = options
       const expectedChainId = EvmNetwork.toChainId(network)
+      const timeout = options.timeout ?? Duration.seconds(30)
+
+      const client = (yield* HttpClient.HttpClient).pipe(
+        HttpClient.filterStatusOk,
+        // a JSON-RPC error comes with HTTP 200: lift it into the error channel so that it can be retried
+        HttpClient.transformResponse((response) =>
+          response.pipe(
+            Effect.tap((response) =>
+              Effect.flatMap(response.json, (json) =>
+                Option.match(Schema.decodeUnknownOption(RpcMethods.ErrorReply)(json), {
+                  onNone: () => Effect.void,
+                  onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
+                }))
+            ),
+            Effect.timeout(timeout)
+          )
+        ),
+        HttpClient.retryTransient({
+          retryOn: "errors-only",
+          while: isTransientRpcError,
+          schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(Schedule.jittered),
+          times: options.retries ?? 3
+        })
+      )
 
       const endpoints = yield* Effect.forEach(options.endpoints, (endpoint) =>
         Effect.gen(function*() {
-          const url = Redacted.value(endpoint.url)
-          const transport = http(url, {
-            timeout: Duration.toMillis(options.timeout ?? Duration.seconds(30)),
-            retryCount: options.retries ?? 3,
-            retryDelay: Duration.toMillis(options.retryDelay ?? Duration.millis(150)),
-            fetchFn: options.fetch
-          })({})
           return {
             name: endpoint.name,
-            url,
-            transport,
+            url: Redacted.value(endpoint.url),
             networkCheck: yield* SynchronizedRef.make<NetworkCheck>("Unchecked"),
             head: yield* Ref.make(BigInt(-1))
           }
@@ -213,19 +258,25 @@ export const layer = (options: {
           const encoded = yield* Schema.encodeEffect(method.params)(params).pipe(
             Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
           )
-          const raw = yield* Effect.tryPromise({
-            try: (signal) => endpoint.transport.request({ method: method.name, params: encoded }, { signal }),
-            catch: (error) =>
+          const json = yield* HttpClientRequest.post(endpoint.url).pipe(
+            HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: method.name, params: encoded }),
+            client.execute,
+            Effect.flatMap((response) => response.json),
+            Effect.mapError((error) =>
               new EvmRpcError({
                 ...classify(error),
                 method: method.name,
                 endpoint: endpoint.name,
-                cause: redactRpcUrl(error, endpoint.url)
+                cause: withoutUrl(error)
               })
-          })
-          return yield* Schema.decodeUnknownEffect(method.result)(raw).pipe(
+            ),
+            // the client span would record the URL
+            Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
+          )
+          const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
             Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
           )
+          return reply.result
         }).pipe(
           Effect.withSpan(`EvmRpc.${method.name}`, {
             attributes: { network, endpoint: endpoint.name, method: method.name }
@@ -280,20 +331,20 @@ export const layer = (options: {
           Effect.tap((head) => Ref.update(endpoint.head, (known) => head > known ? head : known))
         )
 
+      // the head guard: ask for the head only when the known one is below `toBlock`
+      const guard = (endpoint: Endpoint, method: string, toBlock: bigint) =>
+        Effect.gen(function*() {
+          if ((yield* Ref.get(endpoint.head)) >= toBlock) return
+          const head = yield* blockNumberOn(endpoint)
+          if (head < toBlock) {
+            return yield* fail(endpoint, method, "Lagging", new Error(`head ${head} is below toBlock ${toBlock}`))
+          }
+        })
+
       const getLogsOn = (endpoint: Endpoint, filter: EvmLogFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getLogs.name
-          if ((yield* Ref.get(endpoint.head)) < filter.toBlock) {
-            const head = yield* blockNumberOn(endpoint)
-            if (head < filter.toBlock) {
-              return yield* fail(
-                endpoint,
-                method,
-                "Lagging",
-                new Error(`head ${head} is below toBlock ${filter.toBlock}`)
-              )
-            }
-          }
+          yield* guard(endpoint, method, filter.toBlock)
           const addresses = new Set<string>(Arr.ensure(filter.address))
           const logs = yield* call(endpoint, RpcMethods.getLogs, [filter])
           const invalid = logs.find((log) =>

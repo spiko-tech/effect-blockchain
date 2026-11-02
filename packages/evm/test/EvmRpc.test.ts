@@ -4,10 +4,14 @@ import { EvmLog } from "@effect-blockchain/evm/EvmLog"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Clock from "effect/Clock"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
+import * as Tracer from "effect/Tracer"
 
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
 type Node = Record<
@@ -45,7 +49,9 @@ const setup = (
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const name = new URL(String(input)).hostname.split(".")[0]
-    const body: { id: number; method: string; params: ReadonlyArray<Schema.Json> } = JSON.parse(String(init?.body))
+    const body: { id: number; method: string; params: ReadonlyArray<Schema.Json> } = JSON.parse(
+      await new Response(init?.body).text()
+    )
     calls.push(`${name}:${body.method}`)
     const handler = nodes[name]?.[body.method] ?? defaults[body.method]
     const reply = handler === undefined
@@ -60,15 +66,21 @@ const setup = (
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
     retries: options.retries ?? 0,
     retryDelay: "1 millis",
-    timeout: options.timeout,
-    fetch
-  })
+    timeout: options.timeout
+  }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: EvmRpc.EvmRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
       return yield* f(yield* EvmRpc.EvmRpc)
     }).pipe(Effect.provide(layer))
   return { calls, run }
 }
+
+// every error under `error`: its `cause` chain and the errors of an `AggregateError`
+const causeChain = (error: Error): Array<Error> => [
+  error,
+  ...(error instanceof AggregateError ? error.errors.filter((e) => e instanceof Error).flatMap(causeChain) : []),
+  ...(error.cause instanceof Error ? causeChain(error.cause) : [])
+]
 
 const filter = { address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) }
 const head = (block: number) => () => ({ result: `0x${block.toString(16)}` })
@@ -132,63 +144,10 @@ describe("EvmRpc", () => {
   const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
     setup({ a: { eth_blockNumber: reply } }, options).run((rpc) => Effect.flip(rpc.blockNumber))
 
-  it.effect("classifies HTTP 429 and 503 as Unavailable", () =>
-    Effect.gen(function*() {
-      for (const status of [429, 503]) {
-        const error = yield* failure(() => new Response("busy", { status }))
-        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "eth_blockNumber", endpoint: "a" })
-      }
-    }))
-
-  it.effect("classifies a timeout as Unavailable", () =>
-    Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      const error = yield* failure(hang, { timeout: "20 millis" })
-      expect(error.reason).toBe("Unavailable")
-    }))
-
-  it.effect("classifies JSON-RPC codes", () =>
-    Effect.gen(function*() {
-      const rejected = yield* failure(() => ({ error: { code: -32602, message: "invalid params" } }))
-      expect(rejected).toMatchObject({ reason: "Rejected", code: -32602 })
-      const limited = yield* failure(() => ({ error: { code: -32005, message: "limit exceeded" } }))
-      expect(limited).toMatchObject({ reason: "Unavailable", code: -32005 })
-    }))
-
-  it.effect("classifies an invalid result as InvalidResponse", () =>
-    Effect.gen(function*() {
-      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
-    }))
-
-  it.effect("keeps the URL out of errors", () =>
-    Effect.gen(function*() {
-      for (
-        const reply of [() => new Response("busy", { status: 503 }), () => ({ error: { code: 3, message: "no" } })]
-      ) {
-        const error = yield* failure(reply)
-        const cause = error.cause
-        assert.instanceOf(cause, Error)
-        expect(`${cause.message} ${cause.stack} ${JSON.stringify(cause)}`).not.toContain("secret-key")
-        expect(cause.message).toContain("https://a.rpc.test/[REDACTED]")
-      }
-    }))
-
-  it.effect("lets viem retry before falling back", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: { eth_blockNumber: () => ++attempts < 3 ? new Response("busy", { status: 503 }) : { result: "0x5" } }
-    }, { retries: 2 })
-    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(5))
-      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "a:eth_blockNumber", "a:eth_blockNumber"])
-    }))
-  })
+  const down = () => new Response("down", { status: 503 })
 
   it.effect("falls back in order and stops on Rejected", () =>
     Effect.gen(function*() {
-      const down = () => new Response("down", { status: 503 })
       const fallback = setup({ a: { eth_blockNumber: down }, b: { eth_blockNumber: head(7) } })
       expect(yield* fallback.run((rpc) => rpc.blockNumber)).toBe(BigInt(7))
       expect(fallback.calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "b:eth_chainId", "b:eth_blockNumber"])
@@ -202,14 +161,25 @@ describe("EvmRpc", () => {
   it.effect("fails with the last error and keeps the others when every endpoint fails", () =>
     Effect.gen(function*() {
       const { run } = setup({
-        a: { eth_blockNumber: () => new Response("down", { status: 503 }) },
+        a: { eth_blockNumber: down },
         b: { eth_blockNumber: () => ({ result: "nope" }) }
       })
       const error = yield* run((rpc) => Effect.flip(rpc.blockNumber))
       expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
       assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
+      expect(error.cause.errors).toMatchObject([{ endpoint: "a", reason: "Unavailable", code: 503 }, { endpoint: "b" }])
     }))
+
+  it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
+    const { calls, run } = setup({
+      a: { eth_blockNumber: () => ({ result: "nope" }) },
+      b: { eth_blockNumber: head(7) }
+    })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "b:eth_chainId", "b:eth_blockNumber"])
+    }))
+  })
 
   it.effect("checks the network once per endpoint and caches a mismatch", () =>
     Effect.gen(function*() {
@@ -235,6 +205,159 @@ describe("EvmRpc", () => {
       expect(error.reason).toBe("Unavailable")
       expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_chainId", "a:eth_blockNumber"])
     }))
+  })
+
+  it.effect("runs one network check for concurrent first calls", () => {
+    const { calls, run } = setup({ a: { eth_blockNumber: head(1) } })
+    return run((rpc) => Effect.all([rpc.blockNumber, rpc.blockNumber, rpc.chainId], { concurrency: "unbounded" })).pipe(
+      Effect.map(() => {
+        expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "a:eth_blockNumber"])
+      })
+    )
+  })
+
+  // live clock: the retry backoff sleeps for real
+  it.live("retries transient errors before falling back", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: {
+        eth_blockNumber: () => ++attempts % 2 === 1 ? down() : { error: { code: -32005, message: "limit exceeded" } }
+      },
+      b: { eth_blockNumber: head(7) }
+    }, { retries: 2 })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual([
+        "a:eth_chainId",
+        "a:eth_blockNumber",
+        "a:eth_blockNumber",
+        "a:eth_blockNumber",
+        "b:eth_chainId",
+        "b:eth_blockNumber"
+      ])
+    }))
+  })
+
+  it.live("waits for Retry-After", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: {
+        eth_blockNumber: () =>
+          ++attempts === 1 ? new Response("slow down", { status: 429, headers: { "Retry-After": "1" } }) : head(5)()
+      }
+    }, { retries: 1 })
+    return Effect.gen(function*() {
+      const start = yield* Clock.currentTimeMillis
+      expect(yield* run((rpc) => rpc.blockNumber)).toBe(BigInt(5))
+      expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
+      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "a:eth_blockNumber"])
+    })
+  })
+
+  it.effect("does not retry a 403 and falls back", () => {
+    const { calls, run } = setup({
+      a: { eth_blockNumber: () => new Response("forbidden", { status: 403 }) },
+      b: { eth_blockNumber: () => new Response("forbidden", { status: 403 }) }
+    }, { retries: 3 })
+    return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: "Unavailable", code: 403, endpoint: "b" })
+      expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_blockNumber", "b:eth_chainId", "b:eth_blockNumber"])
+    }))
+  })
+
+  it.effect("classifies HTTP 429 and 503 as Unavailable", () =>
+    Effect.gen(function*() {
+      for (const status of [429, 503]) {
+        const error = yield* failure(() => new Response("busy", { status }))
+        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "eth_blockNumber", endpoint: "a" })
+      }
+    }))
+
+  // live clock: the timeout sleeps for real
+  it.live("classifies a timeout and a transport error as Unavailable", () =>
+    Effect.gen(function*() {
+      // like fetch, hang until aborted
+      const hang: Node[string] = (_, signal) =>
+        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
+      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
+    }))
+
+  it.effect("classifies JSON-RPC codes", () =>
+    Effect.gen(function*() {
+      const cases: Array<readonly [number, EvmRpc.EvmRpcErrorReason]> = [
+        [-32005, "Unavailable"],
+        [-32603, "Unavailable"],
+        [-32007, "Unavailable"],
+        [-1, "Unavailable"],
+        [429, "Unavailable"],
+        [-32602, "Rejected"],
+        [3, "Rejected"]
+      ]
+      for (const [code, reason] of cases) {
+        expect(yield* failure(() => ({ error: { code, message: "no" } }))).toMatchObject({ reason, code })
+      }
+    }))
+
+  it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
+    Effect.gen(function*() {
+      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
+      expect((yield* failure(() => new Response("<html>"))).reason).toBe("InvalidResponse")
+      expect((yield* failure(() => new Response(null))).reason).toBe("InvalidResponse")
+    }))
+
+  it.effect("fails Rejected without a request when params do not encode", () => {
+    const { calls, run } = setup({ a: {} })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        yield* rpc.chainId
+        calls.length = 0
+        // a negative block is not a hex quantity
+        const error = yield* Effect.flip(rpc.getLogs({ ...filter, fromBlock: BigInt(-2), toBlock: BigInt(-1) }))
+        expect(error).toMatchObject({ reason: "Rejected", method: "eth_getLogs", endpoint: "a" })
+        expect(calls).toStrictEqual([])
+      })
+    )
+  })
+
+  it.effect("keeps the URL out of errors", () =>
+    Effect.gen(function*() {
+      for (
+        const reply of [
+          () => new Response("busy", { status: 503 }),
+          () => ({ error: { code: 3, message: "no" } }),
+          () => new Response("<html>"),
+          () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
+        ]
+      ) {
+        const error = yield* failure(reply)
+        assert.instanceOf(error.cause, Error)
+        for (const cause of causeChain(error.cause)) {
+          expect(`${cause.message} ${cause.stack} ${JSON.stringify(cause)}`).not.toContain("secret-key")
+        }
+      }
+    }))
+
+  it.effect("records one span per request without the URL", () => {
+    const spans: Array<Tracer.NativeSpan> = []
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options)
+        spans.push(span)
+        return span
+      }
+    })
+    const { run } = setup({ a: { eth_blockNumber: head(1) } })
+    return run((rpc) => rpc.blockNumber).pipe(
+      Effect.withTracer(tracer),
+      Effect.map(() => {
+        expect(spans.map((span) => [span.name, Object.fromEntries(span.attributes)])).toStrictEqual([
+          ["EvmRpc.eth_chainId", { network: "Ethereum", endpoint: "a", method: "eth_chainId" }],
+          ["EvmRpc.eth_blockNumber", { network: "Ethereum", endpoint: "a", method: "eth_blockNumber" }]
+        ])
+        expect(JSON.stringify(spans.map((span) => [span.name, [...span.attributes]]))).not.toContain("secret-key")
+      })
+    )
   })
 
   it.effect("skips a lagging endpoint and remembers heads", () => {

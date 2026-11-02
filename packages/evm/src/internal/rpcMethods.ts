@@ -53,3 +53,10 @@ export const getLogs = make({
   // a log dropped by a reorg comes back with `removed: true` and must not be returned
   result: Schema.Array(Schema.Struct({ ...EvmLog.fields, removed: Schema.optionalKey(Schema.Literal(false)) }))
 })
+
+/**
+ * A JSON-RPC error reply.
+ *
+ * @internal
+ */
+export const ErrorReply = Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) })
