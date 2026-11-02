@@ -4,12 +4,14 @@ import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Clock from "effect/Clock"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
+import * as Tracer from "effect/Tracer"
 
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
 type Node = Record<
@@ -180,7 +182,7 @@ describe("StarknetRpc", () => {
       Effect.gen(function*() {
         const first = yield* rpc.getEvents(filter)
         assert.isDefined(first.cursor)
-        expect(first.cursor).toStrictEqual({ endpoint: "b", continuationToken: "page-2" })
+        expect(first.cursor).toStrictEqual({ endpoint: "b", cursor: "page-2" })
         calls.length = 0
         yield* rpc.getEvents({ ...filter, cursor: first.cursor })
         expect(calls).toStrictEqual(["b:starknet_getEvents"])
@@ -192,18 +194,20 @@ describe("StarknetRpc", () => {
   it.effect("does not fall back from a failed cursor", () => {
     const invalid = () => ({ error: { code: 33, message: "invalid continuation token" } })
     const { calls, run } = setup({ a: { starknet_blockNumber: head(20), starknet_getEvents: invalid }, b: {} })
-    const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "a", continuationToken: "x" })
+    const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "a", cursor: "x" })
     return run((rpc) => Effect.flip(rpc.getEvents({ ...filter, cursor }))).pipe(Effect.map((error) => {
       expect(error).toMatchObject({ reason: "Rejected", code: 33, endpoint: "a" })
       expect(calls.every((call) => call.startsWith("a:"))).toBe(true)
     }))
   })
 
-  it.effect("fails a cursor from an unknown endpoint without calling", () => {
+  it.effect("fails a cursor from an unknown endpoint without a request", () => {
     const { calls, run } = setup({ a: {} })
-    const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "gone", continuationToken: "x" })
+    const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "gone", cursor: "x" })
     return run((rpc) => Effect.flip(rpc.getEvents({ ...filter, cursor }))).pipe(Effect.map((error) => {
       expect(error).toMatchObject({ reason: "Rejected", endpoint: "gone" })
+      assert.instanceOf(error.cause, Error)
+      expect(error.cause.message).toBe("no endpoint named gone")
       expect(calls).toStrictEqual([])
     }))
   })
@@ -234,7 +238,7 @@ describe("StarknetRpc", () => {
       expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
     }))
 
-  it.effect("classifies Starknet JSON-RPC codes", () =>
+  it.effect("classifies JSON-RPC codes", () =>
     Effect.gen(function*() {
       const cases: Array<readonly [number, StarknetRpc.StarknetRpcErrorReason]> = [
         [63, "Unavailable"],
@@ -256,43 +260,154 @@ describe("StarknetRpc", () => {
       expect((yield* failure(() => new Response("<html>"))).reason).toBe("InvalidResponse")
     }))
 
+  // every message, stack and JSON along the cause chain, AggregateError members included
+  const causeChain = (error: unknown): Array<string> =>
+    error instanceof Error
+      ? [
+        error.message,
+        String(error.stack),
+        JSON.stringify(error),
+        ...causeChain(error.cause),
+        ...(error instanceof AggregateError ? error.errors.flatMap(causeChain) : [])
+      ]
+      : error === undefined
+      ? []
+      : [String(error)]
+
   it.effect("keeps the URL out of errors", () =>
     Effect.gen(function*() {
       for (
         const reply of [
           () => new Response("busy", { status: 503 }),
           () => ({ error: { code: 3, message: "no" } }),
-          () => new Response("<html>")
+          () => new Response("<html>"),
+          () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
         ]
       ) {
         const error = yield* failure(reply)
-        const cause = error.cause
-        assert.instanceOf(cause, Error)
-        expect(`${cause.message} ${cause.stack} ${JSON.stringify(cause)}`).not.toContain("secret-key")
+        assert.instanceOf(error.cause, Error)
+        for (const text of causeChain(error)) expect(text).not.toContain("secret-key")
       }
     }))
 
-  it.live("retries HTTP errors and transient JSON-RPC codes before falling back", () => {
+  it.live("retries transient errors before falling back", () => {
     let attempts = 0
     const { calls, run } = setup({
       a: {
         starknet_blockNumber: () =>
-          ++attempts === 1
-            ? new Response("busy", { status: 503 })
-            : attempts === 2
-            ? { error: { code: 63, message: "unexpected" } }
-            : { result: 5 }
-      }
+          ++attempts === 2 ? { error: { code: 63, message: "unexpected" } } : new Response("busy", { status: 503 })
+      },
+      b: { starknet_blockNumber: head(7) }
     }, { retries: 2 })
     return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(5))
+      expect(block).toBe(BigInt(7))
       expect(calls).toStrictEqual([
         "a:starknet_chainId",
         "a:starknet_blockNumber",
         "a:starknet_blockNumber",
-        "a:starknet_blockNumber"
+        "a:starknet_blockNumber",
+        "b:starknet_chainId",
+        "b:starknet_blockNumber"
       ])
     }))
+  })
+
+  it.live("waits for Retry-After", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: {
+        starknet_blockNumber: () =>
+          ++attempts === 1 ? new Response("slow down", { status: 429, headers: { "Retry-After": "1" } }) : head(5)()
+      }
+    }, { retries: 1 })
+    return Effect.gen(function*() {
+      const start = yield* Clock.currentTimeMillis
+      expect(yield* run((rpc) => rpc.blockNumber)).toBe(BigInt(5))
+      // retryDelay is 1 millis: only the header explains a one second wait
+      expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
+      expect(calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber", "a:starknet_blockNumber"])
+    })
+  })
+
+  it.effect("does not retry a 403 and falls back", () => {
+    const { calls, run } = setup({
+      a: { starknet_blockNumber: () => new Response("forbidden", { status: 403 }) },
+      b: { starknet_blockNumber: head(7) }
+    }, { retries: 3 })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual([
+        "a:starknet_chainId",
+        "a:starknet_blockNumber",
+        "b:starknet_chainId",
+        "b:starknet_blockNumber"
+      ])
+    }))
+  })
+
+  it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
+    const { calls, run } = setup({
+      a: { starknet_blockNumber: () => ({ result: "twenty" }) },
+      b: { starknet_blockNumber: head(7) }
+    })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(BigInt(7))
+      expect(calls).toStrictEqual([
+        "a:starknet_chainId",
+        "a:starknet_blockNumber",
+        "b:starknet_chainId",
+        "b:starknet_blockNumber"
+      ])
+    }))
+  })
+
+  it.effect("runs one network check for concurrent first calls", () => {
+    const { calls, run } = setup({ a: { starknet_blockNumber: head(1) } })
+    return run((rpc) => Effect.all([rpc.blockNumber, rpc.blockNumber, rpc.blockNumber], { concurrency: "unbounded" }))
+      .pipe(
+        Effect.map(() =>
+          expect(calls.filter((call) => call.endsWith("starknet_chainId"))).toStrictEqual(["a:starknet_chainId"])
+        )
+      )
+  })
+
+  it.effect("fails Rejected without a request when params do not encode", () => {
+    const { calls, run } = setup({ a: { starknet_blockNumber: head(20) }, b: {} })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        // learn a's head first, so that getEvents has nothing to ask before encoding
+        yield* rpc.blockNumber
+        calls.length = 0
+        const error = yield* Effect.flip(rpc.getEvents({ ...filter, keys: [["not a felt"]] }))
+        expect(error).toMatchObject({ reason: "Rejected", method: "starknet_getEvents", endpoint: "a" })
+        expect(calls).toStrictEqual([])
+      })
+    )
+  })
+
+  it.effect("records one span per request without the URL", () => {
+    const spans: Array<Tracer.NativeSpan> = []
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options)
+        spans.push(span)
+        return span
+      }
+    })
+    const { calls, run } = setup({ a: { starknet_blockNumber: head(1) } })
+    return run((rpc) => rpc.blockNumber).pipe(
+      Effect.withTracer(tracer),
+      Effect.map(() => {
+        expect(calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber"])
+        expect(spans.map((span) => [span.name, Object.fromEntries(span.attributes)])).toStrictEqual([
+          ["StarknetRpc.starknet_chainId", { network: "Starknet", endpoint: "a", method: "starknet_chainId" }],
+          ["StarknetRpc.starknet_blockNumber", { network: "Starknet", endpoint: "a", method: "starknet_blockNumber" }]
+        ])
+        for (const span of spans) {
+          expect(`${span.name} ${JSON.stringify([...span.attributes])}`).not.toContain("secret-key")
+        }
+      })
+    )
   })
 
   it.effect("falls back in order and stops on Rejected", () =>
@@ -313,7 +428,7 @@ describe("StarknetRpc", () => {
       expect(stop.calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber"])
     }))
 
-  it.effect("falls back on a missing transaction and keeps every error when all endpoints fail", () =>
+  it.effect("fails with the last error and keeps the others when every endpoint fails", () =>
     Effect.gen(function*() {
       const missing = () => ({ error: { code: 29, message: "transaction hash not found" } })
       const { run } = setup({
