@@ -1,12 +1,16 @@
 import { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
 import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
 import { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
-import { afterAll, assert, beforeAll, describe, expect, it, vi } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Clock from "effect/Clock"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import type * as Schema from "effect/Schema"
+import * as Tracer from "effect/Tracer"
 
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
 type Node = Record<
@@ -25,50 +29,33 @@ const OLDER = SolanaTransactionHash.make(
 
 const defaults: Node = { getGenesisHash: () => ({ result: MAINNET_GENESIS }) }
 
-// kit's transport has no `fetch` option: one global fake fetch routes `https://<name>.<setup>.rpc.test/secret-key`
-// to the nodes of each `setup`, so concurrent tests and several setups per test do not mix
-const setups = new Map<string, { readonly nodes: Record<string, Node>; readonly calls: Array<string> }>()
-let nextSetup = 0
-
-const fakeFetch: typeof globalThis.fetch = async (input, init) => {
-  const url = new URL(String(input))
-  const [name, setupId] = url.hostname.split(".")
-  const setup = setups.get(setupId)
-  if (setup === undefined) throw new TypeError(`fetch failed for ${url}`)
-  const body: { id: number; method: string; params: ReadonlyArray<Schema.Json> } = JSON.parse(String(init?.body))
-  setup.calls.push(`${name}:${body.method}`)
-  const handler = setup.nodes[name]?.[body.method] ?? defaults[body.method]
-  const reply = handler === undefined
-    ? { error: { code: -32601, message: "method not found" } }
-    : await handler(body.params, init?.signal)
-  return reply instanceof Response ? reply : Response.json({ jsonrpc: "2.0", id: body.id, ...reply })
-}
-
-// tests run concurrently: stub once for the file
-beforeAll(() => {
-  vi.stubGlobal("fetch", fakeFetch)
-})
-
-afterAll(() => {
-  vi.unstubAllGlobals()
-})
-
+// one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
 const setup = (
   nodes: Record<string, Node>,
   options: { readonly retries?: number; readonly timeout?: Duration.Input } = {}
 ) => {
-  const id = `s${nextSetup++}`
   const calls: Array<string> = []
-  setups.set(id, { nodes, calls })
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const name = new URL(String(input)).hostname.split(".")[0]
+    const body: { id: number; method: string; params: ReadonlyArray<Schema.Json> } = JSON.parse(
+      await new Response(init?.body).text()
+    )
+    calls.push(`${name}:${body.method}`)
+    const handler = nodes[name]?.[body.method] ?? defaults[body.method]
+    const reply = handler === undefined
+      ? { error: { code: -32601, message: "method not found" } }
+      : await handler(body.params, init?.signal)
+    return reply instanceof Response ? reply : Response.json({ jsonrpc: "2.0", id: body.id, ...reply })
+  }
   const names = Object.keys(nodes)
   if (!Arr.isReadonlyArrayNonEmpty(names)) throw new Error("setup needs at least one endpoint")
   const layer = SolanaRpc.layer({
     network: "Solana",
-    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.${id}.rpc.test/secret-key`) })),
+    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
     retries: options.retries ?? 0,
     retryDelay: "1 millis",
     timeout: options.timeout
-  })
+  }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: SolanaRpc.SolanaRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
       return yield* f(yield* SolanaRpc.SolanaRpc)
@@ -76,10 +63,19 @@ const setup = (
   return { calls, run }
 }
 
+// an error, its causes and the errors they aggregate, recursively
+const causeChain = (error: Error): Array<Error> => [
+  error,
+  ...(error.cause instanceof Error ? causeChain(error.cause) : []),
+  ...(error instanceof AggregateError
+    ? error.errors.flatMap((item) => item instanceof Error ? causeChain(item) : [])
+    : [])
+]
+
 const slot = (value: number) => () => ({ result: value })
 const confirmed = { commitment: "confirmed" } as const
-const raw = (body: string, init?: ResponseInit) => () =>
-  new Response(`{"jsonrpc":"2.0","id":0,${body}}`, { headers: { "content-type": "application/json" }, ...init })
+const raw = (body: string) => () =>
+  new Response(`{"jsonrpc":"2.0","id":1,${body}}`, { headers: { "content-type": "application/json" } })
 
 describe("SolanaRpc", () => {
   it.effect("decodes getGenesisHash, getSlot and getSignaturesForAddress", () => {
@@ -198,44 +194,6 @@ describe("SolanaRpc", () => {
     )
   })
 
-  const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
-    setup({ a: { getSlot: reply } }, options).run((rpc) => Effect.flip(rpc.getSlot(confirmed)))
-
-  it.effect("classifies HTTP errors as Unavailable", () =>
-    Effect.gen(function*() {
-      for (const status of [401, 429, 503]) {
-        const error = yield* failure(() => new Response("busy", { status }))
-        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "getSlot", endpoint: "a" })
-      }
-    }))
-
-  it.live("classifies a timeout as Unavailable", () =>
-    Effect.gen(function*() {
-      // like fetch, hang until aborted
-      const hang: Node[string] = (_, signal) =>
-        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-      const error = yield* failure(hang, { timeout: "20 millis" })
-      expect(error.reason).toBe("Unavailable")
-    }))
-
-  it.effect("classifies JSON-RPC codes", () =>
-    Effect.gen(function*() {
-      const cases: ReadonlyArray<readonly [number, SolanaRpc.SolanaRpcErrorReason]> = [
-        [-32602, "Rejected"],
-        [-32005, "Unavailable"],
-        [-32603, "Unavailable"],
-        [-32016, "Lagging"],
-        [-32004, "Lagging"],
-        [-32007, "Pruned"],
-        [-32009, "Pruned"],
-        [-32011, "Pruned"]
-      ]
-      for (const [code, reason] of cases) {
-        const error = yield* failure(() => ({ error: { code, message: "no" } }))
-        expect(error, String(code)).toMatchObject({ reason, code })
-      }
-    }))
-
   it.effect("maps minContextSlot not reached to Lagging and falls back", () => {
     const { calls, run } = setup({
       a: {
@@ -248,61 +206,14 @@ describe("SolanaRpc", () => {
     return run((rpc) => rpc.getSignaturesForAddress({ address: ADDRESS, minContextSlot: BigInt(50), ...confirmed }))
       .pipe(Effect.map((page) => {
         expect(page).toStrictEqual([])
-        expect(calls).toContain("b:getSignaturesForAddress")
+        expect(calls).toStrictEqual([
+          "a:getGenesisHash",
+          "a:getSignaturesForAddress",
+          "b:getGenesisHash",
+          "b:getSignaturesForAddress"
+        ])
       }))
   })
-
-  it.effect("classifies an invalid result as InvalidResponse", () =>
-    Effect.gen(function*() {
-      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
-      expect((yield* failure(() => ({ result: 1.5 }))).reason).toBe("InvalidResponse")
-    }))
-
-  it.effect("keeps the URL out of errors", () =>
-    Effect.gen(function*() {
-      // an unknown setup makes the fake fetch throw with the full URL, like a fetch that cannot parse it
-      const rpc = yield* SolanaRpc.SolanaRpc
-      const error = yield* Effect.flip(rpc.getSlot(confirmed))
-      expect(error.reason).toBe("Unavailable")
-      const cause = error.cause
-      assert.instanceOf(cause, Error)
-      expect(`${cause.message} ${cause.stack} ${JSON.stringify(cause)}`).not.toContain("secret-key")
-      expect(cause.message).toContain("https://a.unknown.rpc.test/[REDACTED]")
-    }).pipe(Effect.provide(SolanaRpc.layer({
-      network: "Solana",
-      endpoints: [{ name: "a", url: Redacted.make("https://a.unknown.rpc.test/secret-key") }],
-      retries: 0
-    }))))
-
-  it.live("retries Unavailable before falling back, not a 401", () =>
-    Effect.gen(function*() {
-      let attempts = 0
-      const retried = setup({
-        a: { getSlot: () => ++attempts < 3 ? new Response("busy", { status: 503 }) : { result: 5 } }
-      }, { retries: 2 })
-      expect(yield* retried.run((rpc) => rpc.getSlot(confirmed))).toBe(BigInt(5))
-      expect(retried.calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "a:getSlot", "a:getSlot"])
-
-      const unauthorized = setup({ a: { getSlot: () => new Response("no", { status: 401 }) } }, { retries: 2 })
-      yield* unauthorized.run((rpc) => Effect.flip(rpc.getSlot(confirmed)))
-      expect(unauthorized.calls).toStrictEqual(["a:getGenesisHash", "a:getSlot"])
-    }))
-
-  it.live("waits for Retry-After", () =>
-    Effect.gen(function*() {
-      let attempts = 0
-      const { run } = setup({
-        a: {
-          getSlot: () =>
-            ++attempts === 1 ? new Response("slow down", { status: 429, headers: { "retry-after": "1" } }) : {
-              result: 5
-            }
-        }
-      }, { retries: 1 })
-      const start = Date.now()
-      expect(yield* run((rpc) => rpc.getSlot(confirmed))).toBe(BigInt(5))
-      expect(Date.now() - start).toBeGreaterThanOrEqual(1000)
-    }))
 
   it.effect("falls back in order and stops on Rejected", () =>
     Effect.gen(function*() {
@@ -326,14 +237,22 @@ describe("SolanaRpc", () => {
       const error = yield* run((rpc) => Effect.flip(rpc.getSlot(confirmed)))
       expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
       assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
+      expect(error.cause.errors).toMatchObject([{ endpoint: "a", reason: "Unavailable", code: 503 }, { endpoint: "b" }])
     }))
+
+  it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
+    const { calls, run } = setup({ a: { getSlot: () => ({ result: "twenty" }) }, b: { getSlot: slot(7) } })
+    return run((rpc) => rpc.getSlot(confirmed)).pipe(Effect.map((value) => {
+      expect(value).toBe(BigInt(7))
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "b:getGenesisHash", "b:getSlot"])
+    }))
+  })
 
   it.effect("checks the network once per endpoint and caches a mismatch", () =>
     Effect.gen(function*() {
       const ok = setup({ a: { getSlot: slot(1) } })
       yield* ok.run((rpc) => Effect.zip(rpc.getSlot(confirmed), rpc.getSlot(confirmed)))
-      expect(ok.calls.filter((call) => call.endsWith("getGenesisHash"))).toHaveLength(1)
+      expect(ok.calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "a:getSlot"])
 
       const devnet = () => ({ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" })
       const wrong = setup({ a: { getGenesisHash: devnet, getSlot: slot(1) }, b: {} })
@@ -356,6 +275,167 @@ describe("SolanaRpc", () => {
       Effect.map(([error]) => {
         expect(error.reason).toBe("Unavailable")
         expect(calls).toStrictEqual(["a:getGenesisHash", "a:getGenesisHash", "a:getSlot"])
+      })
+    )
+  })
+
+  it.effect("runs one network check for concurrent first calls", () => {
+    const { calls, run } = setup({ a: { getSlot: slot(1) } })
+    return run((rpc) => Effect.all(Arr.replicate(rpc.getSlot(confirmed), 3), { concurrency: "unbounded" })).pipe(
+      Effect.map(() => expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "a:getSlot", "a:getSlot"]))
+    )
+  })
+
+  // live clock: the retry backoff sleeps for real
+  it.live("retries transient errors before falling back", () => {
+    let attempts = 0
+    const { calls, run } = setup({
+      a: {
+        getSlot: () =>
+          ++attempts === 2 ? { error: { code: -32005, message: "node is unhealthy" } } : new Response("busy", {
+            status: 503
+          })
+      },
+      b: { getSlot: slot(7) }
+    }, { retries: 2 })
+    return run((rpc) => rpc.getSlot(confirmed)).pipe(Effect.map((value) => {
+      expect(value).toBe(BigInt(7))
+      expect(calls).toStrictEqual([
+        "a:getGenesisHash",
+        "a:getSlot",
+        "a:getSlot",
+        "a:getSlot",
+        "b:getGenesisHash",
+        "b:getSlot"
+      ])
+    }))
+  })
+
+  it.live("waits for Retry-After", () =>
+    Effect.gen(function*() {
+      let attempts = 0
+      const { calls, run } = setup({
+        a: {
+          getSlot: () =>
+            ++attempts === 1 ? new Response("slow down", { status: 429, headers: { "retry-after": "1" } }) : {
+              result: 5
+            }
+        }
+      }, { retries: 1 })
+      const start = yield* Clock.currentTimeMillis
+      expect(yield* run((rpc) => rpc.getSlot(confirmed))).toBe(BigInt(5))
+      expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "a:getSlot"])
+    }))
+
+  it.effect("does not retry a 403 and falls back", () => {
+    const { calls, run } = setup({
+      a: { getSlot: () => new Response("forbidden", { status: 403 }) },
+      b: { getSlot: slot(7) }
+    }, { retries: 2 })
+    return run((rpc) => rpc.getSlot(confirmed)).pipe(Effect.map((value) => {
+      expect(value).toBe(BigInt(7))
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "b:getGenesisHash", "b:getSlot"])
+    }))
+  })
+
+  const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
+    setup({ a: { getSlot: reply } }, options).run((rpc) => Effect.flip(rpc.getSlot(confirmed)))
+
+  it.effect("classifies HTTP 429 and 503 as Unavailable", () =>
+    Effect.gen(function*() {
+      for (const status of [429, 503]) {
+        const error = yield* failure(() => new Response("busy", { status }))
+        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "getSlot", endpoint: "a" })
+      }
+    }))
+
+  // live clock: the timeout sleeps for real
+  it.live("classifies a timeout and a transport error as Unavailable", () =>
+    Effect.gen(function*() {
+      // like fetch, hang until aborted
+      const hang: Node[string] = (_, signal) =>
+        new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
+      expect((yield* failure(hang, { timeout: "20 millis" })).reason).toBe("Unavailable")
+      expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
+    }))
+
+  it.effect("classifies JSON-RPC codes", () =>
+    Effect.gen(function*() {
+      const cases: ReadonlyArray<readonly [number, SolanaRpc.SolanaRpcErrorReason]> = [
+        [-32602, "Rejected"],
+        [429, "Unavailable"],
+        [-32005, "Unavailable"],
+        [-32603, "Unavailable"],
+        [-32019, "Unavailable"],
+        [-32016, "Lagging"],
+        [-32004, "Lagging"],
+        [-32014, "Lagging"],
+        [-32001, "Pruned"],
+        [-32007, "Pruned"],
+        [-32009, "Pruned"],
+        [-32011, "Pruned"],
+        [-32010, "Pruned"]
+      ]
+      for (const [code, reason] of cases) {
+        const error = yield* failure(() => ({ error: { code, message: "no" } }))
+        expect(error, String(code)).toMatchObject({ reason, code })
+      }
+    }))
+
+  it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
+    Effect.gen(function*() {
+      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
+      expect((yield* failure(() => ({ result: 1.5 }))).reason).toBe("InvalidResponse")
+      expect((yield* failure(() => new Response("<html>"))).reason).toBe("InvalidResponse")
+    }))
+
+  it.effect("fails Rejected without a request when params do not encode", () => {
+    const { calls, run } = setup({ a: {}, b: {} })
+    return run((rpc) => Effect.flip(rpc.getSignaturesForAddress({ address: ADDRESS, limit: 1.5, ...confirmed }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: "Rejected", method: "getSignaturesForAddress", endpoint: "a" })
+        // only the endpoint's network check went out
+        expect(calls).toStrictEqual(["a:getGenesisHash"])
+      })
+    )
+  })
+
+  it.effect("keeps the URL out of errors", () =>
+    Effect.gen(function*() {
+      for (
+        const reply of [
+          () => new Response("busy", { status: 503 }),
+          () => ({ error: { code: -32602, message: "no" } }),
+          () => new Response("<html>"),
+          () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
+        ]
+      ) {
+        const error = yield* failure(reply)
+        assert.instanceOf(error.cause, Error)
+        for (const item of causeChain(error)) {
+          expect(`${item.message} ${item.stack} ${JSON.stringify(item)}`).not.toContain("secret-key")
+        }
+      }
+    }))
+
+  it.effect("records one span per request without the URL", () => {
+    const spans: Array<Tracer.NativeSpan> = []
+    const tracer = Tracer.make({
+      span: (options) => {
+        const span = new Tracer.NativeSpan(options)
+        spans.push(span)
+        return span
+      }
+    })
+    return setup({ a: { getSlot: slot(1) } }).run((rpc) => rpc.getSlot(confirmed)).pipe(
+      Effect.withTracer(tracer),
+      Effect.map(() => {
+        expect(spans.map((span) => [span.name, Object.fromEntries(span.attributes)])).toStrictEqual([
+          ["SolanaRpc.getGenesisHash", { network: "Solana", endpoint: "a", method: "getGenesisHash" }],
+          ["SolanaRpc.getSlot", { network: "Solana", endpoint: "a", method: "getSlot" }]
+        ])
+        expect(JSON.stringify(spans.map((span) => [span.name, [...span.attributes]]))).not.toContain("secret-key")
       })
     )
   })
