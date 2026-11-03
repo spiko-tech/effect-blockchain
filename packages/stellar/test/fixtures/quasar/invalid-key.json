@@ -1,0 +1,10 @@
+{
+  "provider": "quasar-invalid-key",
+  "network": "Stellar",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getNetwork"
+  },
+  "status": 401,
+  "body": "Unauthorized\n"
+}
