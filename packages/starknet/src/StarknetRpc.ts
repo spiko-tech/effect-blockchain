@@ -21,23 +21,16 @@
  *
  * @since 0.1.0
  */
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import type * as Arr from "effect/Array"
 import * as Context from "effect/Context"
-import * as Data from "effect/Data"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
-import { constTrue } from "effect/Function"
-import * as HttpClient from "effect/http/HttpClient"
-import * as HttpClientError from "effect/http/HttpClientError"
-import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import type * as HttpClient from "effect/http/HttpClient"
 import * as Layer from "effect/Layer"
-import * as Option from "effect/Option"
-import * as Redacted from "effect/Redacted"
+import type * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
-import * as Result from "effect/Result"
-import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
-import * as SynchronizedRef from "effect/SynchronizedRef"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
@@ -194,62 +187,17 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   ) => Effect.Effect<StarknetTransactionReceipt, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
 
-const fallbackReasons: ReadonlySet<StarknetRpcErrorReason> = new Set([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned"
-])
-
 // error codes from the Starknet JSON-RPC spec v0.9 (starknet_api_openrpc.json), plus the common provider ones
-// UNEXPECTED_ERROR, JSON-RPC internal error and provider rate limits: the endpoint is struggling, retry then fall back
-const unavailableCodes: ReadonlySet<number> = new Set([63, -32603, -32005, 429])
-// BLOCK_NOT_FOUND, TXN_HASH_NOT_FOUND: another endpoint may be further ahead
-const laggingCodes: ReadonlySet<number> = new Set([24, 29])
-
-class JsonRpcError extends Data.TaggedError("JsonRpcError")<{ readonly code: number; readonly message: string }> {}
-
-// not a Cause.TimeoutError, which retryTransient would retry: a timed-out attempt falls back at once
-class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeout: Duration.Duration }> {
-  override get message(): string {
-    return `timed out after ${Duration.format(this.timeout)}`
-  }
-}
-
-type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
-
-const isTransientRpcError = (error: unknown) => error instanceof JsonRpcError && unavailableCodes.has(error.code)
-
-const classify = (
-  error: SendError
-): { readonly reason: StarknetRpcErrorReason; readonly code?: number | undefined } => {
-  if (error instanceof JsonRpcError) {
-    const reason = unavailableCodes.has(error.code)
-      ? "Unavailable"
-      : laggingCodes.has(error.code)
-      ? "Lagging"
-      : "Rejected"
-    return { reason, code: error.code }
-  }
-  if (HttpClientError.isHttpClientError(error)) {
-    switch (error.reason._tag) {
-      case "StatusCodeError":
-        return { reason: "Unavailable", code: error.reason.response.status }
-      case "DecodeError":
-      case "EmptyBodyError":
-        return { reason: "InvalidResponse" }
-    }
-  }
-  return { reason: "Unavailable" }
-}
-
-// HttpClientError messages and causes can carry the request URL: keep the reason and status only
-const withoutUrl = (error: SendError): Error =>
-  HttpClientError.isHttpClientError(error)
-    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
-    : error
-
-type NetworkCheck = "Unchecked" | "Checked" | StarknetRpcError
+const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map([
+  // UNEXPECTED_ERROR, JSON-RPC internal error and provider rate limits: the endpoint is struggling, retry then fall back
+  [63, "Unavailable"],
+  [-32603, "Unavailable"],
+  [-32005, "Unavailable"],
+  [429, "Unavailable"],
+  // BLOCK_NOT_FOUND, TXN_HASH_NOT_FOUND: another endpoint may be further ahead
+  [24, "Lagging"],
+  [29, "Lagging"]
+])
 
 /**
  * Builds a {@link StarknetRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
@@ -277,157 +225,44 @@ export const layer = (options: {
     Effect.gen(function*() {
       const { network } = options
       const expectedChainId = StarknetNetwork.toChainId(network)
-      const timeout = Duration.fromInputUnsafe(options.timeout ?? Duration.seconds(30))
 
-      const client = (yield* HttpClient.HttpClient).pipe(
-        HttpClient.filterStatusOk,
-        // a JSON-RPC error comes with HTTP 200: lift it into the error channel so that it can be retried
-        HttpClient.transformResponse((response) =>
-          response.pipe(
-            Effect.tap((response) =>
-              Effect.flatMap(response.json, (json) =>
-                Option.match(Schema.decodeUnknownOption(RpcMethods.ErrorReply)(json), {
-                  onNone: () => Effect.void,
-                  onSome: ({ error }) => Effect.fail(new JsonRpcError(error))
-                }))
-            ),
-            Effect.timeoutOrElse({
-              duration: timeout,
-              orElse: () =>
-                Effect.fail(new AttemptTimeout({ timeout }))
-            })
-          )
-        ),
-        HttpClient.retryTransient({
-          retryOn: "errors-only",
-          while: isTransientRpcError,
-          schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(Schedule.jittered),
-          times: options.retries ?? 3
-        })
-      )
-
-      const endpoints = yield* Effect.forEach(options.endpoints, (endpoint) =>
-        Effect.gen(function*() {
-          return {
-            name: endpoint.name,
-            url: Redacted.value(endpoint.url),
-            networkCheck: yield* SynchronizedRef.make<NetworkCheck>("Unchecked"),
-            head: yield* Ref.make(BigInt(-1))
-          }
-        }))
-      type Endpoint = typeof endpoints[number]
-
-      const fail = (endpoint: Endpoint, method: string, reason: StarknetRpcErrorReason, cause: Error) =>
-        new StarknetRpcError({ reason, method, endpoint: endpoint.name, cause })
-
-      const send = <Params, A>(endpoint: Endpoint, method: RpcMethods.RpcMethod<Params, A>, params: Params) =>
-        Effect.gen(function*() {
-          const encoded = yield* Schema.encodeEffect(method.params)(params).pipe(
-            Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
-          )
-          const json = yield* HttpClientRequest.post(endpoint.url).pipe(
-            HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: method.name, params: encoded }),
-            client.execute,
-            Effect.flatMap((response) => response.json),
-            Effect.mapError((error) =>
-              new StarknetRpcError({
-                ...classify(error),
-                method: method.name,
-                endpoint: endpoint.name,
-                cause: withoutUrl(error)
-              })
-            ),
-            // the client span would record the URL
-            Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
-          )
-          const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
-            Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
-          )
-          return reply.result
-        }).pipe(
-          Effect.withSpan(`StarknetRpc.${method.name}`, {
-            attributes: { network, endpoint: endpoint.name, method: method.name }
-          })
-        )
-
-      // a mismatch is kept, a failed check is not: the next call checks again
-      const checkNetwork = (endpoint: Endpoint) =>
-        SynchronizedRef.modifyEffect(endpoint.networkCheck, (state) =>
-          state !== "Unchecked"
-            ? Effect.succeed([state, state] as const)
-            : send(endpoint, RpcMethods.chainId, {}).pipe(
-              Effect.map((chainId): NetworkCheck =>
-                chainId === expectedChainId ?
-                  "Checked" :
-                  fail(
+      const rpc = yield* JsonRpc.make({
+        spanPrefix: "StarknetRpc",
+        network,
+        endpoints: options.endpoints,
+        timeout: options.timeout,
+        retries: options.retries,
+        retryDelay: options.retryDelay,
+        codes,
+        checkNetwork: (send, endpoint) =>
+          send(RpcMethods.chainId, {}).pipe(
+            Effect.flatMap((chainId) =>
+              chainId === expectedChainId
+                ? Effect.succeed(expectedChainId)
+                : Effect.fail(
+                  new StarknetRpcError({
+                    reason: "WrongNetwork",
+                    method: RpcMethods.chainId.name,
                     endpoint,
-                    RpcMethods.chainId.name,
-                    "WrongNetwork",
-                    new Error(`expected chain ID ${expectedChainId} for ${network}, got ${chainId}`)
-                  )
-              ),
-              Effect.map((checked) => [checked, checked] as const)
-            )).pipe(Effect.flatMap((state) => state instanceof StarknetRpcError ? Effect.fail(state) : Effect.void))
-
-      const call = <Params, A>(endpoint: Endpoint, method: RpcMethods.RpcMethod<Params, A>, params: Params) =>
-        checkNetwork(endpoint).pipe(Effect.andThen(send(endpoint, method, params)))
-
-      const withFallback = Effect.fnUntraced(function*<A>(
-        f: (endpoint: Endpoint) => Effect.Effect<A, StarknetRpcError>
-      ): Effect.fn.Return<A, StarknetRpcError> {
-        const errors: Array<StarknetRpcError> = []
-        for (const endpoint of endpoints) {
-          const result = yield* Effect.result(f(endpoint))
-          if (Result.isSuccess(result)) return result.success
-          errors.push(result.failure)
-          if (!fallbackReasons.has(result.failure.reason)) break
-        }
-        const last = errors[errors.length - 1]
-        if (errors.length === 1) return yield* last
-        return yield* new StarknetRpcError({
-          reason: last.reason,
-          method: last.method,
-          endpoint: last.endpoint,
-          code: last.code,
-          cause: new AggregateError(errors, `${errors.length} endpoints failed`)
-        })
+                    cause: new Error(`expected chain ID ${expectedChainId} for ${network}, got ${chainId}`)
+                  })
+                )
+            )
+          ),
+        makeError: (fields: JsonRpc.ErrorFields) => new StarknetRpcError(fields)
       })
+      type Endpoint = JsonRpc.Endpoint<StarknetNetwork.StarknetChainId, StarknetRpcError>
 
       const blockNumberOn = (endpoint: Endpoint) =>
-        call(endpoint, RpcMethods.blockNumber, {}).pipe(
+        rpc.call(endpoint, RpcMethods.blockNumber, {}).pipe(
           Effect.tap((head) => Ref.update(endpoint.head, (known) => head > known ? head : known))
         )
-
-      // an endpoint must have reached toBlock, its head is cached and only refreshed when it is below
-      const guard = (endpoint: Endpoint, method: string, toBlock: bigint) =>
-        Effect.gen(function*() {
-          if ((yield* Ref.get(endpoint.head)) >= toBlock) return
-          const head = yield* blockNumberOn(endpoint)
-          if (head < toBlock) {
-            return yield* fail(endpoint, method, "Lagging", new Error(`head ${head} is below toBlock ${toBlock}`))
-          }
-        })
-
-      // a cursor only means something to the endpoint that issued it
-      const endpointOf = (method: string, cursor: StarknetEventsCursor): Effect.Effect<Endpoint, StarknetRpcError> => {
-        const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
-        return endpoint === undefined
-          ? Effect.fail(
-            new StarknetRpcError({
-              reason: "Rejected",
-              method,
-              endpoint: cursor.endpoint,
-              cause: new Error(`no endpoint named ${cursor.endpoint}`)
-            })
-          )
-          : Effect.succeed(endpoint)
-      }
 
       const getEventsOn = (endpoint: Endpoint, filter: StarknetEventsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getEvents.name
-          yield* guard(endpoint, method, filter.toBlock)
-          const page = yield* call(endpoint, RpcMethods.getEvents, {
+          yield* rpc.guard(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
+          const page = yield* rpc.call(endpoint, RpcMethods.getEvents, {
             filter: {
               address: filter.address,
               from_block: { block_number: filter.fromBlock },
@@ -442,7 +277,7 @@ export const layer = (options: {
             event.fromAddress !== filter.address
           )
           if (invalid !== undefined) {
-            return yield* fail(
+            return yield* rpc.fail(
               endpoint,
               method,
               "InvalidResponse",
@@ -460,20 +295,21 @@ export const layer = (options: {
 
       const getEvents = (filter: StarknetEventsFilter): Effect.Effect<StarknetEventsPage, StarknetRpcError> => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
-        if (filter.cursor === undefined) return withFallback((endpoint) => getEventsOn(endpoint, filter))
-        return endpointOf(RpcMethods.getEvents.name, filter.cursor).pipe(
+        if (filter.cursor === undefined) return rpc.withFallback((endpoint) => getEventsOn(endpoint, filter))
+        // a cursor only means something to the endpoint that issued it
+        return rpc.endpointOf(RpcMethods.getEvents.name, filter.cursor).pipe(
           Effect.flatMap((endpoint) => getEventsOn(endpoint, filter))
         )
       }
 
       return StarknetRpc.of({
         network,
-        chainId: withFallback((endpoint) => checkNetwork(endpoint).pipe(Effect.as(expectedChainId))),
-        blockNumber: withFallback(blockNumberOn),
+        chainId: rpc.withFallback(rpc.checkNetwork),
+        blockNumber: rpc.withFallback(blockNumberOn),
         getEvents,
         getTransactionReceipt: ({ transactionHash }) =>
-          withFallback((endpoint) =>
-            call(endpoint, RpcMethods.getTransactionReceipt, { transaction_hash: transactionHash })
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getTransactionReceipt, { transaction_hash: transactionHash })
           )
       })
     })

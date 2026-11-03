@@ -44,6 +44,9 @@
     "test": "vitest",
     "coverage": "vitest --coverage"
   },
+  "dependencies": {
+    "@effect-blockchain/core": "workspace:^"
+  },
   "devDependencies": {
     "@effect/vitest": "4.1.0",
     "effect": "4.1.0",

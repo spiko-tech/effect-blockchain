@@ -4,19 +4,16 @@ import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
-import * as Clock from "effect/Clock"
-import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
-import * as Tracer from "effect/Tracer"
 
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
 type Node = Record<
   string,
-  (params: Schema.Json, signal: AbortSignal | null | undefined) => Reply | Promise<Reply>
+  (params: Schema.Json) => Reply
 >
 
 const TOKEN = StarknetAddress.make("0x" + "11".repeat(32))
@@ -40,12 +37,8 @@ const rawEvent = (overrides: { readonly [K in keyof typeof baseEvent]?: Schema.J
 
 const defaults: Node = { starknet_chainId: () => ({ result: SN_MAIN }) }
 
-// one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
-const setup = (
-  nodes: Record<string, Node>,
-  // `defaults` builds the layer without retries, retryDelay and timeout
-  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly defaults?: boolean } = {}
-) => {
+// one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`, without retries
+const setup = (nodes: Record<string, Node>) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const name = new URL(String(input)).hostname.split(".")[0]
@@ -56,7 +49,7 @@ const setup = (
     const handler = nodes[name]?.[body.method] ?? defaults[body.method]
     const reply = handler === undefined
       ? { error: { code: -32601, message: "method not found" } }
-      : await handler(body.params, init?.signal)
+      : handler(body.params)
     return reply instanceof Response ? reply : Response.json({ jsonrpc: "2.0", id: body.id, ...reply })
   }
   const names = Object.keys(nodes)
@@ -64,7 +57,7 @@ const setup = (
   const layer = StarknetRpc.layer({
     network: "Starknet",
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    ...(!options.defaults && { retries: options.retries ?? 0, retryDelay: "1 millis", timeout: options.timeout })
+    retries: 0
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: StarknetRpc.StarknetRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
@@ -211,186 +204,39 @@ describe("StarknetRpc", () => {
     }))
   })
 
-  const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
-    setup({ a: { starknet_blockNumber: reply } }, options).run((rpc) => Effect.flip(rpc.blockNumber))
-
-  it.effect("classifies HTTP 429 and 503 as Unavailable", () =>
-    Effect.gen(function*() {
-      for (const status of [429, 503]) {
-        const error = yield* failure(() => new Response("busy", { status }))
-        expect(error).toMatchObject({
-          reason: "Unavailable",
-          code: status,
-          method: "starknet_blockNumber",
-          endpoint: "a"
-        })
-      }
-    }))
-
-  // like fetch, hang until aborted
-  const hang: Node[string] = (_, signal) =>
-    new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
-
-  // live clock: the timeout and the retry backoff sleep for real
-  it.live("classifies a timeout and a transport error as Unavailable", () =>
-    Effect.gen(function*() {
-      const timedOut = yield* failure(hang, { timeout: "20 millis" })
-      expect(timedOut.reason).toBe("Unavailable")
-      assert.instanceOf(timedOut.cause, Error)
-      expect(timedOut.cause.message).toBe("timed out after 20ms")
-      expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
-    }))
-
-  it.effect("classifies JSON-RPC codes", () =>
+  it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
       const cases: Array<readonly [number, StarknetRpc.StarknetRpcErrorReason]> = [
         [63, "Unavailable"],
         [-32603, "Unavailable"],
+        [-32005, "Unavailable"],
+        [429, "Unavailable"],
         [24, "Lagging"],
         [29, "Lagging"],
-        [31, "Rejected"],
-        [34, "Rejected"],
-        [-32602, "Rejected"]
+        [31, "Rejected"]
       ]
       for (const [code, reason] of cases) {
-        expect(yield* failure(() => ({ error: { code, message: "no" } }))).toMatchObject({ reason, code })
+        const { run } = setup({ a: { starknet_blockNumber: () => ({ error: { code, message: "no" } }) } })
+        const error = yield* run((rpc) => Effect.flip(rpc.blockNumber))
+        expect(error).toMatchObject({ reason, code, method: "starknet_blockNumber", endpoint: "a" })
+        expect(error.message).toBe(`starknet_blockNumber failed on a: ${reason} (${code})`)
       }
     }))
 
-  it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
-    Effect.gen(function*() {
-      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
-      expect((yield* failure(() => new Response("<html>"))).reason).toBe("InvalidResponse")
-    }))
-
-  // every message, stack and JSON along the cause chain, AggregateError members included
-  const causeChain = (error: unknown): Array<string> =>
-    error instanceof Error
-      ? [
-        error.message,
-        String(error.stack),
-        JSON.stringify(error),
-        ...causeChain(error.cause),
-        ...(error instanceof AggregateError ? error.errors.flatMap(causeChain) : [])
-      ]
-      : error === undefined
-      ? []
-      : [String(error)]
-
-  it.effect("keeps the URL out of errors", () =>
-    Effect.gen(function*() {
-      for (
-        const reply of [
-          () => new Response("busy", { status: 503 }),
-          () => ({ error: { code: 3, message: "no" } }),
-          () => new Response("<html>"),
-          () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
-        ]
-      ) {
-        const error = yield* failure(reply)
-        assert.instanceOf(error.cause, Error)
-        for (const text of causeChain(error)) expect(text).not.toContain("secret-key")
-      }
-    }))
-
-  it.live("retries transient errors before falling back", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: {
-        starknet_blockNumber: () =>
-          ++attempts === 2 ? { error: { code: 63, message: "unexpected" } } : new Response("busy", { status: 503 })
-      },
-      b: { starknet_blockNumber: head(7) }
-    }, { retries: 2 })
-    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(7))
-      expect(calls).toStrictEqual([
-        "a:starknet_chainId",
-        "a:starknet_blockNumber",
-        "a:starknet_blockNumber",
-        "a:starknet_blockNumber",
-        "b:starknet_chainId",
-        "b:starknet_blockNumber"
-      ])
+  it.effect("fails WrongNetwork on a network mismatch", () => {
+    const { calls, run } = setup({ a: { starknet_chainId: () => ({ result: "0x534e5f5345504f4c4941" }) }, b: {} })
+    return run((rpc) => Effect.flip(rpc.chainId)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: "WrongNetwork", method: "starknet_chainId", endpoint: "a" })
+      expect(error.message).toBe("starknet_chainId failed on a: WrongNetwork")
+      assert.instanceOf(error.cause, Error)
+      expect(error.cause.message).toBe("expected chain ID SN_MAIN for Starknet, got SN_SEPOLIA")
+      expect(calls).toStrictEqual(["a:starknet_chainId"])
     }))
   })
 
-  it.live("does not retry a timeout and falls back", () => {
-    let aborted = 0
+  it.effect("falls back to the next endpoint through the layer", () => {
     const { calls, run } = setup({
-      a: {
-        starknet_blockNumber: (params, signal) => {
-          signal?.addEventListener("abort", () => aborted++)
-          return hang(params, signal)
-        }
-      },
-      b: { starknet_blockNumber: head(7) }
-    }, { retries: 2, timeout: "20 millis" })
-    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(7))
-      expect(aborted).toBe(1)
-      expect(calls).toStrictEqual([
-        "a:starknet_chainId",
-        "a:starknet_blockNumber",
-        "b:starknet_chainId",
-        "b:starknet_blockNumber"
-      ])
-    }))
-  })
-
-  // live clock: the default backoff from 500 millis sleeps for real
-  it.live("uses the default retries and retry delay", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: { starknet_blockNumber: () => ++attempts <= 2 ? new Response("down", { status: 503 }) : head(7)() }
-    }, { defaults: true })
-    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(7))
-      expect(calls).toStrictEqual([
-        "a:starknet_chainId",
-        "a:starknet_blockNumber",
-        "a:starknet_blockNumber",
-        "a:starknet_blockNumber"
-      ])
-    }))
-  })
-
-  it.live("waits for Retry-After", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: {
-        starknet_blockNumber: () =>
-          ++attempts === 1 ? new Response("slow down", { status: 429, headers: { "Retry-After": "1" } }) : head(5)()
-      }
-    }, { retries: 1 })
-    return Effect.gen(function*() {
-      const start = yield* Clock.currentTimeMillis
-      expect(yield* run((rpc) => rpc.blockNumber)).toBe(BigInt(5))
-      // retryDelay is 1 millis: only the header explains a one second wait
-      expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
-      expect(calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber", "a:starknet_blockNumber"])
-    })
-  })
-
-  it.effect("does not retry a 403 and falls back", () => {
-    const { calls, run } = setup({
-      a: { starknet_blockNumber: () => new Response("forbidden", { status: 403 }) },
-      b: { starknet_blockNumber: head(7) }
-    }, { retries: 3 })
-    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
-      expect(block).toBe(BigInt(7))
-      expect(calls).toStrictEqual([
-        "a:starknet_chainId",
-        "a:starknet_blockNumber",
-        "b:starknet_chainId",
-        "b:starknet_blockNumber"
-      ])
-    }))
-  })
-
-  it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
-    const { calls, run } = setup({
-      a: { starknet_blockNumber: () => ({ result: "twenty" }) },
+      a: { starknet_blockNumber: () => new Response("down", { status: 503 }) },
       b: { starknet_blockNumber: head(7) }
     })
     return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
@@ -401,116 +247,6 @@ describe("StarknetRpc", () => {
         "b:starknet_chainId",
         "b:starknet_blockNumber"
       ])
-    }))
-  })
-
-  it.effect("runs one network check for concurrent first calls", () => {
-    const { calls, run } = setup({ a: { starknet_blockNumber: head(1) } })
-    return run((rpc) => Effect.all([rpc.blockNumber, rpc.blockNumber, rpc.blockNumber], { concurrency: "unbounded" }))
-      .pipe(
-        Effect.map(() =>
-          expect(calls.filter((call) => call.endsWith("starknet_chainId"))).toStrictEqual(["a:starknet_chainId"])
-        )
-      )
-  })
-
-  it.effect("fails Rejected without a request when params do not encode", () => {
-    const { calls, run } = setup({ a: { starknet_blockNumber: head(20) }, b: {} })
-    return run((rpc) =>
-      Effect.gen(function*() {
-        // learn a's head first, so that getEvents has nothing to ask before encoding
-        yield* rpc.blockNumber
-        calls.length = 0
-        const error = yield* Effect.flip(rpc.getEvents({ ...filter, keys: [["not a felt"]] }))
-        expect(error).toMatchObject({ reason: "Rejected", method: "starknet_getEvents", endpoint: "a" })
-        expect(calls).toStrictEqual([])
-      })
-    )
-  })
-
-  it.effect("records one span per request without the URL", () => {
-    const spans: Array<Tracer.NativeSpan> = []
-    const tracer = Tracer.make({
-      span: (options) => {
-        const span = new Tracer.NativeSpan(options)
-        spans.push(span)
-        return span
-      }
-    })
-    const { calls, run } = setup({ a: { starknet_blockNumber: head(1) } })
-    return run((rpc) => rpc.blockNumber).pipe(
-      Effect.withTracer(tracer),
-      Effect.map(() => {
-        expect(calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber"])
-        expect(spans.map((span) => [span.name, Object.fromEntries(span.attributes)])).toStrictEqual([
-          ["StarknetRpc.starknet_chainId", { network: "Starknet", endpoint: "a", method: "starknet_chainId" }],
-          ["StarknetRpc.starknet_blockNumber", { network: "Starknet", endpoint: "a", method: "starknet_blockNumber" }]
-        ])
-        for (const span of spans) {
-          expect(`${span.name} ${JSON.stringify([...span.attributes])}`).not.toContain("secret-key")
-        }
-      })
-    )
-  })
-
-  it.effect("falls back in order and stops on Rejected", () =>
-    Effect.gen(function*() {
-      const down = () => new Response("down", { status: 503 })
-      const fallback = setup({ a: { starknet_blockNumber: down }, b: { starknet_blockNumber: head(7) } })
-      expect(yield* fallback.run((rpc) => rpc.blockNumber)).toBe(BigInt(7))
-      expect(fallback.calls).toStrictEqual([
-        "a:starknet_chainId",
-        "a:starknet_blockNumber",
-        "b:starknet_chainId",
-        "b:starknet_blockNumber"
-      ])
-
-      const rejected = () => ({ error: { code: -32602, message: "invalid params" } })
-      const stop = setup({ a: { starknet_blockNumber: rejected }, b: { starknet_blockNumber: head(7) } })
-      expect((yield* stop.run((rpc) => Effect.flip(rpc.blockNumber))).reason).toBe("Rejected")
-      expect(stop.calls).toStrictEqual(["a:starknet_chainId", "a:starknet_blockNumber"])
-    }))
-
-  it.effect("fails with the last error and keeps the others when every endpoint fails", () =>
-    Effect.gen(function*() {
-      const missing = () => ({ error: { code: 29, message: "transaction hash not found" } })
-      const { run } = setup({
-        a: { starknet_getTransactionReceipt: missing },
-        b: { starknet_getTransactionReceipt: () => ({ result: { transaction_hash: TX, events: [] } }) }
-      })
-      const error = yield* run((rpc) => Effect.flip(rpc.getTransactionReceipt({ transactionHash: TX })))
-      // b's receipt is pre-confirmed: no block
-      expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
-      assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ endpoint: "a", reason: "Lagging", code: 29 }, { endpoint: "b" }])
-    }))
-
-  it.effect("checks the network once per endpoint and caches a mismatch", () =>
-    Effect.gen(function*() {
-      const ok = setup({ a: { starknet_blockNumber: head(1) } })
-      yield* ok.run((rpc) => Effect.zip(rpc.blockNumber, rpc.blockNumber))
-      expect(ok.calls.filter((call) => call.endsWith("starknet_chainId"))).toHaveLength(1)
-
-      const sepolia = () => ({ result: "0x534e5f5345504f4c4941" })
-      const wrong = setup({ a: { starknet_chainId: sepolia, starknet_blockNumber: head(1) }, b: {} })
-      const errors = yield* wrong.run((rpc) => Effect.zip(Effect.flip(rpc.blockNumber), Effect.flip(rpc.blockNumber)))
-      expect(errors.map((error) => error.reason)).toStrictEqual(["WrongNetwork", "WrongNetwork"])
-      assert.instanceOf(errors[0].cause, Error)
-      expect(errors[0].cause.message).toContain("got SN_SEPOLIA")
-      expect(wrong.calls).toStrictEqual(["a:starknet_chainId"])
-    }))
-
-  it.effect("does not cache a failed network check", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: {
-        starknet_chainId: () => ++attempts === 1 ? new Response("down", { status: 503 }) : { result: SN_MAIN },
-        starknet_blockNumber: head(1)
-      }
-    })
-    return run((rpc) => Effect.zip(Effect.flip(rpc.blockNumber), rpc.blockNumber)).pipe(Effect.map(([error]) => {
-      expect(error.reason).toBe("Unavailable")
-      expect(calls).toStrictEqual(["a:starknet_chainId", "a:starknet_chainId", "a:starknet_blockNumber"])
     }))
   })
 
