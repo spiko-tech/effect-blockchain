@@ -1,0 +1,23 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "eth_getLogs",
+    "params": [
+      {
+        "address": [
+          "0xa0769f7a8fc65e47de93797b4e21c073c117fc80",
+          "0xe4880249745eac5f1ed9d8f7df844792d560e750"
+        ],
+        "fromBlock": "0x18e00dd",
+        "toBlock": "0x18e00e6",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        ]
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"address\":\"0xe4880249745eac5f1ed9d8f7df844792d560e750\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000bd6ad96f51e8d732811587468d0e2f9efa55f605\",\"0x000000000000000000000000923489cbb30f861fa60bae5c5c4e8e81bc13caf9\"],\"data\":\"0x0000000000000000000000000000000000000000000000000000000087c85fac\",\"blockHash\":\"0xebffcdc425e4c9fad20245382350bcf847f91c1f2aff1f47342586fa20e2df6e\",\"blockNumber\":\"0x18e00dd\",\"blockTimestamp\":\"0x6abbc2eb\",\"transactionHash\":\"0x5b742dac0f3747de0d0196a04c4d821c8e086f06c4b98d024b08ae18ea39678e\",\"transactionIndex\":\"0x159\",\"logIndex\":\"0x4a4\",\"removed\":false},{\"address\":\"0xe4880249745eac5f1ed9d8f7df844792d560e750\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000923489cbb30f861fa60bae5c5c4e8e81bc13caf9\",\"0x000000000000000000000000dd82875f0840aad58a455a70b88eed9f59cec7c7\"],\"data\":\"0x0000000000000000000000000000000000000000000000000000000087c85fac\",\"blockHash\":\"0x2bd3c1a5de833666e3d0d013c8cfa26d0505240fc4a8041f97896cddb7087e98\",\"blockNumber\":\"0x18e00df\",\"blockTimestamp\":\"0x6abbc303\",\"transactionHash\":\"0xfcab498f000da8928692b38d3b3561881a2087b75829d5059c3f831dd19034dc\",\"transactionIndex\":\"0x28\",\"logIndex\":\"0x8e\",\"removed\":false},{\"address\":\"0xe4880249745eac5f1ed9d8f7df844792d560e750\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000bd6ad96f51e8d732811587468d0e2f9efa55f605\",\"0x000000000000000000000000923489cbb30f861fa60bae5c5c4e8e81bc13caf9\"],\"data\":\"0x0000000000000000000000000000000000000000000000000000000087c85fac\",\"blockHash\":\"0x75dde558962e6715154ebf1b54b0c36b822cca740d11a42328e4cdb859627107\",\"blockNumber\":\"0x18e00e5\",\"blockTimestamp\":\"0x6abbc34b\",\"transactionHash\":\"0x28fa6f60999c42e3bf35d6c9e01b9fcbd67dca60e761f593d3a688ad6e2dd1da\",\"transactionIndex\":\"0x95\",\"logIndex\":\"0x26b\",\"removed\":false},{\"address\":\"0xe4880249745eac5f1ed9d8f7df844792d560e750\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x000000000000000000000000923489cbb30f861fa60bae5c5c4e8e81bc13caf9\",\"0x000000000000000000000000dd82875f0840aad58a455a70b88eed9f59cec7c7\"],\"data\":\"0x0000000000000000000000000000000000000000000000000000000087c85fac\",\"blockHash\":\"0x59a22980e450816b4fea96811aba0a8eae46350a22d9bf6335c0f447ce3552b2\",\"blockNumber\":\"0x18e00e6\",\"blockTimestamp\":\"0x6abbc357\",\"transactionHash\":\"0x759cd6af745d31505e52ba0e0dd9265153938a802f3214e177dae0a2f4d4ae90\",\"transactionIndex\":\"0x4d\",\"logIndex\":\"0xcd\",\"removed\":false},{\"address\":\"0xa0769f7a8fc65e47de93797b4e21c073c117fc80\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",\"0x0000000000000000000000005bdd60e46b48caafc2497eccf5b668e50e38f718\",\"0x000000000000000000000000975d0f06b1ce80ed3071147b58c5a861a9a0458d\"],\"data\":\"0x00000000000000000000000000000000000000000000000000000000002bc891\",\"blockHash\":\"0x59a22980e450816b4fea96811aba0a8eae46350a22d9bf6335c0f447ce3552b2\",\"blockNumber\":\"0x18e00e6\",\"blockTimestamp\":\"0x6abbc357\",\"transactionHash\":\"0x612a8b9b05284bada2c9dbfe3f3b8031c23fe5b45af0f449c6062df9803cad14\",\"transactionIndex\":\"0x57\",\"logIndex\":\"0xdf\",\"removed\":false}]}"
+}

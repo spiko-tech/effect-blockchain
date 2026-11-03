@@ -1,0 +1,25 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "eth_getLogs",
+    "params": [
+      {
+        "address": [
+          "0xa0769f7a8fc65e47de93797b4e21c073c117fc80",
+          "0xe4880249745eac5f1ed9d8f7df844792d560e750"
+        ],
+        "fromBlock": "0x18e00dd",
+        "toBlock": "0x18e00e6",
+        "topics": [
+          [
+            "0xab"
+          ]
+        ]
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid params\",\"data\":\"Invalid variadic value or array type: data did not match any variant of untagged enum Variadic at line 1 column 168\"}}"
+}
