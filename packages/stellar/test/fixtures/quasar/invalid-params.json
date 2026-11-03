@@ -1,0 +1,25 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getEvents",
+    "params": {
+      "startLedger": 65270680,
+      "endLedger": 65271881,
+      "filters": [
+        {
+          "type": "contract",
+          "contractIds": [
+            "CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF"
+          ]
+        }
+      ],
+      "pagination": {
+        "limit": 20000
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"limit must not exceed 10000\"}}"
+}

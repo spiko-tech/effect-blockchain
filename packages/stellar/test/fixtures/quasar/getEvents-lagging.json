@@ -1,0 +1,25 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getEvents",
+    "params": {
+      "startLedger": 999999990,
+      "endLedger": 1000000001,
+      "filters": [
+        {
+          "type": "contract",
+          "contractIds": [
+            "CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF"
+          ]
+        }
+      ],
+      "pagination": {
+        "limit": 3
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"startLedger must be within the ledger range: 65161983 - 65282942\"}}"
+}

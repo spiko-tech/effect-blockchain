@@ -1,0 +1,10 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getHealth"
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"healthy\",\"latestLedger\":65282941,\"latestLedgerCloseTime\":\"1793700744\",\"oldestLedger\":65161982,\"oldestLedgerCloseTime\":\"1793095693\",\"ledgerRetentionWindow\":120960}}"
+}

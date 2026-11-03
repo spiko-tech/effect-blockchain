@@ -1,0 +1,25 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getEvents",
+    "params": {
+      "startLedger": 65270680,
+      "endLedger": 65271881,
+      "filters": [
+        {
+          "type": "contract",
+          "contractIds": [
+            "CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF"
+          ]
+        }
+      ],
+      "pagination": {
+        "limit": 3
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"events\":[{\"type\":\"contract\",\"ledger\":65270690,\"ledgerClosedAt\":\"2026-11-02T17:07:14Z\",\"contractId\":\"CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF\",\"id\":\"0280335478937866240-0000000000\",\"operationIndex\":0,\"transactionIndex\":125,\"txHash\":\"cd624565b0c34653c21a2e2d7c08ed8e3bdeabe0684b08d89d96f96d7d9d1b6b\",\"inSuccessfulContractCall\":true,\"topic\":[\"AAAADwAAAAh0cmFuc2Zlcg==\",\"AAAAEgAAAAAAAAAA0OH0EAAS59i5K8uFy7iZpPaX4nOvGw1iD9io2hJGvTs=\",\"AAAAEgAAAAAAAAAAlps3R9l49qn4rVCAJbJpiFejcOF9WoTO6fPnzZnBxw0=\"],\"value\":\"AAAACgAAAAAAAAAAAAAAAAAAA60=\"},{\"type\":\"contract\",\"ledger\":65270690,\"ledgerClosedAt\":\"2026-11-02T17:07:14Z\",\"contractId\":\"CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF\",\"id\":\"0280335478937886720-0000000000\",\"operationIndex\":0,\"transactionIndex\":130,\"txHash\":\"201a5983c2368ae2adc2192603cf1c040766dfb284d7fd2f9eafbe1d9fe34f6f\",\"inSuccessfulContractCall\":true,\"topic\":[\"AAAADwAAAAh0cmFuc2Zlcg==\",\"AAAAEgAAAAAAAAAA0OH0EAAS59i5K8uFy7iZpPaX4nOvGw1iD9io2hJGvTs=\",\"AAAAEgAAAAAAAAAAzihz1ZJZK01D0t87dHWIkjIzsvWMohd5X5i2FAiodCc=\"],\"value\":\"AAAACgAAAAAAAAAAAAAAAAAArNw=\"},{\"type\":\"contract\",\"ledger\":65270690,\"ledgerClosedAt\":\"2026-11-02T17:07:14Z\",\"contractId\":\"CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF\",\"id\":\"0280335478937985024-0000000000\",\"operationIndex\":0,\"transactionIndex\":154,\"txHash\":\"8f9fa7563393d1acb7d2f1860df7389fce92ac03bd4d3e02908e21b1631a90a7\",\"inSuccessfulContractCall\":true,\"topic\":[\"AAAADwAAAAh0cmFuc2Zlcg==\",\"AAAAEgAAAAAAAAAA0OH0EAAS59i5K8uFy7iZpPaX4nOvGw1iD9io2hJGvTs=\",\"AAAAEgAAAAAAAAAAmsvQt9rpcfu0ZpYHEaCSYhjAh/hWVzVKZiEMHxa6OOU=\"],\"value\":\"AAAACgAAAAAAAAAAAAAAAAACEZw=\"}],\"cursor\":\"0280335478937985024-0000000000\",\"latestLedger\":65282941,\"oldestLedger\":65161982,\"latestLedgerCloseTime\":\"1793700744\",\"oldestLedgerCloseTime\":\"1793095693\"}}"
+}
