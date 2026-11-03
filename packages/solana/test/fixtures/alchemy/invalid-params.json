@@ -1,0 +1,17 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getSignaturesForAddress",
+    "params": [
+      "6rS8E5CQHLHmLenNNevUdJ9APzKNairr1kfWAM3EhDX3",
+      {
+        "limit": 0,
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid limit; max 10000\"}}"
+}

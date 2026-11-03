@@ -1,0 +1,11 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getGenesisHash",
+    "params": []
+  },
+  "status": 401,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"Must be authenticated!\"}}"
+}
