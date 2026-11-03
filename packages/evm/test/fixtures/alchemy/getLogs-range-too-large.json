@@ -1,0 +1,23 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "eth_getLogs",
+    "params": [
+      {
+        "address": [
+          "0xa0769f7a8fc65e47de93797b4e21c073c117fc80",
+          "0xe4880249745eac5f1ed9d8f7df844792d560e750"
+        ],
+        "fromBlock": "0x18dd9cd",
+        "toBlock": "0x18e00e6",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        ]
+      }
+    ]
+  },
+  "status": 400,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range. Based on your parameters, this block range should work: [0x18dd9cd, 0x18dd9d6]. Upgrade to PAYG for expanded block range.\"}}"
+}

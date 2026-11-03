@@ -1,0 +1,11 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "eth_chainId",
+    "params": []
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}"
+}
