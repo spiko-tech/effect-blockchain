@@ -45,6 +45,9 @@
     "test": "vitest",
     "coverage": "vitest --coverage"
   },
+  "dependencies": {
+    "@effect-blockchain/core": "workspace:^"
+  },
   "devDependencies": {
     "@effect/vitest": "4.1.0",
     "@stellar/stellar-sdk": "16.4.1",

@@ -1,21 +1,10 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import { StellarContractAddress } from "../StellarAddress.ts"
 import { StellarContractEvent } from "../StellarContractEvent.ts"
 import { LedgerFromNumber } from "./LedgerFromNumber.ts"
 
-/**
- * A Stellar RPC method: its name, the codec of its named params (`undefined`: no `params` member is sent) and the
- * codec of its result.
- *
- * @internal
- */
-export interface RpcMethod<Params, Result> {
-  readonly name: string
-  readonly params: Schema.Codec<Params, Schema.JsonObject | undefined>
-  readonly result: Schema.Codec<Result, Schema.Json>
-}
-
-const make = <Params, Result>(method: RpcMethod<Params, Result>): RpcMethod<Params, Result> => method
+const make = <Params, A>(method: JsonRpc.Method<Params, A>): JsonRpc.Method<Params, A> => method
 
 const NoParams = Schema.Undefined
 
@@ -63,10 +52,3 @@ export const getEvents = make({
   }),
   result: Schema.Struct({ events: Schema.Array(StellarContractEvent), cursor: Cursor, latestLedger: LedgerFromNumber })
 })
-
-/**
- * A JSON-RPC error reply.
- *
- * @internal
- */
-export const ErrorReply = Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) })

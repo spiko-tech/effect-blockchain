@@ -5,20 +5,17 @@ import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { StrKey } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
-import * as Clock from "effect/Clock"
-import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
-import * as Tracer from "effect/Tracer"
 
 type Params = { readonly [key: string]: Schema.Json }
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
 type Node = Record<
   string,
-  (params: Params | undefined, signal: AbortSignal | null | undefined) => Reply | Promise<Reply>
+  (params: Params | undefined) => Reply | Promise<Reply>
 >
 
 const CONTRACT = StellarContractAddress.make("CCAANR7HZNOXYZD7SXS2WQLV5BAOXSRZ7V4O43IANSB355QN2RNG7WVC")
@@ -65,10 +62,7 @@ const defaults: Node = {
 }
 
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
-const setup = (
-  nodes: Record<string, Node>,
-  options: { readonly retries?: number; readonly timeout?: Duration.Input; readonly layerDefaults?: boolean } = {}
-) => {
+const setup = (nodes: Record<string, Node>) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const name = new URL(String(input)).hostname.split(".")[0]
@@ -77,7 +71,7 @@ const setup = (
     const handler = nodes[name]?.[body.method] ?? defaults[body.method]
     const reply = handler === undefined
       ? { error: { code: -32601, message: "method not found" } }
-      : await handler(body.params, init?.signal)
+      : await handler(body.params)
     return reply instanceof Response ? reply : Response.json({ jsonrpc: "2.0", id: body.id, ...reply })
   }
   const names = Object.keys(nodes)
@@ -85,9 +79,7 @@ const setup = (
   const layer = StellarRpc.layer({
     network: "Stellar",
     endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
-    ...(options.layerDefaults
-      ? {}
-      : { retries: options.retries ?? 0, retryDelay: "1 millis", timeout: options.timeout })
+    retries: 0
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: StellarRpc.StellarRpc["Service"]) => Effect.Effect<A, E>) =>
     Effect.gen(function*() {
@@ -95,10 +87,6 @@ const setup = (
     }).pipe(Effect.provide(layer))
   return { calls, run }
 }
-
-// like fetch, hang until aborted
-const hang: Node[string] = (_, signal) =>
-  new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
 
 const filter = { contractIds: [CONTRACT] as const, fromBlock: BigInt(10), toBlock: BigInt(20) }
 
@@ -211,279 +199,40 @@ describe("StellarRpc", () => {
     return run((rpc) => rpc.getLatestLedger).pipe(Effect.map(() => expect(sent).toBeUndefined()))
   })
 
-  const failure = (reply: Node[string], options?: { readonly timeout?: Duration.Input }) =>
-    setup({ a: { getLatestLedger: reply } }, options).run((rpc) => Effect.flip(rpc.getLatestLedger))
-
-  it.effect("classifies HTTP 429 and 503 as Unavailable", () =>
+  it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
-      for (const status of [429, 503]) {
-        const error = yield* failure(() => new Response("busy", { status }))
-        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "getLatestLedger", endpoint: "a" })
+      for (const [code, reason] of [[-32603, "Unavailable"], [-32602, "Rejected"]] as const) {
+        const { run } = setup({ a: { getLatestLedger: () => ({ error: { code, message: "boom" } }) } })
+        const error = yield* run((rpc) => Effect.flip(rpc.getLatestLedger))
+        expect(error).toMatchObject({ reason, code })
+        expect(error.message).toBe(`getLatestLedger failed on a: ${reason} (${code})`)
       }
     }))
 
-  it.live("classifies a timeout and a transport error as Unavailable", () =>
-    Effect.gen(function*() {
-      const timedOut = yield* failure(hang, { timeout: "20 millis" })
-      expect(timedOut.reason).toBe("Unavailable")
-      assert.instanceOf(timedOut.cause, Error)
-      expect(timedOut.cause.message).toBe("timed out after 20ms")
-      const down = () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
-      expect((yield* failure(down)).reason).toBe("Unavailable")
-    }))
-
-  it.effect("classifies JSON-RPC codes", () =>
-    Effect.gen(function*() {
-      const rejected = yield* failure(() => ({ error: { code: -32602, message: "invalid params" } }))
-      expect(rejected).toMatchObject({ reason: "Rejected", code: -32602 })
-      const internal = yield* failure(() => ({ error: { code: -32603, message: "database is locked" } }))
-      expect(internal).toMatchObject({ reason: "Unavailable", code: -32603 })
-    }))
-
-  it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
-    Effect.gen(function*() {
-      for (
-        const reply of [
-          () => ({ result: { sequence: "twenty" } }),
-          () => new Response("<html>"),
-          () => Response.json({ jsonrpc: "2.0", id: 1 })
-        ]
-      ) {
-        expect((yield* failure(reply)).reason).toBe("InvalidResponse")
-      }
-    }))
-
-  it.effect("keeps the URL out of errors", () =>
-    Effect.gen(function*() {
-      // every message, stack and JSON in the cause chain, through AggregateError members
-      const texts = (error: Error): Array<string> => [
-        error.message,
-        error.stack ?? "",
-        JSON.stringify(error),
-        ...(error.cause instanceof Error ? texts(error.cause) : []),
-        ...(error instanceof AggregateError ? error.errors.filter((e) => e instanceof Error).flatMap(texts) : [])
-      ]
-      const transport = () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
-      const errors = [
-        yield* failure(() => new Response("busy", { status: 503 })),
-        yield* failure(transport),
-        yield* failure(() => new Response("<html>")),
-        yield* setup({ a: { getLatestLedger: transport }, b: { getLatestLedger: transport } }).run((rpc) =>
-          Effect.flip(rpc.getLatestLedger)
-        )
-      ]
-      for (const error of errors) {
-        for (const text of texts(error)) expect(text).not.toContain("secret-key")
-      }
-    }))
-
-  it.live("retries transient errors before falling back", () =>
-    Effect.gen(function*() {
-      let attempts = 0
-      const flaky = setup({
-        a: {
-          getLatestLedger: () =>
-            ++attempts === 1
-              ? new Response("busy", { status: 503 })
-              : { error: { code: -32603, message: "database is locked" } }
-        },
-        b: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
-      }, { retries: 2 })
-      expect((yield* flaky.run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
-      expect(flaky.calls).toStrictEqual([
-        "a:getNetwork",
-        "a:getLatestLedger",
-        "a:getLatestLedger",
-        "a:getLatestLedger",
-        "b:getNetwork",
-        "b:getLatestLedger"
-      ])
-
-      const rejected = setup(
-        { a: { getLatestLedger: () => ({ error: { code: -32602, message: "invalid params" } }) } },
-        {
-          retries: 2
-        }
-      )
-      yield* rejected.run((rpc) => Effect.flip(rpc.getLatestLedger))
-      expect(rejected.calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger"])
-    }))
-
-  it.live("does not retry a timeout and falls back", () =>
-    Effect.gen(function*() {
-      let aborted = false
-      const { calls, run } = setup({
-        a: {
-          getLatestLedger: (params, signal) => {
-            signal?.addEventListener("abort", () => aborted = true)
-            return hang(params, signal)
-          }
-        },
-        b: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
-      }, { retries: 2, timeout: "20 millis" })
-      expect((yield* run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
-      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "b:getNetwork", "b:getLatestLedger"])
-      expect(aborted).toBe(true)
-    }))
-
-  it.live("uses the default retries and retry delay", () =>
-    Effect.gen(function*() {
-      let attempts = 0
-      const { calls, run } = setup({
-        a: {
-          getLatestLedger: () =>
-            ++attempts <= 2
-              ? new Response("busy", { status: 503 })
-              : { result: { id: "ab", protocolVersion: 23, sequence: 5 } }
-        }
-      }, { layerDefaults: true })
-      expect((yield* run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
-      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "a:getLatestLedger", "a:getLatestLedger"])
-    }))
-
-  it.live("waits for Retry-After", () =>
-    Effect.gen(function*() {
-      let attempts = 0
-      const { calls, run } = setup({
-        a: {
-          getLatestLedger: () =>
-            ++attempts === 1
-              ? new Response("slow down", { status: 429, headers: { "retry-after": "1" } })
-              : { result: { id: "ab", protocolVersion: 23, sequence: 5 } }
-        }
-      }, { retries: 1 })
-      const start = yield* Clock.currentTimeMillis
-      expect((yield* run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(5))
-      expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
-      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "a:getLatestLedger"])
-    }))
-
-  it.effect("does not retry a 403 and falls back", () => {
+  it.effect("fails WrongNetwork on a network mismatch", () => {
+    const testnet = toPassphrase("StellarTestnet")
     const { calls, run } = setup({
-      a: { getLatestLedger: () => new Response("forbidden", { status: 403 }) },
-      b: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
-    }, { retries: 2 })
-    return run((rpc) => rpc.getLatestLedger).pipe(Effect.map((ledger) => {
-      expect(ledger.sequence).toBe(BigInt(5))
-      expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "b:getNetwork", "b:getLatestLedger"])
-    }))
-  })
-
-  it.effect("fails Rejected without a request when params do not encode", () => {
-    const { calls, run } = setup({ a: {} })
-    const cursor = StellarRpc.StellarEventsCursor.make({ endpoint: "a", cursor: "not-a-cursor" })
-    return run((rpc) =>
-      Effect.gen(function*() {
-        yield* rpc.getNetwork
-        calls.length = 0
-        expect(yield* Effect.flip(rpc.getEvents({ ...filter, cursor }))).toMatchObject({
-          reason: "Rejected",
-          method: "getEvents",
-          endpoint: "a"
-        })
-        expect(calls).toStrictEqual([])
-      })
-    )
-  })
-
-  it.effect("records one span per request without the URL", () => {
-    const spans: Array<Tracer.NativeSpan> = []
-    const tracer = Tracer.make({
-      span(options) {
-        const span = new Tracer.NativeSpan(options)
-        spans.push(span)
-        return span
-      }
+      a: { getNetwork: () => ({ result: { passphrase: testnet, protocolVersion: 23 } }) },
+      b: {}
     })
-    const { run } = setup({
-      a: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
-    })
-    return run((rpc) => rpc.getLatestLedger).pipe(
-      Effect.provide(Layer.succeed(Tracer.Tracer, tracer)),
-      Effect.map(() => {
-        expect(spans.map((span) => [span.name, Object.fromEntries(span.attributes)])).toStrictEqual([
-          ["StellarRpc.getNetwork", { network: "Stellar", endpoint: "a", method: "getNetwork" }],
-          ["StellarRpc.getLatestLedger", { network: "Stellar", endpoint: "a", method: "getLatestLedger" }]
-        ])
-        for (const span of spans) {
-          expect(`${span.name} ${JSON.stringify([...span.attributes])}`).not.toContain("secret-key")
-        }
-      })
-    )
+    return run((rpc) => Effect.flip(rpc.getLatestLedger)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: "WrongNetwork", method: "getNetwork", endpoint: "a" })
+      expect(error.message).toBe("getNetwork failed on a: WrongNetwork")
+      assert.instanceOf(error.cause, Error)
+      expect(error.cause.message).toBe(`expected passphrase "${toPassphrase("Stellar")}" for Stellar, got "${testnet}"`)
+      expect(calls).toStrictEqual(["a:getNetwork"])
+    }))
   })
 
-  it.effect("falls back in order and stops on Rejected", () =>
-    Effect.gen(function*() {
-      const down = () => new Response("down", { status: 503 })
-      const latest = () => ({ result: { id: "ab", protocolVersion: 23, sequence: 7 } })
-      const fallback = setup({ a: { getLatestLedger: down }, b: { getLatestLedger: latest } })
-      expect((yield* fallback.run((rpc) => rpc.getLatestLedger)).sequence).toBe(BigInt(7))
-      expect(fallback.calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "b:getNetwork", "b:getLatestLedger"])
-
-      const rejected = () => ({ error: { code: -32602, message: "invalid params" } })
-      const stop = setup({ a: { getLatestLedger: rejected }, b: { getLatestLedger: latest } })
-      expect((yield* stop.run((rpc) => Effect.flip(rpc.getLatestLedger))).reason).toBe("Rejected")
-      expect(stop.calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger"])
-    }))
-
-  it.effect("fails with the last error and keeps the others when every endpoint fails", () =>
-    Effect.gen(function*() {
-      const { run } = setup({
-        a: { getLatestLedger: () => new Response("down", { status: 503 }) },
-        b: { getLatestLedger: () => ({ result: "nope" }) }
-      })
-      const error = yield* run((rpc) => Effect.flip(rpc.getLatestLedger))
-      expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
-      assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
-    }))
-
-  it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
+  it.effect("falls back to the next endpoint through the layer", () => {
     const { calls, run } = setup({
-      a: { getLatestLedger: () => ({ result: "nope" }) },
+      a: { getLatestLedger: () => new Response("down", { status: 503 }) },
       b: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 7 } }) }
     })
     return run((rpc) => rpc.getLatestLedger).pipe(Effect.map((ledger) => {
       expect(ledger.sequence).toBe(BigInt(7))
       expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "b:getNetwork", "b:getLatestLedger"])
     }))
-  })
-
-  it.effect("checks the network once per endpoint and caches a mismatch", () =>
-    Effect.gen(function*() {
-      const ok = setup({ a: {} })
-      yield* ok.run((rpc) => Effect.zip(rpc.getNetwork, rpc.getEvents(filter)))
-      expect(ok.calls.filter((call) => call.endsWith("getNetwork"))).toHaveLength(1)
-
-      const testnet = () => ({
-        result: { passphrase: toPassphrase("StellarTestnet"), protocolVersion: 23 }
-      })
-      const wrong = setup({ a: { getNetwork: testnet }, b: {} })
-      const errors = yield* wrong.run((rpc) =>
-        Effect.zip(Effect.flip(rpc.getLatestLedger), Effect.flip(rpc.getLatestLedger))
-      )
-      expect(errors.map((error) => error.reason)).toStrictEqual(["WrongNetwork", "WrongNetwork"])
-      expect(wrong.calls).toStrictEqual(["a:getNetwork"])
-    }))
-
-  it.effect("does not cache a failed network check", () => {
-    let attempts = 0
-    const { calls, run } = setup({
-      a: { getNetwork: (p, s) => ++attempts === 1 ? new Response("down", { status: 503 }) : defaults.getNetwork(p, s) }
-    })
-    return run((rpc) => Effect.zip(Effect.flip(rpc.getNetwork), rpc.getNetwork)).pipe(Effect.map(([error]) => {
-      expect(error.reason).toBe("Unavailable")
-      expect(calls).toStrictEqual(["a:getNetwork", "a:getNetwork"])
-    }))
-  })
-
-  it.effect("runs one network check for concurrent first calls", () => {
-    const { calls, run } = setup({
-      a: { getLatestLedger: () => ({ result: { id: "ab", protocolVersion: 23, sequence: 5 } }) }
-    })
-    return run((rpc) => Effect.all([rpc.getLatestLedger, rpc.getLatestLedger], { concurrency: "unbounded" })).pipe(
-      Effect.map(() => expect(calls).toStrictEqual(["a:getNetwork", "a:getLatestLedger", "a:getLatestLedger"]))
-    )
   })
 
   it.effect("skips a lagging endpoint and remembers heads", () => {
