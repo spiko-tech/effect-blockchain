@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Option from "effect/Option"
 import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
@@ -7,18 +8,7 @@ import { EvmHexData } from "../EvmHexData.ts"
 import { EvmLog } from "../EvmLog.ts"
 import { IntFromHex, QuantityFromHex } from "./QuantityFromHex.ts"
 
-/**
- * A JSON-RPC method: its name, the codec of its positional params and the codec of its result.
- *
- * @internal
- */
-export interface RpcMethod<Params, Result> {
-  readonly name: string
-  readonly params: Schema.Codec<Params, ReadonlyArray<Schema.Json>>
-  readonly result: Schema.Codec<Result, Schema.Json>
-}
-
-const make = <Params, Result>(method: RpcMethod<Params, Result>): RpcMethod<Params, Result> => method
+const make = <Params, Result>(method: JsonRpc.Method<Params, Result>): JsonRpc.Method<Params, Result> => method
 
 const NoParams = Schema.Tuple([])
 
@@ -53,10 +43,3 @@ export const getLogs = make({
   // a log dropped by a reorg comes back with `removed: true` and must not be returned
   result: Schema.Array(Schema.Struct({ ...EvmLog.fields, removed: Schema.optionalKey(Schema.Literal(false)) }))
 })
-
-/**
- * A JSON-RPC error reply.
- *
- * @internal
- */
-export const ErrorReply = Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) })

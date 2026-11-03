@@ -259,6 +259,10 @@ importers:
         version: 4.1.0
 
   packages/evm:
+    dependencies:
+      '@effect-blockchain/core':
+        specifier: workspace:^
+        version: link:../core
     devDependencies:
       '@effect/vitest':
         specifier: 4.1.0
