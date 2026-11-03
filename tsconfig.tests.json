@@ -31,6 +31,7 @@
     "paths": {
       // These path aliases allow us to load workspace packages in tests and examples.
       "@effect-blockchain/core": ["./packages/core/src/index.ts"],
+      "@effect-blockchain/core/test/*": ["./packages/core/test/*.ts"],
       "@effect-blockchain/core/*": ["./packages/core/src/*.ts"],
       "@effect-blockchain/evm": ["./packages/evm/src/index.ts"],
       "@effect-blockchain/evm/*": ["./packages/evm/src/*.ts"],

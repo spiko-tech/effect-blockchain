@@ -5,7 +5,7 @@
 //
 // Stellar RPC only keeps about 7 days of ledgers, so the pinned range falls out of the retention window: pass a recent
 // `startLedger` (a ledger with EUTBL and USTBL events) to move it, then update the values the tests assert.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { type Case, record, secret } from "../../core/scripts/recordFixtures.ts"
 
 // Spiko tokens, docs.spiko.io/documentation/tokenization/addresses
 const EUTBL = "CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF"
@@ -19,24 +19,6 @@ const endLedger = startLedger + 1201
 const PRUNED_LEDGER = 60000000
 const FUTURE_LEDGER = 999999990
 
-const quasarKey = process.env.QUASAR_API_KEY
-if (quasarKey === undefined || quasarKey === "") throw new Error("QUASAR_API_KEY is not set")
-const urls: Record<string, string> = {
-  quasar: `https://rpc-pro.lightsail.network/${quasarKey}`,
-  "quasar-invalid-key": "https://rpc-pro.lightsail.network/invalid-key"
-}
-
-type Json = null | boolean | number | string | ReadonlyArray<Json> | { readonly [key: string]: Json }
-
-interface Case {
-  // `provider` picks the URL and is written in the fixture, `file` is its path under `test/fixtures`
-  readonly provider: string
-  readonly file: string
-  readonly method: string
-  // a function reads the replies recorded before it (by file), to follow a cursor
-  readonly params?: Json | ((replies: ReadonlyMap<string, string>) => Json)
-}
-
 const contract = (contractIds: ReadonlyArray<string>) => [{ type: "contract", contractIds }]
 const range = (start: number, end: number, contractIds: ReadonlyArray<string>, limit: number) => ({
   startLedger: start,
@@ -46,83 +28,50 @@ const range = (start: number, end: number, contractIds: ReadonlyArray<string>, l
 })
 
 const cases: ReadonlyArray<Case> = [
-  { provider: "quasar", file: "quasar/getNetwork", method: "getNetwork" },
-  { provider: "quasar", file: "quasar/getHealth", method: "getHealth" },
+  { name: "getNetwork", method: "getNetwork" },
+  { name: "getHealth", method: "getHealth" },
   // `getLatestLedger` is not recorded: its reply carries `headerXdr` and `metadataXdr`, about 3 MB
   {
-    provider: "quasar",
-    file: "quasar/getEvents-eutbl-page-1",
+    name: "getEvents-eutbl-page-1",
     method: "getEvents",
     params: range(startLedger, endLedger, [EUTBL], 3)
   },
   {
-    provider: "quasar",
-    file: "quasar/getEvents-eutbl-page-2",
+    name: "getEvents-eutbl-page-2",
     method: "getEvents",
     params: (replies) => ({
       filters: contract([EUTBL]),
-      pagination: { cursor: JSON.parse(replies.get("quasar/getEvents-eutbl-page-1") ?? "").result.cursor, limit: 3 }
+      pagination: { cursor: JSON.parse(replies.get("getEvents-eutbl-page-1") ?? "").result.cursor, limit: 3 }
     })
   },
   {
-    provider: "quasar",
-    file: "quasar/getEvents-ustbl",
+    name: "getEvents-ustbl",
     method: "getEvents",
     params: range(startLedger, endLedger, [USTBL], 3)
   },
   {
-    provider: "quasar",
-    file: "quasar/getEvents-pruned",
+    name: "getEvents-pruned",
     method: "getEvents",
     params: range(PRUNED_LEDGER, PRUNED_LEDGER + 11, [EUTBL], 3)
   },
   {
-    provider: "quasar",
-    file: "quasar/getEvents-lagging",
+    name: "getEvents-lagging",
     method: "getEvents",
     params: range(FUTURE_LEDGER, FUTURE_LEDGER + 11, [EUTBL], 3)
   },
   {
-    provider: "quasar",
-    file: "quasar/invalid-params",
+    name: "invalid-params",
     method: "getEvents",
     params: range(startLedger, endLedger, [EUTBL], 20000)
   },
-  { provider: "quasar-invalid-key", file: "quasar/invalid-key", method: "getNetwork" }
+  { name: "invalid-key", method: "getNetwork", invalidKey: true }
 ]
 
-const fixtures = new URL("../test/fixtures/", import.meta.url)
-const recordedAt = new Date().toISOString().slice(0, 10)
-const replies = new Map<string, string>()
-
-for (const { file, method, params: input, provider } of cases) {
-  const params = typeof input === "function" ? input(replies) : input
-  const response = await fetch(urls[provider], {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, ...(params === undefined ? {} : { params }) })
-  })
-  const body = await response.text()
-  replies.set(file, body)
-  const fixture = {
-    provider,
-    network: "Stellar",
-    recordedAt,
-    request: { method, ...(params === undefined ? {} : { params }) },
-    status: response.status,
-    body
-  }
-  const path = new URL(`${file}.json`, fixtures)
-  mkdirSync(new URL(".", path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(fixture, null, 2)}\n`)
-  process.stdout.write(`${file}: ${response.status}, ${body.length} bytes\n`)
-}
-
-// no key and no keyed URL may reach a committed file
-const secrets = [process.env.INFURA_TOKEN, process.env.ALCHEMY_API_KEY, quasarKey, ...Object.values(urls)]
-  .filter((secret): secret is string => secret !== undefined && secret !== "")
-for (const file of readdirSync(fixtures, { recursive: true, encoding: "utf8" })) {
-  if (!file.endsWith(".json")) continue
-  const text = readFileSync(new URL(file, fixtures), "utf8")
-  if (secrets.some((secret) => text.includes(secret))) throw new Error(`${file} contains a key or a provider URL`)
-}
+await record({
+  network: "Stellar",
+  fixtures: new URL("../test/fixtures/", import.meta.url),
+  providers: [
+    { name: "quasar", url: (key) => `https://rpc-pro.lightsail.network/${key}`, key: secret("QUASAR_API_KEY") }
+  ],
+  cases
+})

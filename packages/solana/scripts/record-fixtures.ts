@@ -1,8 +1,7 @@
 // Records real provider replies into `test/fixtures/<provider>/<case>.json`, replayed by `SolanaRpc.fixtures.test.ts`.
 // Run: `node --env-file=$HOME/spiko/loop-crypto/.env scripts/record-fixtures.ts` (needs the network).
 // Inputs are pinned so that a re-run records the same data, except the head (`slot`) which moves by nature.
-import * as fs from "node:fs"
-import * as path from "node:path"
+import { type Case, record, secret } from "../../core/scripts/recordFixtures.ts"
 
 const EUTBL = "6rS8E5CQHLHmLenNNevUdJ9APzKNairr1kfWAM3EhDX3"
 // EUTBL mint signatures, finalized: page 1 is the 5 below BEFORE, page 2 runs from its last one down to UNTIL
@@ -18,16 +17,6 @@ const FUTURE_SLOT = 999_999_999_999
 
 const finalized = { commitment: "finalized" }
 const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }
-
-type Json = null | boolean | number | string | ReadonlyArray<Json> | { readonly [key: string]: Json }
-
-interface Case {
-  readonly name: string
-  readonly method: string
-  readonly params: ReadonlyArray<Json>
-  /** Sends a made-up key instead of the real one. */
-  readonly invalidKey?: boolean
-}
 
 // params in the order and shape `src/internal/rpcMethods.ts` encodes them
 const cases: ReadonlyArray<Case> = [
@@ -57,34 +46,11 @@ const cases: ReadonlyArray<Case> = [
   { name: "invalid-key", method: "getGenesisHash", params: [], invalidKey: true }
 ]
 
-const provider = "alchemy"
-const network = "Solana"
-const fixtures = path.join(import.meta.dirname, "..", "test", "fixtures")
-const key = process.env.ALCHEMY_API_KEY
-if (key === undefined || key === "") throw new Error("ALCHEMY_API_KEY is not set")
-const host = "solana-mainnet.g.alchemy.com/v2/"
-const recordedAt = new Date().toISOString().slice(0, 10)
-
-fs.mkdirSync(path.join(fixtures, provider), { recursive: true })
-for (const { invalidKey, method, name, params } of cases) {
-  const response = await fetch(`https://${host}${invalidKey === true ? "invalid-key" : key}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-  })
-  const body = await response.text()
-  const fixture = { provider, network, recordedAt, request: { method, params }, status: response.status, body }
-  fs.writeFileSync(path.join(fixtures, provider, `${name}.json`), `${JSON.stringify(fixture, null, 2)}\n`)
-  process.stdout.write(`${provider} ${name}: ${response.status}, ${body.length} chars\n`)
-}
-
-// sanitize check: no key and no provider URL in any fixture
-const secrets = [process.env.INFURA_TOKEN, process.env.ALCHEMY_API_KEY, process.env.QUASAR_API_KEY, host]
-  .filter((secret): secret is string => secret !== undefined && secret !== "")
-const leaks = fs.readdirSync(fixtures, { recursive: true, encoding: "utf8" })
-  .filter((file) => file.endsWith(".json"))
-  .filter((file) => {
-    const text = fs.readFileSync(path.join(fixtures, file), "utf8")
-    return secrets.some((secret) => text.includes(secret))
-  })
-if (leaks.length > 0) throw new Error(`a key or provider URL is in ${leaks.join(", ")}`)
+await record({
+  network: "Solana",
+  fixtures: new URL("../test/fixtures/", import.meta.url),
+  providers: [
+    { name: "alchemy", url: (key) => `https://solana-mainnet.g.alchemy.com/v2/${key}`, key: secret("ALCHEMY_API_KEY") }
+  ],
+  cases
+})
