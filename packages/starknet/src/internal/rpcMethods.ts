@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { StarknetAddress } from "../StarknetAddress.ts"
@@ -6,18 +7,8 @@ import { StarknetTransactionHash } from "../StarknetTransactionHash.ts"
 import { BigIntFromInt } from "./BigIntFromInt.ts"
 import { PaddedFelt } from "./felt.ts"
 
-/**
- * A JSON-RPC method: its name, the codec of its by-name params and the codec of its result.
- *
- * @internal
- */
-export interface RpcMethod<Params, Result> {
-  readonly name: string
-  readonly params: Schema.Codec<Params, Schema.Json>
-  readonly result: Schema.Codec<Result, Schema.Json>
-}
-
-const make = <Params, Result>(method: RpcMethod<Params, Result>): RpcMethod<Params, Result> => method
+// by-name params: every method sends an object, `{}` when it takes none
+const make = <Params, Result>(method: JsonRpc.Method<Params, Result>): JsonRpc.Method<Params, Result> => method
 
 const NoParams = Schema.Struct({})
 
@@ -87,10 +78,3 @@ export const getTransactionReceipt = make({
     Schema.encodeKeys({ transactionHash: "transaction_hash", blockNumber: "block_number", blockHash: "block_hash" })
   )
 })
-
-/**
- * The body of a JSON-RPC error reply.
- *
- * @internal
- */
-export const ErrorReply = Schema.Struct({ error: Schema.Struct({ code: Schema.Number, message: Schema.String }) })
