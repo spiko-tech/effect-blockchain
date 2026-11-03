@@ -1,0 +1,18 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getTransaction",
+    "params": [
+      "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDaGbNkYPhGMaFKaLwUMcnMnEHG77v",
+      {
+        "commitment": "finalized",
+        "encoding": "base64",
+        "maxSupportedTransactionVersion": 0
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}\n"
+}

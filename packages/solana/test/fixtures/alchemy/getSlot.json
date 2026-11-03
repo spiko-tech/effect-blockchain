@@ -1,0 +1,15 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "getSlot",
+    "params": [
+      {
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":464860372}"
+}
