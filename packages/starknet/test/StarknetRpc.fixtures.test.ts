@@ -1,65 +1,29 @@
+import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
-import * as Arr from "effect/Array"
+import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
-import * as Redacted from "effect/Redacted"
-import * as Schema from "effect/Schema"
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
-import { isDeepStrictEqual } from "node:util"
 
 // real provider replies recorded by `scripts/record-fixtures.ts`
-const Fixture = Schema.fromJsonString(Schema.Struct({
-  provider: Schema.String,
-  network: Schema.String,
-  recordedAt: Schema.String,
-  request: Schema.Struct({ method: Schema.String, params: Schema.Json }),
-  status: Schema.Number,
-  body: Schema.String
-}))
-type Fixture = typeof Fixture.Type
-
+const fixtures = new URL("fixtures/", import.meta.url)
 const providers = ["alchemy", "infura"] as const
-type Provider = typeof providers[number]
 
-const load = (provider: Provider, name: string): Fixture =>
-  Schema.decodeUnknownSync(Fixture)(
-    readFileSync(join(import.meta.dirname, "fixtures", provider, `${name}.json`), "utf8")
+const replay = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
+  const { check, endpoints: urls, fetch } = Replay.replay(fixtures, endpoints)
+  const layer = StarknetRpc.layer({ network: "Starknet", endpoints: urls, retries: 0 }).pipe(
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch))
   )
-
-// one replay fetch serving every endpoint `https://<provider>.fixture`, from that endpoint's fixtures only
-const replay = (endpoints: Partial<Record<Provider, ReadonlyArray<string>>>) => {
-  const fixtures = new Map(
-    Object.entries(endpoints).map((
-      [provider, names]
-    ) => [provider, names.map((name) => load(provider as Provider, name))])
-  )
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const provider = new URL(String(input)).hostname.split(".")[0]
-    const { method, params }: { method: string; params: Schema.Json } = JSON.parse(
-      await new Response(init?.body).text()
-    )
-    const fixture = fixtures.get(provider)?.find((fixture) =>
-      fixture.request.method === method && isDeepStrictEqual(fixture.request.params, params)
-    )
-    if (fixture === undefined) throw new Error(`no ${provider} fixture for ${method} ${JSON.stringify(params)}`)
-    return new Response(fixture.body, { status: fixture.status, headers: { "content-type": "application/json" } })
-  }
-  const names = Array.from(fixtures.keys())
-  if (!Arr.isReadonlyArrayNonEmpty(names)) throw new Error("replay needs at least one endpoint")
-  const layer = StarknetRpc.layer({
-    network: "Starknet",
-    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.fixture`) })),
-    retries: 0
-  }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   return <A, E>(f: (rpc: StarknetRpc.StarknetRpc["Service"]) => Effect.Effect<A, E>) =>
-    Effect.gen(function*() {
-      return yield* f(yield* StarknetRpc.StarknetRpc)
-    }).pipe(Effect.provide(layer))
+    check(
+      Effect.gen(function*() {
+        return yield* f(yield* StarknetRpc.StarknetRpc)
+      }).pipe(Effect.provide(layer))
+    )
 }
 
 // the pinned inputs of the recorder
@@ -75,17 +39,17 @@ const network = ["chainId", "blockNumber"]
 describe("StarknetRpc fixtures", () => {
   for (const provider of providers) {
     it.effect(`fixture: ${provider} chainId`, () =>
-      replay({ [provider]: network })((rpc) => rpc.chainId).pipe(
+      replay([{ name: provider, cases: network }])((rpc) => rpc.chainId).pipe(
         Effect.map((chainId) => expect(chainId).toBe("SN_MAIN"))
       ))
 
     it.effect(`fixture: ${provider} blockNumber`, () =>
-      replay({ [provider]: network })((rpc) => rpc.blockNumber).pipe(
+      replay([{ name: provider, cases: network }])((rpc) => rpc.blockNumber).pipe(
         Effect.map((head) => expect(head > BigInt(17_000_000)).toBe(true))
       ))
 
     it.effect(`fixture: ${provider} getEvents pages`, () =>
-      replay({ [provider]: [...network, "getEvents-page-1", "getEvents-page-2"] })((rpc) =>
+      replay([{ name: provider, cases: [...network, "getEvents-page-1", "getEvents-page-2"] }])((rpc) =>
         Effect.gen(function*() {
           const page1 = yield* rpc.getEvents(filter)
           expect(page1.events).toHaveLength(5)
@@ -106,7 +70,7 @@ describe("StarknetRpc fixtures", () => {
       ))
 
     it.effect(`fixture: ${provider} getTransactionReceipt`, () =>
-      replay({ [provider]: [...network, "getTransactionReceipt"] })((rpc) =>
+      replay([{ name: provider, cases: [...network, "getTransactionReceipt"] }])((rpc) =>
         rpc.getTransactionReceipt({ transactionHash: RECEIPT_TX })
       ).pipe(Effect.map((receipt) => {
         expect(receipt).toMatchObject({
@@ -120,7 +84,9 @@ describe("StarknetRpc fixtures", () => {
     // the provider answers a `to_block` beyond its head with events, no BLOCK_NOT_FOUND (see the recorded
     // `getEvents-beyond-head`): the head guard fails Lagging from the real head before sending it
     it.effect(`fixture: ${provider} getEvents beyond head`, () =>
-      replay({ [provider]: network })((rpc) => Effect.flip(rpc.getEvents({ ...filter, toBlock: BigInt(99999999) })))
+      replay([{ name: provider, cases: network }])((rpc) =>
+        Effect.flip(rpc.getEvents({ ...filter, toBlock: BigInt(99999999) }))
+      )
         .pipe(
           Effect.map((error) =>
             expect(error).toMatchObject({ reason: "Lagging", method: "starknet_getEvents", endpoint: provider })
@@ -128,12 +94,12 @@ describe("StarknetRpc fixtures", () => {
         ))
 
     it.effect(`fixture: ${provider} getEvents chunk size too big`, () =>
-      replay({ [provider]: [...network, "getEvents-chunk-too-big"] })((rpc) =>
+      replay([{ name: provider, cases: [...network, "getEvents-chunk-too-big"] }])((rpc) =>
         Effect.flip(rpc.getEvents({ ...filter, chunkSize: 10000 }))
       ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: 31 }))))
 
     it.effect(`fixture: ${provider} getEvents invalid continuation token`, () =>
-      replay({ [provider]: [...network, "getEvents-invalid-token"] })((rpc) =>
+      replay([{ name: provider, cases: [...network, "getEvents-invalid-token"] }])((rpc) =>
         Effect.flip(
           rpc.getEvents({
             ...filter,
@@ -143,7 +109,7 @@ describe("StarknetRpc fixtures", () => {
       ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: 33 }))))
 
     it.effect(`fixture: ${provider} invalid key`, () =>
-      replay({ [provider]: ["invalid-key"] })((rpc) => Effect.flip(rpc.chainId)).pipe(
+      replay([{ name: provider, cases: ["invalid-key"] }])((rpc) => Effect.flip(rpc.chainId)).pipe(
         Effect.map((error) =>
           expect(error).toMatchObject({ reason: "Unavailable", code: 401, method: "starknet_chainId" })
         )
@@ -151,7 +117,10 @@ describe("StarknetRpc fixtures", () => {
   }
 
   it.effect("fixture: alchemy invalid key falls back to infura", () =>
-    replay({ alchemy: ["invalid-key"], infura: network })((rpc) => rpc.blockNumber).pipe(
-      Effect.map((head) => expect(head).toBe(BigInt(JSON.parse(load("infura", "blockNumber").body).result)))
-    ))
+    replay([{ name: "alchemy", cases: ["invalid-key"] }, { name: "infura", cases: network }])((rpc) => rpc.blockNumber)
+      .pipe(
+        Effect.map((head) =>
+          expect(head).toBe(BigInt(JSON.parse(Replay.load(fixtures, "infura", "blockNumber").body).result))
+        )
+      ))
 })

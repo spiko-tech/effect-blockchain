@@ -1,82 +1,30 @@
+import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
 import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
 import { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
-import * as Arr from "effect/Array"
+import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
-import * as Redacted from "effect/Redacted"
-import * as Schema from "effect/Schema"
-import * as fs from "node:fs"
-import * as path from "node:path"
-import { isDeepStrictEqual } from "node:util"
 
 // real replies recorded by `scripts/record-fixtures.ts`, replayed through the real layer
-const Fixture = Schema.fromJsonString(Schema.Struct({
-  provider: Schema.String,
-  network: Schema.String,
-  recordedAt: Schema.String,
-  request: Schema.Struct({ method: Schema.String, params: Schema.Json }),
-  status: Schema.Number,
-  body: Schema.String
-}))
-
-const load = (provider: string, name: string) =>
-  Schema.decodeSync(Fixture)(
-    fs.readFileSync(path.join(import.meta.dirname, "fixtures", provider, `${name}.json`), "utf8")
-  )
-
-interface FixtureEndpoint {
-  readonly name: string
-  readonly provider: string
-  readonly cases: ReadonlyArray<string>
-}
-
-// one replay fetch for every endpoint, routed by host: `https://<name>.fixture`
-const replay = (endpoints: Arr.NonEmptyReadonlyArray<FixtureEndpoint>) => {
-  const fixtures = new Map(endpoints.map((e) => [e.name, e.cases.map((name) => load(e.provider, name))]))
-  const calls: Array<string> = []
-  const unmatched: Array<string> = []
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const name = new URL(String(input)).hostname.replace(/\.fixture$/, "")
-    const request: { readonly method: string; readonly params: Schema.Json } = JSON.parse(
-      await new Response(init?.body).text()
-    )
-    calls.push(`${name}:${request.method}`)
-    const fixture = fixtures.get(name)?.find((f) =>
-      f.request.method === request.method && isDeepStrictEqual(f.request.params, request.params)
-    )
-    if (fixture === undefined) {
-      unmatched.push(`${name}: ${request.method} ${JSON.stringify(request.params)}`)
-      return new Response("no fixture", { status: 404 })
-    }
-    return new Response(fixture.body, { status: fixture.status, headers: { "content-type": "application/json" } })
-  }
-  const layer = SolanaRpc.layer({
-    network: "Solana",
-    endpoints: Arr.map(endpoints, (e) => ({ name: e.name, url: Redacted.make(`https://${e.name}.fixture`) })),
-    retries: 0
-  }).pipe(
+const replay = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
+  const { check, endpoints: urls, fetch, served } = Replay.replay(new URL("fixtures/", import.meta.url), endpoints)
+  const layer = SolanaRpc.layer({ network: "Solana", endpoints: urls, retries: 0 }).pipe(
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch))
   )
   const run = <A, E>(f: (rpc: SolanaRpc.SolanaRpc["Service"]) => Effect.Effect<A, E>) =>
-    Effect.gen(function*() {
-      return yield* f(yield* SolanaRpc.SolanaRpc)
-    }).pipe(
-      Effect.provide(layer),
-      Effect.exit,
-      // an unmatched request fails the test on its own, whatever the call returned
-      Effect.flatMap((exit) =>
-        unmatched.length > 0 ? Effect.die(new Error(`no fixture for ${unmatched.join("; ")}`)) : exit
-      )
+    check(
+      Effect.gen(function*() {
+        return yield* f(yield* SolanaRpc.SolanaRpc)
+      }).pipe(Effect.provide(layer))
     )
-  return { calls, run }
+  return { served, run }
 }
 
-const alchemy = (...cases: ReadonlyArray<string>) =>
-  replay([{ name: "alchemy", provider: "alchemy", cases: ["getGenesisHash", ...cases] }])
+const alchemy = (...cases: ReadonlyArray<string>) => replay([{ name: "alchemy", cases: ["getGenesisHash", ...cases] }])
 
 const EUTBL = SolanaAddress.make("6rS8E5CQHLHmLenNNevUdJ9APzKNairr1kfWAM3EhDX3")
 const BEFORE = SolanaTransactionHash.make(
@@ -178,24 +126,24 @@ describe("SolanaRpc fixtures", () => {
     ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: -32602 }))))
 
   it.effect("fixture: alchemy invalid-key", () =>
-    replay([{ name: "alchemy", provider: "alchemy", cases: ["invalid-key"] }]).run((rpc) =>
-      Effect.flip(rpc.getSlot(finalized))
-    ).pipe(Effect.map((error) =>
-      // HTTP 401 with a JSON-RPC -32600 body: the status wins, and another endpoint may hold a valid key
-      expect(error).toMatchObject({ reason: "Unavailable", code: 401, method: "getGenesisHash" })
-    )))
+    replay([{ name: "alchemy", cases: ["invalid-key"] }]).run((rpc) => Effect.flip(rpc.getSlot(finalized))).pipe(
+      Effect.map((error) =>
+        // HTTP 401 with a JSON-RPC -32600 body: the status wins, and another endpoint may hold a valid key
+        expect(error).toMatchObject({ reason: "Unavailable", code: 401, method: "getGenesisHash" })
+      )
+    ))
 
   it.effect("fixture: alchemy fallback from invalid-key", () => {
-    const { calls, run } = replay([
+    const { run, served } = replay([
       { name: "alchemy-invalid-key", provider: "alchemy", cases: ["invalid-key"] },
-      { name: "alchemy", provider: "alchemy", cases: ["getGenesisHash", "getTransaction-eutbl-1"] }
+      { name: "alchemy", cases: ["getGenesisHash", "getTransaction-eutbl-1"] }
     ])
     return run((rpc) => rpc.getTransaction({ signature: TX_1, ...finalized })).pipe(Effect.map((tx) => {
       expect(tx.slot).toBe(BigInt(443760316))
-      expect(calls).toStrictEqual([
-        "alchemy-invalid-key:getGenesisHash",
-        "alchemy:getGenesisHash",
-        "alchemy:getTransaction"
+      expect(served).toStrictEqual([
+        "alchemy-invalid-key invalid-key",
+        "alchemy getGenesisHash",
+        "alchemy getTransaction-eutbl-1"
       ])
     }))
   })
