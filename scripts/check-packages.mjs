@@ -3,7 +3,8 @@
 // Run after `pnpm build`, which emits stripped release declarations to `dist`.
 //
 //   1. `pnpm pack` each package (which applies `publishConfig.exports`).
-//   2. Install the tarballs into a throwaway project.
+//   2. Install the tarballs into a throwaway project, with `@effect-blockchain/*`
+//      dependencies (`workspace:^`, never published) overridden to the local tarballs.
 //   3. Import every public wildcard module (`./*` -> `./dist/*.js`) as ESM.
 //   4. Assert that the blocked `./internal/*`, `./index` and `./*/index` subpaths
 //      are not importable.
@@ -15,6 +16,8 @@ import { join } from "node:path"
 
 const allPackages = ["core", "evm", "solana", "starknet", "stellar"]
 const packages = process.argv.length > 2 ? process.argv.slice(2) : allPackages
+// The selected packages plus their `@effect-blockchain/*` dependencies, filled while packing.
+const packedPackages = [...packages]
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "effect-blockchain-packages-"))
 const specifiers = []
 const blockedSpecifiers = []
@@ -57,8 +60,10 @@ const collectPublicModules = async (packageName, directory, prefix = "") => {
 try {
   const rootManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"))
   const dependencies = { "@types/node": rootManifest.devDependencies["@types/node"] }
+  const overrides = {}
 
-  for (const name of packages) {
+  // `packedPackages` grows while iterating, so dependencies of dependencies get packed too.
+  for (const name of packedPackages) {
     execFileSync("pnpm", ["--filter", `@effect-blockchain/${name}`, "pack", "--pack-destination", temporaryDirectory], {
       stdio: "ignore"
     })
@@ -67,6 +72,7 @@ try {
       throw new Error(`Package archive not found for @effect-blockchain/${name}`)
     }
     dependencies[`@effect-blockchain/${name}`] = `file:${join(temporaryDirectory, archive)}`
+    overrides[`@effect-blockchain/${name}`] = dependencies[`@effect-blockchain/${name}`]
 
     const manifest = JSON.parse(
       await readFile(new URL(`../packages/${name}/package.json`, import.meta.url), "utf8")
@@ -76,11 +82,25 @@ try {
         dependencies[dependency] = version
       }
     }
+    for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+      const dependencyName = dependency.slice("@effect-blockchain/".length)
+      if (dependency.startsWith("@effect-blockchain/") && !packedPackages.includes(dependencyName)) {
+        packedPackages.push(dependencyName)
+      }
+    }
   }
 
   await writeFile(
     join(temporaryDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module", dependencies }, null, 2)
+  )
+  // pnpm reads `overrides` from `pnpm-workspace.yaml`; JSON strings are valid YAML double-quoted scalars.
+  await writeFile(
+    join(temporaryDirectory, "pnpm-workspace.yaml"),
+    `overrides:\n${
+      Object.entries(overrides).map(([name, tarball]) => `  ${JSON.stringify(name)}: ${JSON.stringify(tarball)}\n`)
+        .join("")
+    }`
   )
   execFileSync("pnpm", ["install", "--dir", temporaryDirectory, "--ignore-scripts", "--no-frozen-lockfile"], {
     stdio: "ignore"
