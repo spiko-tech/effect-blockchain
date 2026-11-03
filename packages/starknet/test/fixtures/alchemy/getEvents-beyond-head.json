@@ -1,0 +1,22 @@
+{
+  "provider": "alchemy",
+  "network": "Starknet",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "starknet_getEvents",
+    "params": {
+      "filter": {
+        "address": "0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2",
+        "from_block": {
+          "block_number": 1380300
+        },
+        "to_block": {
+          "block_number": 99999999
+        },
+        "chunk_size": 5
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"continuation_token\":\"1380320-1\",\"events\":[{\"block_hash\":\"0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584\",\"block_number\":1380308,\"data\":[\"0x5dcf7644f\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x7fcb432d3a96521ad376c04e9c3c76d57d649cec9825370b075b31d5174bb2a\"],\"transaction_hash\":\"0x2aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab\"},{\"block_hash\":\"0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584\",\"block_number\":1380308,\"data\":[\"0x39babeef\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x5bc93610009c6ae1f1a77d89388bf35b173ab99113f4c1389a239243ef07e7f\"],\"transaction_hash\":\"0x2aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab\"},{\"block_hash\":\"0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584\",\"block_number\":1380308,\"data\":[\"0x36d7cefd\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x11264f7b13e8fcb780cf05d35ebe5730164136296a52d55756e9174025f3fa4\"],\"transaction_hash\":\"0x2aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab\"},{\"block_hash\":\"0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584\",\"block_number\":1380308,\"data\":[\"0x39babeef\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x4a1fe98814b006675d60b2c8114d5d20e8ab72a8afd12ecca2a3b1b9adf886a\"],\"transaction_hash\":\"0x2aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab\"},{\"block_hash\":\"0x3c29e65f3be886b0a58b379672b61974c57c977f8147a917f217179ce6b957d\",\"block_number\":1380320,\"data\":[\"0x5dcf7644f\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x7fcb432d3a96521ad376c04e9c3c76d57d649cec9825370b075b31d5174bb2a\"],\"transaction_hash\":\"0x2904089bcb25b52af0647bfdfa7032fe48da129d6c4c8b788c845949a9d6953\"}]}}"
+}

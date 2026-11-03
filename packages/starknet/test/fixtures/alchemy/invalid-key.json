@@ -1,0 +1,11 @@
+{
+  "provider": "alchemy",
+  "network": "Starknet",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "starknet_chainId",
+    "params": {}
+  },
+  "status": 401,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"Must be authenticated!\"}}"
+}

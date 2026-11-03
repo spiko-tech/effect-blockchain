@@ -1,0 +1,13 @@
+{
+  "provider": "alchemy",
+  "network": "Starknet",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "starknet_getTransactionReceipt",
+    "params": {
+      "transaction_hash": "0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab"
+    }
+  },
+  "status": 200,
+  "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"actual_fee\":{\"amount\":\"0x6730af70677cc\",\"unit\":\"FRI\"},\"block_hash\":\"0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584\",\"block_number\":1380308,\"events\":[{\"data\":[\"0x5dcf7644f\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x7fcb432d3a96521ad376c04e9c3c76d57d649cec9825370b075b31d5174bb2a\"]},{\"data\":[\"0x39babeef\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x5bc93610009c6ae1f1a77d89388bf35b173ab99113f4c1389a239243ef07e7f\"]},{\"data\":[\"0x36d7cefd\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x11264f7b13e8fcb780cf05d35ebe5730164136296a52d55756e9174025f3fa4\"]},{\"data\":[\"0x39babeef\",\"0x0\"],\"from_address\":\"0x4f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\",\"0x0\",\"0x4a1fe98814b006675d60b2c8114d5d20e8ab72a8afd12ecca2a3b1b9adf886a\"]},{\"data\":[\"0x2d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b\",\"0x1176a1bd84444c89232ec27754698e5d2e7e1a7f1539f12027f28b23ec9f3d8\",\"0x6730af70677cc\",\"0x0\"],\"from_address\":\"0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d\",\"keys\":[\"0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9\"]}],\"execution_resources\":{\"l1_data_gas\":544,\"l1_gas\":95,\"l2_gas\":0},\"execution_status\":\"SUCCEEDED\",\"finality_status\":\"ACCEPTED_ON_L1\",\"messages_sent\":[],\"transaction_hash\":\"0x2aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab\",\"type\":\"INVOKE\"}}"
+}

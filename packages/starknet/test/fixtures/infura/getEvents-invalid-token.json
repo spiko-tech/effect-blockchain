@@ -1,0 +1,23 @@
+{
+  "provider": "infura",
+  "network": "Starknet",
+  "recordedAt": "2026-11-03",
+  "request": {
+    "method": "starknet_getEvents",
+    "params": {
+      "filter": {
+        "address": "0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2",
+        "from_block": {
+          "block_number": 1380300
+        },
+        "to_block": {
+          "block_number": 1380400
+        },
+        "chunk_size": 5,
+        "continuation_token": "invalid"
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"error\":{\"code\":33,\"message\":\"The supplied continuation token is invalid or unknown\"},\"id\":1,\"jsonrpc\":\"2.0\"}"
+}
