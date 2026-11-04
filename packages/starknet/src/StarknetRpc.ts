@@ -1,8 +1,8 @@
 /**
  * Typed, read-only standard Starknet JSON-RPC methods, served by an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure that another endpoint could answer (see
- * {@link StarknetRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
+ * Every call starts at the first endpoint. An endpoint failure (see {@link StarknetRpcError}) moves to the next
+ * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`starknet_chainId`), once. A call that continues a
  * `starknet_getEvents` page goes to the endpoint that returned the cursor only.
  *
@@ -57,7 +57,7 @@ export interface StarknetRpcEndpoint {
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or an event fails the `getEvents` checks | yes |
  * | `Lagging` | the endpoint's head is below the requested `toBlock`, or it answers `BLOCK_NOT_FOUND` (24) or `TXN_HASH_NOT_FOUND` (29) | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on Starknet for now) | yes |
- * | `Rejected` | any other JSON-RPC error, e.g. `PAGE_SIZE_TOO_BIG` (31), `INVALID_CONTINUATION_TOKEN` (33), `TOO_MANY_KEYS_IN_FILTER` (34) | no |
+ * | `Rejected` | any other JSON-RPC error, e.g. `PAGE_SIZE_TOO_BIG` (31), `INVALID_CONTINUATION_TOKEN` (33), `TOO_MANY_KEYS_IN_FILTER` (34) | yes |
  * | `WrongNetwork` | the endpoint's `starknet_chainId` is not the configured network's | no |
  *
  * @since 0.1.0

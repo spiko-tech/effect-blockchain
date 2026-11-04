@@ -102,14 +102,50 @@ describe("EvmRpc fixtures", () => {
       Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
     ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: 400 }))))
 
-  // gap: Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a provider limit another endpoint may not
-  // have, yet -32602 maps to Rejected and stops the fallback. Expected Unavailable
-  it.fails("fixture: infura getLogs-range-too-large", () =>
-    Effect.runPromise(
-      setup([{ name: "infura", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }]).run((rpc) =>
-        Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
-      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: -32602 })))
-    ))
+  // Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a plan limit another endpoint may not have:
+  // Rejected falls back. The replay matches on params and only the wide range has recorded refusals, so Alchemy's
+  // HTTP 400 for that range is the next reply: the fallback reaching it is the point
+  it.effect("fixture: infura getLogs-range-too-large falls back to alchemy", () => {
+    const { run, served } = setup([
+      { name: "infura", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] },
+      { name: "alchemy", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }
+    ])
+    return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: "Unavailable", code: 400, endpoint: "alchemy" })
+        expect(error.cause).toMatchObject({ errors: [{ reason: "Rejected", code: -32602, endpoint: "infura" }, {}] })
+        expect(served).toStrictEqual([
+          "infura chainId",
+          "infura blockNumber",
+          "infura getLogs-range-too-large",
+          "alchemy chainId",
+          "alchemy blockNumber",
+          "alchemy getLogs-range-too-large"
+        ])
+      })
+    )
+  })
+
+  // bad params are Rejected by every endpoint: one request each, then the last endpoint's error
+  it.effect("fixture: alchemy invalid-params falls back to infura invalid-params", () => {
+    const { run, served } = setup([
+      { name: "alchemy", cases: ["chainId", "blockNumber", "invalid-params"] },
+      { name: "infura", cases: ["chainId", "blockNumber", "invalid-params"] }
+    ])
+    return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, topics: [[EvmHexData.make("0xab")]] }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: "Rejected", code: -32602, endpoint: "infura" })
+        expect(served).toStrictEqual([
+          "alchemy chainId",
+          "alchemy blockNumber",
+          "alchemy invalid-params",
+          "infura chainId",
+          "infura blockNumber",
+          "infura invalid-params"
+        ])
+      })
+    )
+  })
 
   it.effect("fixture: alchemy invalid-key falls back to infura getLogs", () => {
     const { run, served } = setup([
