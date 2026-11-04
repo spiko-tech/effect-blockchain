@@ -25,7 +25,7 @@ export const getLogs = make({
   name: "eth_getLogs",
   params: Schema.Tuple([
     Schema.Struct({
-      address: Schema.Union([EvmAddress, Schema.Array(EvmAddress)]),
+      address: Schema.Array(EvmAddress),
       fromBlock: QuantityFromHex,
       toBlock: QuantityFromHex,
       // `topics: undefined` is accepted and omitted on encode, since `undefined` is not JSON

@@ -104,13 +104,14 @@ export class EvmRpcError extends Schema.TaggedError<EvmRpcError>()("EvmRpcError"
 }
 
 /**
- * An `eth_getLogs` filter over the inclusive block range `[fromBlock, toBlock]`.
+ * An `eth_getLogs` filter over the inclusive block range `[fromBlock, toBlock]`, matching the logs of any of
+ * `addresses`. The addresses are always sent as the JSON-RPC `address` array.
  *
  * @since 0.1.0
  * @category models
  */
 export interface EvmLogsFilter {
-  readonly address: EvmAddress | ReadonlyArray<EvmAddress>
+  readonly addresses: Arr.NonEmptyReadonlyArray<EvmAddress>
   readonly fromBlock: bigint
   readonly toBlock: bigint
   readonly topics?: ReadonlyArray<EvmHexData | ReadonlyArray<EvmHexData> | null> | undefined
@@ -207,11 +208,12 @@ export const layer = (options: {
         Effect.gen(function*() {
           const method = RpcMethods.getLogs.name
           yield* rpc.guard(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
-          const addresses = new Set<string>(Arr.ensure(filter.address))
-          const logs = yield* rpc.call(endpoint, RpcMethods.getLogs, [filter])
+          const { addresses, ...range } = filter
+          const logs = yield* rpc.call(endpoint, RpcMethods.getLogs, [{ ...range, address: addresses }])
+          const allowed = new Set<string>(addresses)
           const invalid = logs.find((log) =>
             log.blockNumber < filter.fromBlock || log.blockNumber > filter.toBlock ||
-            !addresses.has(log.address)
+            !allowed.has(log.address)
           )
           if (invalid !== undefined) {
             return yield* rpc.fail(
