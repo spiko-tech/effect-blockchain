@@ -58,6 +58,9 @@ export interface EvmRpcEndpoint {
  * | `Lagging` | the endpoint's head is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
  * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
+ *
+ * A `getLogs` -32602 whose message is a provider's block range limit is `Unavailable`: another endpoint may serve the
+ * range.
  * | `WrongNetwork` | the endpoint's `eth_chainId` is not the configured network's | no |
  *
  * @since 0.1.0
@@ -129,7 +132,7 @@ export class EvmRpc extends Context.Service<EvmRpc, {
   /**
    * `eth_getLogs`, only answered by an endpoint whose head has reached `toBlock`. Logs are returned in chain order:
    * sorted by block then log index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty
-   * range returns `[]`.
+   * range returns `[]`. A range above the endpoint's plan limit (-32602 range limit) falls back to the next endpoint.
    */
   readonly getLogs: (filter: EvmLogsFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRpc") {}
@@ -139,6 +142,14 @@ export class EvmRpc extends Context.Service<EvmRpc, {
 const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map(
   [-32005, -32603, -32007, -1, 429].map((code) => [code, "Unavailable"])
 )
+
+// the wordings of a provider's getLogs range limit, sent as -32602 (invalid params) although another endpoint (another
+// plan, another provider) may serve the range: Infura "range 10009 exceeds limit of 10000"
+// (`test/fixtures/infura/getLogs-range-too-large.json`), Alchemy "... up to a 10 block range ..."
+// (`test/fixtures/alchemy/getLogs-range-too-large.json`, sent as HTTP 400 there) and "block range extends beyond current
+// head block". viem 2.57.11 has no such wording. A malformed filter ("Invalid params", "data type size mismatch") stays
+// Rejected
+const rangeLimit = /block range|range \d+ exceeds limit/i
 
 const byBlockThenIndex = Order.combine(
   Order.mapInput(Order.BigInt, (log: EvmLog) => log.blockNumber),
@@ -208,7 +219,21 @@ export const layer = (options: {
           const method = RpcMethods.getLogs.name
           yield* rpc.guard(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
           const addresses = new Set<string>(Arr.ensure(filter.address))
-          const logs = yield* rpc.call(endpoint, RpcMethods.getLogs, [filter])
+          // after the call, so the range is not retried on this endpoint: it would fail again
+          const logs = yield* rpc.call(endpoint, RpcMethods.getLogs, [filter]).pipe(
+            Effect.mapError((error) =>
+              error.reason === "Rejected" && error.code === -32602 && error.cause instanceof Error &&
+                rangeLimit.test(error.cause.message)
+                ? new EvmRpcError({
+                  reason: "Unavailable",
+                  method: error.method,
+                  endpoint: error.endpoint,
+                  code: error.code,
+                  cause: error.cause
+                })
+                : error
+            )
+          )
           const invalid = logs.find((log) =>
             log.blockNumber < filter.fromBlock || log.blockNumber > filter.toBlock ||
             !addresses.has(log.address)

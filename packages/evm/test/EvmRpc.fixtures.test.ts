@@ -102,14 +102,38 @@ describe("EvmRpc fixtures", () => {
       Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
     ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: 400 }))))
 
-  // gap: Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a provider limit another endpoint may not
-  // have, yet -32602 maps to Rejected and stops the fallback. Expected Unavailable
-  it.fails("fixture: infura getLogs-range-too-large", () =>
-    Effect.runPromise(
-      setup([{ name: "infura", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }]).run((rpc) =>
-        Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
-      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: -32602 })))
+  // Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a plan limit another endpoint may not have:
+  // Unavailable, not Rejected
+  it.effect("fixture: infura getLogs-range-too-large", () =>
+    setup([{ name: "infura", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }]).run((rpc) =>
+      Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
+    ).pipe(
+      Effect.map((error) =>
+        expect(error).toMatchObject({ reason: "Unavailable", code: -32602, method: "eth_getLogs", endpoint: "infura" })
+      )
     ))
+
+  // the replay matches on params and only the wide range has recorded refusals: Alchemy's HTTP 400 is the next
+  // endpoint's reply, the fallback reaching it is the point
+  it.effect("fixture: infura getLogs-range-too-large falls back to alchemy", () => {
+    const { run, served } = setup([
+      { name: "infura", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] },
+      { name: "alchemy", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }
+    ])
+    return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: "Unavailable", code: 400, endpoint: "alchemy" })
+        expect(served).toStrictEqual([
+          "infura chainId",
+          "infura blockNumber",
+          "infura getLogs-range-too-large",
+          "alchemy chainId",
+          "alchemy blockNumber",
+          "alchemy getLogs-range-too-large"
+        ])
+      })
+    )
+  })
 
   it.effect("fixture: alchemy invalid-key falls back to infura getLogs", () => {
     const { run, served } = setup([
