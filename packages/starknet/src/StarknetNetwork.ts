@@ -71,6 +71,23 @@ const chainIds: Record<StarknetNetwork, StarknetChainId> = {
 export const toChainId = (network: StarknetNetwork): StarknetChainId => chainIds[network]
 
 /**
+ * Default number of confirmations an indexer waits for on each network, on top of the latest accepted block.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+export const defaultConfirmations = (network: StarknetNetwork): number => {
+  switch (network) {
+    // ACCEPTED_ON_L2 blocks are "finalized by the consensus protocol": https://docs.starknet.io/learn/protocol/transactions
+    case "Starknet":
+      return 0
+    // same protocol and finality rules as mainnet: https://docs.starknet.io/learn/protocol/transactions
+    case "StarknetSepolia":
+      return 0
+  }
+}
+
+/**
  * @since 0.1.0
  * @category predicates
  */

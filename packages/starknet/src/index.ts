@@ -17,6 +17,11 @@ export * as StarknetEvent from "./StarknetEvent.ts"
 /**
  * @since 0.1.0
  */
+export * as StarknetIndexer from "./StarknetIndexer.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as StarknetNetwork from "./StarknetNetwork.ts"
 
 /**

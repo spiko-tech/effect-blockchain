@@ -1,4 +1,5 @@
 import {
+  defaultConfirmations,
   isTestnet,
   mainnets,
   networks,
@@ -25,6 +26,10 @@ describe("StarknetNetwork", () => {
     expect(networks.map(toChainId)).toStrictEqual(["SN_MAIN", "SN_SEPOLIA"])
     expect(networks.map(isTestnet)).toStrictEqual([false, true])
     expect(networks.length).toBe(mainnets.length + testnets.length)
+  })
+
+  it("waits for no confirmation on top of an accepted block", () => {
+    expect(networks.map(defaultConfirmations)).toStrictEqual([0, 0])
   })
 })
 
