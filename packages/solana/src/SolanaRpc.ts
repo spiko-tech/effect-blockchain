@@ -1,8 +1,8 @@
 /**
  * Typed, read-only standard Solana JSON-RPC methods, served by an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure that another endpoint could answer (see
- * {@link SolanaRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
+ * Every call starts at the first endpoint. An endpoint failure (see {@link SolanaRpcError}) moves to the next
+ * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`getGenesisHash`), once.
  *
  * Requests go through the provided `HttpClient`. Every JSON integer in a reply is read as an exact `bigint`: lamport
@@ -70,7 +70,7 @@ export interface SolanaRpcEndpoint {
  * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
  * | `Lagging` | the endpoint has not reached `minContextSlot`, or the block is not available yet | yes |
  * | `Pruned` | the endpoint lacks the requested history, e.g. `getTransaction` returns `null` | yes |
- * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
+ * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
  * | `WrongNetwork` | the endpoint's genesis hash is not the configured network's | no |
  *
  * @since 0.1.0

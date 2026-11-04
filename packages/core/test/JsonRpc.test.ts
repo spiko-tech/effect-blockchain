@@ -134,16 +134,16 @@ const hang: Node[string] = (_, signal) =>
   new Promise((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))
 
 describe("JsonRpc", () => {
-  it.effect("falls back in order and stops on Rejected", () =>
+  it.effect("falls back in order, Rejected included", () =>
     Effect.gen(function*() {
       const fallback = setup({ a: { blockNumber: down }, b: { blockNumber: head(7) } })
       expect(yield* fallback.run((rpc) => rpc.blockNumber)).toBe(7)
       expect(fallback.calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
 
       const rejected = () => ({ error: { code: -32602, message: "invalid params" } })
-      const stop = setup({ a: { blockNumber: rejected }, b: { blockNumber: head(7) } })
-      expect((yield* stop.run((rpc) => Effect.flip(rpc.blockNumber))).reason).toBe("Rejected")
-      expect(stop.calls).toStrictEqual(["a:chainId", "a:blockNumber"])
+      const rejected_ = setup({ a: { blockNumber: rejected }, b: { blockNumber: head(7) } })
+      expect(yield* rejected_.run((rpc) => rpc.blockNumber)).toBe(7)
+      expect(rejected_.calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
     }))
 
   it.effect("fails with the last error and keeps the others when every endpoint fails", () =>

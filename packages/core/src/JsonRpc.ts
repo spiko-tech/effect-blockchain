@@ -2,8 +2,8 @@
  * The JSON-RPC engine shared by the chain RPC modules: an ordered list of endpoints with fallback, sending one request
  * per HTTP call through the provided `HttpClient`.
  *
- * Every call starts at the first endpoint. A failure that another endpoint could answer (`Unavailable`,
- * `InvalidResponse`, `Lagging`, `Pruned`) moves to the next endpoint, `Rejected` and `WrongNetwork` stop at once.
+ * Every call starts at the first endpoint. A failure moves to the next endpoint, except `WrongNetwork`, which stops at
+ * once.
  * Before its first call, each endpoint is checked to serve the configured network, once: a mismatch is kept, a failed
  * check is not.
  *
@@ -39,7 +39,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef"
  * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
  * | `Lagging` | the endpoint is behind the requested block | yes |
  * | `Pruned` | the endpoint lacks the requested history | yes |
- * | `Rejected` | any other JSON-RPC error, or params that do not encode: every endpoint would answer the same | no |
+ * | `Rejected` | any other JSON-RPC error, or params that do not encode. Not retried, as the same endpoint would answer the same, but providers disagree on limits (e.g. a block range): another may answer | yes |
  * | `WrongNetwork` | the endpoint does not serve the configured network | no |
  *
  * @since 0.1.0
@@ -188,8 +188,6 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
     latest: Effect.Effect<bigint, E>
   ) => Effect.Effect<void, E>
 }
-
-const fallbackReasons: ReadonlySet<Reason> = new Set(["Unavailable", "InvalidResponse", "Lagging", "Pruned"])
 
 // `bigint` codes for a `parseBody` that reads integers as `bigint`
 const ErrorReply = Schema.Struct({
@@ -345,7 +343,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
       const result = yield* Effect.result(f(endpoint))
       if (Result.isSuccess(result)) return result.success
       errors.push(result.failure)
-      if (!fallbackReasons.has(result.failure.reason)) break
+      if (result.failure.reason === "WrongNetwork") break
     }
     const last = errors[errors.length - 1]
     if (errors.length === 1) return yield* Effect.fail(last)

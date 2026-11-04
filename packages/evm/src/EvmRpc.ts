@@ -1,8 +1,8 @@
 /**
  * Typed, read-only standard EVM JSON-RPC methods, served by an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure that another endpoint could answer (see
- * {@link EvmRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
+ * Every call starts at the first endpoint. An endpoint failure (see {@link EvmRpcError}) moves to the next
+ * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`eth_chainId`), once.
  *
  * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future
@@ -57,7 +57,7 @@ export interface EvmRpcEndpoint {
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or a log fails the `getLogs` checks | yes |
  * | `Lagging` | the endpoint's head is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
- * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
+ * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
  * | `WrongNetwork` | the endpoint's `eth_chainId` is not the configured network's | no |
  *
  * @since 0.1.0

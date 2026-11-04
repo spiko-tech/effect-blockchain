@@ -1,8 +1,8 @@
 /**
  * Typed, read-only standard Stellar RPC methods, served by an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure that another endpoint could answer (see
- * {@link StellarRpcError}) moves to the next endpoint, any other failure stops at once. Before its first call, each
+ * Every call starts at the first endpoint. An endpoint failure (see {@link StellarRpcError}) moves to the next
+ * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
  * endpoint is checked to serve the configured network (`getNetwork` passphrase), once. A `getEvents` call with a
  * cursor only goes to the endpoint that issued the cursor, with no fallback.
  *
@@ -58,7 +58,7 @@ export interface StellarRpcEndpoint {
  * | `InvalidResponse` | the body is not a JSON-RPC reply, the result fails its schema, or an event fails the `getEvents` checks | yes |
  * | `Lagging` | the endpoint's latest ledger is below the requested `toBlock` | yes |
  * | `Pruned` | the endpoint's oldest retained ledger is above the requested `fromBlock` (or cursor) | yes |
- * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
+ * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
  * | `WrongNetwork` | the endpoint's `getNetwork` passphrase is not the configured network's | no |
  *
  * A call with a cursor never falls back, whatever the reason.
