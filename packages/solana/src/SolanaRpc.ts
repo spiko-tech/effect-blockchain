@@ -68,7 +68,7 @@ export interface SolanaRpcEndpoint {
  * |---|---|---|
  * | `Unavailable` | transport error, any HTTP error status, node unhealthy or internal error after retries, or a timeout | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
- * | `Lagging` | the endpoint has not reached `minContextSlot`, or the block is not available yet | yes |
+ * | `Lagging` | the endpoint has not reached `minContextSlot` (only from providers that honour it), or the block is not available yet | yes |
  * | `Pruned` | the endpoint lacks the requested history, e.g. `getTransaction` returns `null` | yes |
  * | `Rejected` | any other JSON-RPC error: every endpoint would answer the same | no |
  * | `WrongNetwork` | the endpoint's genesis hash is not the configured network's | no |
@@ -137,7 +137,11 @@ export interface SolanaSignaturesQuery {
   readonly until?: SolanaTransactionHash | undefined
   readonly limit?: number | undefined
   readonly commitment: SolanaCommitment
-  /** Only answered by an endpoint that has reached this slot, `Lagging` otherwise. */
+  /**
+   * An endpoint that honours it answers `Lagging` until it has reached this slot. Some providers ignore it (Alchemy, as
+   * recorded on 2026-11-03) and answer from wherever they are, so a caller that needs the guarantee must check the head
+   * itself, e.g. by comparing `getSlot` across endpoints.
+   */
   readonly minContextSlot?: bigint | undefined
 }
 
