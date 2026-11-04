@@ -1,4 +1,5 @@
 import {
+  defaultConfirmations,
   isTestnet,
   mainnets,
   networks,
@@ -27,5 +28,8 @@ describe("StellarNetwork", () => {
   it("should tag testnets", () => {
     expect(networks.map(isTestnet)).toStrictEqual([false, true])
     expect(networks.length).toBe(mainnets.length + testnets.length)
+  })
+  it("should need no confirmations: closed ledgers are final", () => {
+    expect(networks.map(defaultConfirmations)).toStrictEqual([0, 0])
   })
 })

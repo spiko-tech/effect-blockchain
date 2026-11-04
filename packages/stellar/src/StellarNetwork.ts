@@ -57,6 +57,23 @@ const passphrases: Record<StellarNetwork, string> = {
  */
 export const toPassphrase = (network: StellarNetwork): string => passphrases[network]
 
+const confirmations: Record<StellarNetwork, number> = {
+  // SCP gives deterministic finality, a closed ledger is never reverted:
+  // https://developers.stellar.org/docs/learn/fundamentals/stellar-consensus-protocol
+  Stellar: 0,
+  // same consensus as mainnet (testnet resets wipe all history, they do not reorganise closed ledgers)
+  StellarTestnet: 0
+}
+
+/**
+ * Ledgers to wait behind the latest closed ledger before treating it as confirmed: `0`, Stellar has no forks and a
+ * ledger is final once closed.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+export const defaultConfirmations = (network: StellarNetwork): number => confirmations[network]
+
 /**
  * @since 0.1.0
  * @category predicates
