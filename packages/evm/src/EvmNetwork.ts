@@ -126,3 +126,44 @@ export const fromChainId = (chainId: number): Option.Option<EvmNetwork> =>
  * @category predicates
  */
 export const isTestnet = (network: EvmNetwork): boolean => (testnets as ReadonlyArray<EvmNetwork>).includes(network)
+
+// testnets reuse their mainnet value: same consensus and block time
+const confirmations: Record<EvmNetwork, number> = {
+  // 2 epochs, Kraken credits at finalization "typically after 64-96": https://support.kraken.com/articles/203325283
+  Ethereum: 64,
+  Sepolia: 64,
+  // milestones finalize in 2-5s since Heimdall v2: https://docs.polygon.technology/pos/concepts/finality/finality/
+  Polygon: 32,
+  PolygonAmoy: 32,
+  // ~1 min of 2s blocks against sequencer reorgs: https://docs.optimism.io/stack/transactions/transaction-finality
+  Base: 30,
+  BaseSepolia: 30,
+  // ~1 min of 0.25s blocks: https://docs.arbitrum.io/how-arbitrum-works/reference/finality-and-reorgs
+  Arbitrum: 240,
+  ArbitrumSepolia: 240,
+  // confirmed on Tezos L1 in ~6s: https://docs.etherlink.com
+  Etherlink: 20,
+  EtherlinkTestnet: 20,
+  // Pionex uses 27 for Optimism: https://intercom.help/pionex/en/articles/14700793-what-is-block-confirmation
+  Optimism: 30,
+  OptimismSepolia: 30,
+  // Snowman finality is irreversible, Circle uses 1: https://developers.circle.com/circle-mint/blockchain-confirmations
+  Avalanche: 1,
+  AvalancheFuji: 1,
+  // Kraken uses 50 (fast finality in 2 blocks): https://support.kraken.com/articles/203325283
+  BnbSmartChain: 50,
+  BnbSmartChainTestnet: 50,
+  // 2 epochs of 16 slots: https://docs.gnosischain.com/about/specs/consensus/
+  Gnosis: 32,
+  // ~1 min of 2s blocks, Circle Fast Transfer uses 1: https://developers.circle.com/cctp/required-block-confirmations
+  Linea: 30,
+  LineaSepolia: 30
+}
+
+/**
+ * The number of blocks behind the head after which a block is treated as final by default.
+ *
+ * @since 0.1.0
+ * @category getters
+ */
+export const defaultConfirmations = (network: EvmNetwork): number => confirmations[network]

@@ -31,7 +31,7 @@ const TRANSFER = EvmHexData.make("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4
 // the pinned inputs of `scripts/record-fixtures.ts`
 const FROM = BigInt(26083549)
 const TO = BigInt(26083558)
-const filter: EvmRpc.EvmLogsFilter = { address: [EUTBL, USTBL], fromBlock: FROM, toBlock: TO, topics: [TRANSFER] }
+const filter: EvmRpc.EvmLogsFilter = { addresses: [EUTBL, USTBL], fromBlock: FROM, toBlock: TO, topics: [TRANSFER] }
 
 const expectPinnedLogs = (logs: ReadonlyArray<{ readonly address: string }>) => {
   expect(logs.filter((log) => log.address === USTBL)).toHaveLength(4)

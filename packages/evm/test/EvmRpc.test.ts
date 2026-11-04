@@ -67,7 +67,7 @@ const setup = (nodes: Record<string, Node>) => {
   return { calls, run }
 }
 
-const filter = { address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) }
+const filter: EvmRpc.EvmLogsFilter = { addresses: [TOKEN], fromBlock: BigInt(10), toBlock: BigInt(20) }
 const head = (block: number) => () => ({ result: `0x${block.toString(16)}` })
 
 describe("EvmLog", () => {
@@ -110,7 +110,7 @@ describe("EvmRpc", () => {
       }
     })
     return run((rpc) =>
-      rpc.getLogs({ ...filter, address: [TOKEN, OTHER], topics: [null, [EvmHexData.make("0xab")]] }).pipe(
+      rpc.getLogs({ ...filter, addresses: [TOKEN, OTHER], topics: [null, [EvmHexData.make("0xab")]] }).pipe(
         Effect.map(() =>
           expect(params).toStrictEqual([{
             address: [TOKEN, OTHER],
@@ -120,8 +120,8 @@ describe("EvmRpc", () => {
           }])
         ),
         Effect.andThen(rpc.getLogs({ ...filter, topics: undefined })),
-        // undefined is not JSON: the key is left out
-        Effect.map(() => expect(params).toStrictEqual([{ address: TOKEN, fromBlock: "0xa", toBlock: "0x14" }]))
+        // undefined is not JSON: the key is left out, and a single address is still sent as an array
+        Effect.map(() => expect(params).toStrictEqual([{ address: [TOKEN], fromBlock: "0xa", toBlock: "0x14" }]))
       )
     )
   })
