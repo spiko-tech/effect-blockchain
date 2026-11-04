@@ -22,10 +22,11 @@ import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Order from "effect/Order"
+import * as Result from "effect/Result"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import { defaultConfirmations } from "./StellarNetwork.ts"
 import { StellarRpc } from "./StellarRpc.ts"
-import type { StellarEventsFilter, StellarEventsPage, StellarRpcError } from "./StellarRpc.ts"
+import type { StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
 
 /**
  * Default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
@@ -93,48 +94,46 @@ export const layer = (options: {
       const range = BigInt(maxBlockRange)
       const { limit } = options
 
-      // the pages after `first`, each pinned to the cursor's endpoint
-      const rest = Effect.fnUntraced(function*(filter: StellarEventsFilter, first: StellarEventsPage) {
-        const events = [...first.events]
-        let cursor = first.cursor
-        while (cursor !== undefined) {
-          const page = yield* rpc.getEvents({ ...filter, cursor })
-          events.push(...page.events)
-          cursor = page.cursor
-        }
-        return events
-      })
-
-      const chunk = (
-        filter: StellarEventsFilter,
-        restart: boolean
-      ): Effect.Effect<Array<StellarContractEvent>, StellarRpcError> =>
-        rpc.getEvents(filter).pipe(
-          Effect.flatMap((first) =>
-            restart ? Effect.catch(rest(filter, first), () => chunk(filter, false)) : rest(filter, first)
-          )
-        )
-
-      const fetchEvents = Effect.fnUntraced(function*(filter: StellarIndexerFilter) {
-        const groups = Arr.chunksOf(filter.contractIds, maxContractIds)
-        const events: Array<StellarContractEvent> = []
-        for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += range) {
-          const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
-          const found: Array<StellarContractEvent> = []
-          for (const contractIds of groups) {
-            found.push(...yield* chunk({ ...filter, contractIds, fromBlock, toBlock, limit }, true))
-          }
-          events.push(...(groups.length > 1 ? Arr.sort(found, byId) : found))
-        }
-        return events.filter((event) => event.inSuccessfulContractCall)
-      })
-
       return StellarIndexer.of({
         lastConfirmedBlock: Effect.map(
           rpc.getLatestLedger,
           (ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))
         ),
-        fetchEvents
+        fetchEvents: (filter) =>
+          Effect.gen(function*() {
+            const groups = Arr.chunksOf(filter.contractIds, maxContractIds)
+            const events: Array<StellarContractEvent> = []
+            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += range) {
+              const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
+              const chunk: Array<StellarContractEvent> = []
+              for (const contractIds of groups) {
+                const groupFilter = { ...filter, contractIds, fromBlock, toBlock, limit }
+                // a failed cursor page drops the group's partial events and restarts it from its first page, once
+                for (let attempt = 1;; attempt++) {
+                  const first = yield* rpc.getEvents(groupFilter)
+                  const found = [...first.events]
+                  let cursor = first.cursor
+                  let failure: StellarRpcError | undefined
+                  while (cursor !== undefined) {
+                    const page = yield* Effect.result(rpc.getEvents({ ...groupFilter, cursor }))
+                    if (Result.isFailure(page)) {
+                      failure = page.failure
+                      break
+                    }
+                    found.push(...page.success.events)
+                    cursor = page.success.cursor
+                  }
+                  if (failure === undefined) {
+                    chunk.push(...found)
+                    break
+                  }
+                  if (attempt === 2) return yield* Effect.fail(failure)
+                }
+              }
+              events.push(...(groups.length > 1 ? Arr.sort(chunk, byId) : chunk))
+            }
+            return events.filter((event) => event.inSuccessfulContractCall)
+          })
       })
     })
   )
