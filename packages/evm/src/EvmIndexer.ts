@@ -39,20 +39,6 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
  */
 export const DEFAULT_MAX_BLOCK_RANGE = 1000
 
-// consecutive ranges of at most `maxBlockRange` blocks covering `[fromBlock, toBlock]`, none when `fromBlock > toBlock`
-const chunks = (
-  fromBlock: bigint,
-  toBlock: bigint,
-  maxBlockRange: number
-): Array<{ readonly fromBlock: bigint; readonly toBlock: bigint }> => {
-  const size = BigInt(maxBlockRange)
-  const result: Array<{ readonly fromBlock: bigint; readonly toBlock: bigint }> = []
-  for (let from = fromBlock; from <= toBlock; from += size) {
-    result.push({ fromBlock: from, toBlock: BigInt_.min(from + size - BigInt(1), toBlock) })
-  }
-  return result
-}
-
 /**
  * Builds an {@link EvmIndexer} reading through the provided {@link EvmRpc.EvmRpc}.
  *
@@ -75,13 +61,18 @@ export const layer = (options: {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
       const confirmations = BigInt(options.confirmations ?? EvmNetwork.defaultConfirmations(rpc.network))
+      const size = BigInt(maxBlockRange)
       return EvmIndexer.of({
         lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
         fetchLogs: (filter) =>
-          Effect.forEach(
-            chunks(filter.fromBlock, filter.toBlock, maxBlockRange),
-            (range) => rpc.getLogs({ ...filter, ...range })
-          ).pipe(Effect.map((pages) => pages.flat()))
+          Effect.gen(function*() {
+            const logs: Array<EvmLog> = []
+            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += size) {
+              const toBlock = BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock)
+              logs.push(...(yield* rpc.getLogs({ ...filter, fromBlock, toBlock })))
+            }
+            return logs
+          })
       })
     })
   )
