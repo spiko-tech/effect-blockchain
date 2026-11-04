@@ -1,4 +1,5 @@
 import {
+  defaultConfirmations,
   isTestnet,
   mainnets,
   networks,
@@ -51,6 +52,10 @@ describe("SolanaNetwork", () => {
         Result.fail(expect.objectContaining({ _tag: "SchemaError" }))
       )
     }
+  })
+
+  it("has no default confirmations: the indexer reads finalized slots", () => {
+    expect(networks.map(defaultConfirmations)).toStrictEqual([0, 0, 0])
   })
 
   it("arbitrary generates valid genesis hashes", () => {

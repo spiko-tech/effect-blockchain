@@ -93,3 +93,13 @@ export const toGenesisHash = (network: SolanaNetwork): SolanaGenesisHash => gene
  */
 export const isTestnet = (network: SolanaNetwork): boolean =>
   (testnets as ReadonlyArray<SolanaNetwork>).includes(network)
+
+/**
+ * Default number of slots `SolanaIndexer` stays behind the head: 0 on every network. The indexer reads at `finalized`
+ * commitment, and a block is finalized once 31+ confirmed blocks are built on top of it
+ * (https://docs.anza.xyz/consensus/commitments), so the finalized slot needs no further margin.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
+export const defaultConfirmations = (_network: SolanaNetwork): number => 0
