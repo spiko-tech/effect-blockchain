@@ -12,6 +12,7 @@
  *
  * @since 0.1.0
  */
+import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -76,50 +77,36 @@ export const layer = (options: {
       const rpc = yield* StarknetRpc
       const confirmations = BigInt(options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network))
       const maxBlockRange = BigInt(options.maxBlockRange ?? DEFAULT_MAX_BLOCK_RANGE)
-      const zero = BigInt(0)
-      const one = BigInt(1)
-
-      // `restart`: whether a failed cursor page may still restart the chunk from its first page
-      const fetchChunk = (
-        filter: StarknetEventsFilter,
-        restart: boolean
-      ): Effect.Effect<Array<StarknetEvent>, StarknetRpcError> =>
-        Effect.gen(function*() {
-          const first = yield* rpc.getEvents(filter)
-          const events = Array.from(first.events)
-          let cursor = first.cursor
-          while (cursor !== undefined) {
-            const page = yield* Effect.result(rpc.getEvents({ ...filter, cursor }))
-            if (Result.isFailure(page)) {
-              return restart ? yield* fetchChunk(filter, false) : yield* Effect.fail(page.failure)
-            }
-            events.push(...page.success.events)
-            cursor = page.success.cursor
-          }
-          return events
-        })
-
-      const fetchEvents = Effect.fnUntraced(function*(filter: StarknetIndexerFilter) {
-        const events: Array<StarknetEvent> = []
-        for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += maxBlockRange) {
-          const toBlock = fromBlock + maxBlockRange - one
-          events.push(
-            ...yield* fetchChunk({
-              ...filter,
-              fromBlock,
-              toBlock: toBlock < filter.toBlock ? toBlock : filter.toBlock,
-              chunkSize: options.chunkSize
-            }, true)
-          )
-        }
-        return events
-      })
-
       return StarknetIndexer.of({
-        lastConfirmedBlock: rpc.blockNumber.pipe(
-          Effect.map((head) => head - confirmations > zero ? head - confirmations : zero)
-        ),
-        fetchEvents
+        lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
+        fetchEvents: (filter) =>
+          Effect.gen(function*() {
+            const events: Array<StarknetEvent> = []
+            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += maxBlockRange) {
+              const toBlock = BigInt_.min(fromBlock + maxBlockRange - BigInt(1), filter.toBlock)
+              const chunk = { ...filter, fromBlock, toBlock, chunkSize: options.chunkSize }
+              // a failed cursor page drops the chunk's events and restarts it once from its first page
+              for (let attempt = 1;; attempt++) {
+                const first = yield* rpc.getEvents(chunk)
+                const chunkEvents = Array.from(first.events)
+                let cursor = first.cursor
+                while (cursor !== undefined) {
+                  const page = yield* Effect.result(rpc.getEvents({ ...chunk, cursor }))
+                  if (Result.isFailure(page)) {
+                    if (attempt === 2) return yield* Effect.fail(page.failure)
+                    break
+                  }
+                  chunkEvents.push(...page.success.events)
+                  cursor = page.success.cursor
+                }
+                if (cursor === undefined) {
+                  events.push(...chunkEvents)
+                  break
+                }
+              }
+            }
+            return events
+          })
       })
     })
   )
