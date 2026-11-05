@@ -2,17 +2,23 @@ import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import * as EvmIndexer from "@effect-blockchain/evm/EvmIndexer"
+import { EvmLog } from "@effect-blockchain/evm/EvmLog"
 import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import { describe, expect, it } from "@effect/vitest"
 import type * as Arr from "effect/Array"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Result from "effect/Result"
+import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
+import * as TestClock from "effect/testing/TestClock"
 
 const fixtures = new URL("fixtures/", import.meta.url)
 
@@ -199,6 +205,185 @@ describe("EvmIndexer", () => {
         expect(Result.getOrUndefined(Exit.findDefect(exit))).toBeInstanceOf(RangeError)
       }
     }))
+})
+
+// The recorded logs of the pinned range, served by the fake `EvmRpc` below.
+const pinnedLogs = Schema.decodeUnknownSync(Schema.Array(EvmLog))(
+  Schema.decodeUnknownSync(LogsBody)(Replay.load(fixtures, "alchemy", "getLogs").body).result
+)
+
+// A fake `EvmRpc`: `eth_blockNumber` reads `state.head`, `eth_getLogs` answers the pinned logs inside the range and
+// records it in `state.ranges`. The n-th `getLogs` call (1-based) fails with `failAt.get(n)` when set. A fake service
+// rather than a fake endpoint: `Pruned` cannot come from an HTTP reply on EVM.
+const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map()) => {
+  const state = { head, ranges: new Array<readonly [bigint, bigint]>() }
+  const layer = Layer.succeed(
+    EvmRpc.EvmRpc,
+    EvmRpc.EvmRpc.of({
+      network: "Ethereum",
+      chainId: Effect.die("unused"),
+      blockNumber: Effect.sync(() => state.head),
+      getLogs: (filter) =>
+        Effect.suspend(() => {
+          state.ranges.push([filter.fromBlock, filter.toBlock])
+          const reason = failAt.get(state.ranges.length)
+          return reason === undefined
+            ? Effect.succeed(
+              pinnedLogs.filter((log) => log.blockNumber >= filter.fromBlock && log.blockNumber <= filter.toBlock)
+            )
+            : Effect.fail(
+              new EvmRpc.EvmRpcError({ reason, method: "eth_getLogs", endpoint: "fake", cause: new Error(reason) })
+            )
+        })
+    })
+  )
+  return { layer, state }
+}
+
+const streamFilter: Omit<EvmRpc.EvmLogsFilter, "fromBlock" | "toBlock"> = {
+  addresses: [EUTBL, USTBL],
+  topics: [TRANSFER]
+}
+const streamOptions = { filter: streamFilter, fromBlock: FROM, toBlock: TO }
+// maxBlockRange 3 over the pinned range: four batches, the second without logs
+const pinnedBatches = [[FROM, FROM + BigInt(2), 2], [FROM + BigInt(3), FROM + BigInt(5), 0], [
+  FROM + BigInt(6),
+  FROM + BigInt(8),
+  1
+], [TO, TO, 2]]
+
+const bounds = (batches: ReadonlyArray<EvmIndexer.EvmIndexerBatch>) =>
+  batches.map((batch) => [batch.fromBlock, batch.toBlock, batch.logs.length])
+
+const collect = (options: Parameters<EvmIndexer.EvmIndexer["Service"]["streamLogs"]>[0]) =>
+  Effect.gen(function*() {
+    const batches = new Array<EvmIndexer.EvmIndexerBatch>()
+    const exit = yield* (yield* EvmIndexer.EvmIndexer).streamLogs(options).pipe(
+      Stream.runForEach((batch) => Effect.sync(() => batches.push(batch))),
+      Effect.exit
+    )
+    return { batches, exit }
+  })
+
+describe("EvmIndexer.streamLogs", () => {
+  it.effect("catches up in batches of maxBlockRange, empty ones included, and ends at toBlock", () => {
+    const { layer, state } = fakeRpc(TO + BigInt(5))
+    return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        expect(batches.flatMap((batch) => batch.logs)).toStrictEqual(pinnedLogs)
+        expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
+      })
+    )
+  })
+
+  it.effect("emits a batch without logs", () => {
+    const { layer } = fakeRpc(TO)
+    const options = { ...streamOptions, fromBlock: FROM + BigInt(3), toBlock: FROM + BigInt(5) }
+    return provide(collect(options), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ batches }) => expect(bounds(batches)).toStrictEqual([[FROM + BigInt(3), FROM + BigInt(5), 0]]))
+    )
+  })
+
+  it.effect("is empty without a call when fromBlock > toBlock", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provide(collect({ ...streamOptions, fromBlock: TO + BigInt(1) }), layer).pipe(
+      Effect.map(({ batches }) => {
+        expect(batches).toStrictEqual([])
+        expect(state.ranges).toStrictEqual([])
+      })
+    )
+  })
+
+  for (const pollInterval of [undefined, "1 minute"] as const) {
+    it.effect(`polls the head every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+      Effect.gen(function*() {
+        const wait = pollInterval === undefined ? EvmIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const { layer, state } = fakeRpc(FROM + BigInt(2))
+        const batches = new Array<EvmIndexer.EvmIndexerBatch>()
+        const options = { filter: streamOptions.filter, fromBlock: FROM, pollInterval }
+        const run = Effect.gen(function*() {
+          yield* (yield* EvmIndexer.EvmIndexer).streamLogs(options).pipe(
+            Stream.runForEach((batch) => Effect.sync(() => batches.push(batch)))
+          )
+        })
+        yield* provide(run, layer, { confirmations: 0, maxBlockRange: 3 }).pipe(Effect.forkChild)
+        yield* TestClock.adjust(0)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches.slice(0, 1))
+        state.head = TO
+        yield* TestClock.adjust(Duration.subtract(wait, Duration.millis(1)))
+        expect(batches).toHaveLength(1)
+        yield* TestClock.adjust(Duration.millis(1))
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        yield* TestClock.adjust(Duration.times(wait, 3))
+        expect(batches).toHaveLength(4)
+        expect(state.ranges).toHaveLength(4)
+      }))
+  }
+
+  it.effect("waits for toBlock to be confirmed", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(TO - BigInt(1))
+      const fiber = yield* provide(collect(streamOptions), layer, { confirmations: 0 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      state.head = TO + BigInt(10)
+      yield* TestClock.adjust(EvmIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches } = yield* Fiber.join(fiber)
+      expect(bounds(batches)).toStrictEqual([[FROM, TO - BigInt(1), 3], [TO, TO, 2]])
+    }))
+
+  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
+    it.effect(`retries a step failing with ${reason} at the same block`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
+      return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        expect(state.ranges[1]).toStrictEqual(state.ranges[2])
+        expect(state.ranges).toHaveLength(5)
+      }))
+    })
+  }
+
+  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
+    it.effect(`fails at once on ${reason}, retry or not`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
+      return provide(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason } })
+        expect(batches).toHaveLength(1)
+        expect(state.ranges).toHaveLength(2)
+      }))
+    })
+  }
+
+  it.effect("fails with the last error once the retry schedule is exhausted", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Lagging" } })
+      expect(batches).toHaveLength(1)
+      expect(state.ranges).toHaveLength(3)
+    }))
+  })
+
+  it.effect("fails on the first failure without retry", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"]]))
+    return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Unavailable" } })
+        expect(batches).toHaveLength(1)
+        expect(state.ranges).toHaveLength(2)
+      })
+    )
+  })
 })
 
 describe("EvmNetwork.defaultConfirmations", () => {
