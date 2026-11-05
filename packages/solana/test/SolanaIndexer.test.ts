@@ -84,7 +84,11 @@ const setup = (options: {
     }
     return replay.fetch(input, { ...init, body: text })
   }
-  const layer = SolanaIndexer.layer({ confirmations: options.confirmations }).pipe(
+  // without confirmations, `layer()` with no argument
+  const indexer = options.confirmations === undefined
+    ? SolanaIndexer.layer()
+    : SolanaIndexer.layer({ confirmations: options.confirmations })
+  const layer = indexer.pipe(
     Layer.provide(SolanaRpc.layer({ network: "Solana", endpoints: replay.endpoints, retries: 0 })),
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch))

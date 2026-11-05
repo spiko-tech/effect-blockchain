@@ -5,9 +5,11 @@ import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
+import * as Result from "effect/Result"
 import type * as Schema from "effect/Schema"
 
 type Indexer = StarknetIndexer.StarknetIndexer["Service"]
@@ -229,6 +231,16 @@ describe("StarknetIndexer", () => {
         })
       )
   })
+
+  it.effect("dies on a maxBlockRange that is not a positive integer", () =>
+    Effect.gen(function*() {
+      for (const maxBlockRange of [0, -1, 1.5]) {
+        const exit = yield* Effect.exit(
+          setup({ a: () => page([]) }, { maxBlockRange }).run((i) => i.lastConfirmedBlock)
+        )
+        expect(Result.getOrUndefined(Exit.findDefect(exit))).toBeInstanceOf(RangeError)
+      }
+    }))
 
   it.effect("a toBlock above the head fails Lagging from the rpc head guard", () => {
     const { calls, run } = setup({ a: () => page([]) }, {}, 15)

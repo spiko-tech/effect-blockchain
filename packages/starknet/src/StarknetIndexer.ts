@@ -61,7 +61,7 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
  * Builds a {@link StarknetIndexer} over the provided {@link StarknetRpc}.
  *
  * - `confirmations` defaults to {@link StarknetNetwork.defaultConfirmations} for the RPC's network.
- * - `maxBlockRange` is the largest chunk in blocks, default {@link DEFAULT_MAX_BLOCK_RANGE}.
+ * - `maxBlockRange` is the largest chunk in blocks, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
  * - `chunkSize` is the `starknet_getEvents` page size, default the RPC's (1000). Lower it for a provider with a
  *   smaller cap.
  *
@@ -77,18 +77,25 @@ export const layer = (options: {
     StarknetIndexer,
     Effect.gen(function*() {
       const rpc = yield* StarknetRpc
+      const maxBlockRange = options.maxBlockRange ?? DEFAULT_MAX_BLOCK_RANGE
+      if (!Number.isSafeInteger(maxBlockRange) || maxBlockRange < 1) {
+        return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
+      }
       const confirmations = BigInt(options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network))
-      const maxBlockRange = BigInt(options.maxBlockRange ?? DEFAULT_MAX_BLOCK_RANGE)
+      const size = BigInt(maxBlockRange)
       return StarknetIndexer.of({
-        lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
-        fetchEvents: (filter) =>
+        lastConfirmedBlock: rpc.blockNumber.pipe(
+          Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0))),
+          Effect.withSpan("StarknetIndexer.lastConfirmedBlock")
+        ),
+        fetchEvents: Effect.fn("StarknetIndexer.fetchEvents")((filter) =>
           Effect.forEach(
             filter.fromBlock > filter.toBlock ? [] : Arr.makeBy(
-              Number((filter.toBlock - filter.fromBlock) / maxBlockRange) + 1,
-              (i) => filter.fromBlock + BigInt(i) * maxBlockRange
+              Number((filter.toBlock - filter.fromBlock) / size) + 1,
+              (i) => filter.fromBlock + BigInt(i) * size
             ),
             (fromBlock) => {
-              const toBlock = BigInt_.min(fromBlock + maxBlockRange - BigInt(1), filter.toBlock)
+              const toBlock = BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock)
               const chunk = { ...filter, fromBlock, toBlock, chunkSize: options.chunkSize }
               // pages until the cursor is absent. The first page (no cursor) has the fallback chain, a cursor page has
               // not: a failed cursor page drops the chunk's events and restarts it once from its first page
@@ -107,6 +114,7 @@ export const layer = (options: {
               )
             }
           ).pipe(Effect.map(Arr.flatten))
+        )
       })
     })
   )
