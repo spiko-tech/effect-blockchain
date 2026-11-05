@@ -1,16 +1,22 @@
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
+import { StarknetEvent } from "@effect-blockchain/starknet/StarknetEvent"
 import * as StarknetIndexer from "@effect-blockchain/starknet/StarknetIndexer"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Result from "effect/Result"
-import type * as Schema from "effect/Schema"
+import * as Schedule from "effect/Schedule"
+import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
+import * as TestClock from "effect/testing/TestClock"
 
 type Indexer = StarknetIndexer.StarknetIndexer["Service"]
 type IndexerOptions = Parameters<typeof StarknetIndexer.layer>[0]
@@ -251,5 +257,227 @@ describe("StarknetIndexer", () => {
           expect(calls).toStrictEqual([])
         })
       )
+  })
+})
+
+const FROM = BigInt(100)
+const TO = BigInt(109)
+// maxBlockRange 3 over [FROM, TO]: four batches, the second without events
+const pinnedEvents = Schema.decodeUnknownSync(Schema.Array(StarknetEvent))([100, 101, 106, 109, 109].map(event))
+const pinnedBatches = [[FROM, FROM + BigInt(2), 2], [FROM + BigInt(3), FROM + BigInt(5), 0], [
+  FROM + BigInt(6),
+  FROM + BigInt(8),
+  1
+], [TO, TO, 2]]
+
+// A fake `StarknetRpc`: `starknet_blockNumber` reads `state.head`, `starknet_getEvents` answers the pinned events
+// inside the range in one page and records it in `state.ranges`. The n-th `getEvents` call (1-based) fails with
+// `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`.
+const fakeRpc = (
+  head: bigint,
+  failAt: ReadonlyMap<number, StarknetRpc.StarknetRpcErrorReason> = new Map(),
+  headFailAt: ReadonlyMap<number, StarknetRpc.StarknetRpcErrorReason> = new Map()
+) => {
+  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
+  const fail = (reason: StarknetRpc.StarknetRpcErrorReason, method: string) =>
+    Effect.fail(new StarknetRpc.StarknetRpcError({ reason, method, endpoint: "fake", cause: new Error(reason) }))
+  const layer = Layer.succeed(
+    StarknetRpc.StarknetRpc,
+    StarknetRpc.StarknetRpc.of({
+      network: "Starknet",
+      chainId: Effect.die("unused"),
+      getTransactionReceipt: () => Effect.die("unused"),
+      blockNumber: Effect.suspend(() => {
+        const reason = headFailAt.get(++state.heads)
+        return reason === undefined ? Effect.succeed(state.head) : fail(reason, "starknet_blockNumber")
+      }),
+      getEvents: (filter) =>
+        Effect.suspend(() => {
+          state.ranges.push([filter.fromBlock, filter.toBlock])
+          const reason = failAt.get(state.ranges.length)
+          return reason === undefined
+            ? Effect.succeed({
+              events: pinnedEvents.filter((e) => e.blockNumber >= filter.fromBlock && e.blockNumber <= filter.toBlock),
+              cursor: undefined
+            })
+            : fail(reason, "starknet_getEvents")
+        })
+    })
+  )
+  return { layer, state }
+}
+
+const provideFake = <A, E>(
+  effect: Effect.Effect<A, E, StarknetIndexer.StarknetIndexer>,
+  rpc: Layer.Layer<StarknetRpc.StarknetRpc>,
+  options?: IndexerOptions
+) => effect.pipe(Effect.provide(StarknetIndexer.layer(options).pipe(Layer.provide(rpc))))
+
+const streamOptions = { filter: { address: TOKEN }, fromBlock: FROM, toBlock: TO }
+
+const bounds = (batches: ReadonlyArray<StarknetIndexer.StarknetIndexerBatch>) =>
+  batches.map((batch) => [batch.fromBlock, batch.toBlock, batch.events.length])
+
+const collect = (options: Parameters<Indexer["streamEvents"]>[0]) =>
+  Effect.gen(function*() {
+    const batches = new Array<StarknetIndexer.StarknetIndexerBatch>()
+    const exit = yield* (yield* StarknetIndexer.StarknetIndexer).streamEvents(options).pipe(
+      Stream.runForEach((batch) => Effect.sync(() => batches.push(batch))),
+      Effect.exit
+    )
+    return { batches, exit }
+  })
+
+describe("StarknetIndexer.streamEvents", () => {
+  it.effect("catches up in batches of maxBlockRange, empty ones included, and ends at toBlock", () => {
+    const { layer, state } = fakeRpc(TO + BigInt(5))
+    return provideFake(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        expect(batches.flatMap((batch) => batch.events)).toStrictEqual(pinnedEvents)
+        expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
+      })
+    )
+  })
+
+  it.effect("emits a batch without events", () => {
+    const { layer } = fakeRpc(TO)
+    const options = { ...streamOptions, fromBlock: FROM + BigInt(3), toBlock: FROM + BigInt(5) }
+    return provideFake(collect(options), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ batches }) => expect(bounds(batches)).toStrictEqual([[FROM + BigInt(3), FROM + BigInt(5), 0]]))
+    )
+  })
+
+  it.effect("is empty without a call when fromBlock > toBlock", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provideFake(collect({ ...streamOptions, fromBlock: TO + BigInt(1) }), layer).pipe(
+      Effect.map(({ batches }) => {
+        expect(batches).toStrictEqual([])
+        expect(state.ranges).toStrictEqual([])
+        expect(state.heads).toBe(0)
+      })
+    )
+  })
+
+  for (const pollInterval of [undefined, "1 minute"] as const) {
+    it.effect(`polls the head every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+      Effect.gen(function*() {
+        const wait = pollInterval === undefined ? StarknetIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const { layer, state } = fakeRpc(FROM + BigInt(2))
+        const batches = new Array<StarknetIndexer.StarknetIndexerBatch>()
+        const options = { filter: streamOptions.filter, fromBlock: FROM, pollInterval }
+        const run = Effect.gen(function*() {
+          yield* (yield* StarknetIndexer.StarknetIndexer).streamEvents(options).pipe(
+            Stream.runForEach((batch) => Effect.sync(() => batches.push(batch)))
+          )
+        })
+        yield* provideFake(run, layer, { confirmations: 0, maxBlockRange: 3 }).pipe(Effect.forkChild)
+        yield* TestClock.adjust(0)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches.slice(0, 1))
+        state.head = TO
+        yield* TestClock.adjust(Duration.subtract(wait, Duration.millis(1)))
+        expect(batches).toHaveLength(1)
+        yield* TestClock.adjust(Duration.millis(1))
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        yield* TestClock.adjust(Duration.times(wait, 3))
+        expect(batches).toHaveLength(4)
+        expect(state.ranges).toHaveLength(4)
+      }))
+  }
+
+  it.effect("waits for toBlock to be confirmed", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(TO - BigInt(1))
+      const fiber = yield* provideFake(collect(streamOptions), layer, { confirmations: 0 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      state.head = TO + BigInt(10)
+      yield* TestClock.adjust(StarknetIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches } = yield* Fiber.join(fiber)
+      expect(bounds(batches)).toStrictEqual([[FROM, TO - BigInt(1), 3], [TO, TO, 2]])
+    }))
+
+  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
+    it.effect(`retries a step failing with ${reason} at the same block`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
+      return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches)
+        expect(state.ranges[1]).toStrictEqual(state.ranges[2])
+        expect(state.ranges).toHaveLength(5)
+      }))
+    })
+  }
+
+  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
+    it.effect(`fails at once on ${reason}, retry or not`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
+      return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason } })
+        expect(batches).toHaveLength(1)
+        expect(state.ranges).toHaveLength(2)
+      }))
+    })
+  }
+
+  it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same block", () => {
+    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, "Unavailable"]]))
+    return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(bounds(batches)).toStrictEqual(pinnedBatches)
+      expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
+      expect(state.heads).toBe(5)
+    }))
+  })
+
+  it.effect("fails with the last error once the retry schedule is exhausted", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Lagging" } })
+      expect(batches).toHaveLength(1)
+      expect(state.ranges).toHaveLength(3)
+    }))
+  })
+
+  it.effect("fails on the first failure without retry", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"]]))
+    return provideFake(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Unavailable" } })
+        expect(batches).toHaveLength(1)
+        expect(state.ranges).toHaveLength(2)
+      })
+    )
+  })
+
+  it.effect("a cursor page still failing after the chunk restart fails the step, then the stream retries it", () => {
+    let cursorPages = 0
+    const { calls, run } = setup({
+      // pages 10 then 12; the cursor page fails twice: once before the chunk restart, once after it
+      a: (filter) =>
+        filter.continuation_token === undefined ? page([10], "a-1") : ++cursorPages <= 2 ? UNAVAILABLE : page([12])
+    }, { confirmations: 0 })
+    const options = { filter: { address: TOKEN }, fromBlock: BigInt(10), toBlock: BigInt(20) }
+    return Effect.gen(function*() {
+      const batches = yield* run((indexer) =>
+        indexer.streamEvents({ ...options, retry: Schedule.recurs(1) }).pipe(Stream.runCollect)
+      )
+      expect(batches.map((batch) => [batch.fromBlock, batch.toBlock, blocks(batch.events)])).toStrictEqual([
+        [BigInt(10), BigInt(20), [10, 12]]
+      ])
+      expect(calls).toStrictEqual(["a:first", "a:a-1", "a:first", "a:a-1", "a:first", "a:a-1"])
+    })
   })
 })
