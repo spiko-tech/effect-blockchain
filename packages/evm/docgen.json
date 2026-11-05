@@ -2,5 +2,9 @@
   "$schema": "../../tools/docgen/node_modules/@effect/docgen/schema.json",
   "exclude": [
     "src/internal/**/*.ts"
-  ]
+  ],
+  "examplesCompilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  }
 }
