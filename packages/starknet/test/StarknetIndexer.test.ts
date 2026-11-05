@@ -1,3 +1,4 @@
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import { StarknetEvent } from "@effect-blockchain/starknet/StarknetEvent"
@@ -221,7 +222,7 @@ describe("StarknetIndexer", () => {
     return run((i) => Effect.flip(i.fetchEvents({ address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) })))
       .pipe(
         Effect.map((error) => {
-          expect(error).toMatchObject({ reason: "Rejected", code: 33, endpoint: "a" })
+          expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 33, endpoint: "a" })
           expect(calls).toStrictEqual(["a:first", "a:a-1", "a:first", "a:a-1"])
         })
       )
@@ -232,7 +233,7 @@ describe("StarknetIndexer", () => {
     return run((i) => Effect.flip(i.fetchEvents({ address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) })))
       .pipe(
         Effect.map((error) => {
-          expect(error).toMatchObject({ reason: "Unavailable", code: 63 })
+          expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 63 })
           expect(calls).toStrictEqual(["a:first"])
         })
       )
@@ -253,7 +254,7 @@ describe("StarknetIndexer", () => {
     return run((i) => Effect.flip(i.fetchEvents({ address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) })))
       .pipe(
         Effect.map((error) => {
-          expect(error).toMatchObject({ reason: "Lagging" })
+          expect(error).toMatchObject({ reason: { _tag: "Lagging" } })
           expect(calls).toStrictEqual([])
         })
       )
@@ -275,12 +276,12 @@ const pinnedBatches = [[FROM, FROM + BigInt(2), 2], [FROM + BigInt(3), FROM + Bi
 // `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`.
 const fakeRpc = (
   head: bigint,
-  failAt: ReadonlyMap<number, StarknetRpc.StarknetRpcErrorReason> = new Map(),
-  headFailAt: ReadonlyMap<number, StarknetRpc.StarknetRpcErrorReason> = new Map()
+  failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
+  headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
 ) => {
   const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
-  const fail = (reason: StarknetRpc.StarknetRpcErrorReason, method: string) =>
-    Effect.fail(new StarknetRpc.StarknetRpcError({ reason, method, endpoint: "fake", cause: new Error(reason) }))
+  const fail = (reason: JsonRpc.Reason, method: string) =>
+    Effect.fail(new StarknetRpc.StarknetRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const layer = Layer.succeed(
     StarknetRpc.StarknetRpc,
     StarknetRpc.StarknetRpc.of({
@@ -397,8 +398,8 @@ describe("StarknetIndexer.streamEvents", () => {
       expect(bounds(batches)).toStrictEqual([[FROM, TO - BigInt(1), 3], [TO, TO, 2]])
     }))
 
-  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
-    it.effect(`retries a step failing with ${reason} at the same block`, () => {
+  for (const reason of [new JsonRpc.Unavailable(), new JsonRpc.InvalidResponse(), new JsonRpc.Lagging()]) {
+    it.effect(`retries a step failing with ${reason._tag} at the same block`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
       return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
         confirmations: 0,
@@ -412,8 +413,14 @@ describe("StarknetIndexer.streamEvents", () => {
     })
   }
 
-  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
-    it.effect(`fails at once on ${reason}, retry or not`, () => {
+  for (
+    const reason of [
+      new JsonRpc.Pruned(),
+      new JsonRpc.Rejected(),
+      new JsonRpc.WrongNetwork({ expected: "a", actual: "b" })
+    ]
+  ) {
+    it.effect(`fails at once on ${reason._tag}, retry or not`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
       return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
         confirmations: 0,
@@ -427,7 +434,7 @@ describe("StarknetIndexer.streamEvents", () => {
   }
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same block", () => {
-    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, new JsonRpc.Unavailable()]]))
     return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -440,22 +447,25 @@ describe("StarknetIndexer.streamEvents", () => {
   })
 
   it.effect("fails with the last error once the retry schedule is exhausted", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    const { layer, state } = fakeRpc(
+      TO,
+      new Map<number, JsonRpc.Reason>([[2, new JsonRpc.Unavailable()], [3, new JsonRpc.Lagging()]])
+    )
     return provideFake(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
     }).pipe(Effect.map(({ batches, exit }) => {
-      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Lagging" } })
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Lagging" } } })
       expect(batches).toHaveLength(1)
       expect(state.ranges).toHaveLength(3)
     }))
   })
 
   it.effect("fails on the first failure without retry", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
     return provideFake(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
       Effect.map(({ batches, exit }) => {
-        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Unavailable" } })
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
         expect(batches).toHaveLength(1)
         expect(state.ranges).toHaveLength(2)
       })

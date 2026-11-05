@@ -49,7 +49,11 @@ export interface EvmRpcEndpoint {
 }
 
 /**
- * Why a call failed:
+ * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
+ * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
+ * `AggregateError` of every endpoint's error, in order.
+ *
+ * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -61,33 +65,10 @@ export interface EvmRpcEndpoint {
  * | `WrongNetwork` | the endpoint's `eth_chainId` is not the configured network's | no |
  *
  * @since 0.1.0
- * @category models
- */
-export const EvmRpcErrorReason = Schema.Literals([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned",
-  "Rejected",
-  "WrongNetwork"
-])
-
-/**
- * @since 0.1.0
- * @category models
- */
-export type EvmRpcErrorReason = typeof EvmRpcErrorReason.Type
-
-/**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
- *
- * @since 0.1.0
  * @category errors
  */
 export class EvmRpcError extends Schema.TaggedError<EvmRpcError>()("EvmRpcError", {
-  reason: EvmRpcErrorReason,
+  reason: JsonRpc.Reason,
   method: Schema.String,
   endpoint: Schema.String,
   code: Schema.optional(Schema.Number),
@@ -97,7 +78,7 @@ export class EvmRpcError extends Schema.TaggedError<EvmRpcError>()("EvmRpcError"
    * @since 0.1.0
    */
   override get message(): string {
-    return `${this.method} failed on ${this.endpoint}: ${this.reason}${
+    return `${this.method} failed on ${this.endpoint}: ${this.reason._tag}${
       this.code === undefined ? "" : ` (${this.code})`
     }`
   }
@@ -137,7 +118,7 @@ export class EvmRpc extends Context.Service<EvmRpc, {
 
 // the JSON-RPC codes viem 2.57.11 retries (`utils/buildRequest.ts`, `shouldRetry`): limit exceeded, internal error,
 // QuickNode rate limit, unknown error and Alchemy's batch rate limit. The endpoint is struggling: retry then fall back
-const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map(
+const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map(
   [-32005, -32603, -32007, -1, 429].map((code) => [code, "Unavailable"])
 )
 
@@ -187,7 +168,7 @@ export const layer = (options: {
                 Effect.succeed(expectedChainId) :
                 Effect.fail(
                   new EvmRpcError({
-                    reason: "WrongNetwork",
+                    reason: new JsonRpc.WrongNetwork({ expected: String(expectedChainId), actual: String(chainId) }),
                     method: RpcMethods.chainId.name,
                     endpoint,
                     cause: new Error(`expected chain ID ${expectedChainId} for ${network}, got ${chainId}`)
@@ -219,7 +200,7 @@ export const layer = (options: {
             return yield* rpc.fail(
               endpoint,
               method,
-              "InvalidResponse",
+              new JsonRpc.InvalidResponse(),
               new Error(`log ${invalid.transactionHash}#${invalid.logIndex} is outside the filter`)
             )
           }

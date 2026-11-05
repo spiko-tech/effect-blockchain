@@ -101,7 +101,7 @@ describe("StellarRpc fixtures", () => {
           Effect.flip
         )
       )
-      assert.strictEqual(error.reason, "Pruned")
+      assert.strictEqual(error.reason._tag, "Pruned")
       assert.strictEqual(error.code, -32600)
     }))
 
@@ -112,7 +112,7 @@ describe("StellarRpc fixtures", () => {
       const error = yield* setup([{ name: "quasar", cases: network }])((rpc) =>
         Effect.flip(rpc.getEvents({ ...eutbl, fromBlock: BigInt(999999990), toBlock: BigInt(1000000000) }))
       )
-      assert.strictEqual(error.reason, "Lagging")
+      assert.strictEqual(error.reason._tag, "Lagging")
       assert.strictEqual(error.code, undefined)
     }))
 
@@ -121,14 +121,14 @@ describe("StellarRpc fixtures", () => {
       const error = yield* setup([{ name: "quasar", cases: [...network, "invalid-params"] }])((rpc) =>
         Effect.flip(rpc.getEvents({ ...eutbl, limit: 20000 }))
       )
-      assert.strictEqual(error.reason, "Rejected")
+      assert.strictEqual(error.reason._tag, "Rejected")
       assert.strictEqual(error.code, -32602)
     }))
 
   it.effect("fixture: quasar invalid key", () =>
     Effect.gen(function*() {
       const error = yield* setup([{ name: "quasar", cases: ["invalid-key"] }])((rpc) => Effect.flip(rpc.getNetwork))
-      assert.strictEqual(error.reason, "Unavailable")
+      assert.strictEqual(error.reason._tag, "Unavailable")
       assert.strictEqual(error.code, 401)
     }))
 

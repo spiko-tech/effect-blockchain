@@ -109,7 +109,7 @@ describe("SolanaRpc fixtures", () => {
     )
       .pipe(
         Effect.map((error) => {
-          expect(error).toMatchObject({ reason: "Pruned", method: "getTransaction", endpoint: "alchemy" })
+          expect(error).toMatchObject({ reason: { _tag: "Pruned" }, method: "getTransaction", endpoint: "alchemy" })
           expect(error.code).toBeUndefined()
         })
       ))
@@ -123,13 +123,13 @@ describe("SolanaRpc fixtures", () => {
   it.effect("fixture: alchemy invalid-params", () =>
     alchemy("invalid-params").run((rpc) =>
       Effect.flip(rpc.getSignaturesForAddress({ address: EUTBL, limit: 0, ...finalized }))
-    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: -32602 }))))
+    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602 }))))
 
   it.effect("fixture: alchemy invalid-key", () =>
     replay([{ name: "alchemy", cases: ["invalid-key"] }]).run((rpc) => Effect.flip(rpc.getSlot(finalized))).pipe(
       Effect.map((error) =>
         // HTTP 401 with a JSON-RPC -32600 body: the status wins, and another endpoint may hold a valid key
-        expect(error).toMatchObject({ reason: "Unavailable", code: 401, method: "getGenesisHash" })
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401, method: "getGenesisHash" })
       )
     ))
 
