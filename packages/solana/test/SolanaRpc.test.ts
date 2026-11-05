@@ -4,6 +4,8 @@ import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
 import { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -53,7 +55,7 @@ const setup = (nodes: Record<string, Node>) => {
     Effect.gen(function*() {
       return yield* f(yield* SolanaRpc.SolanaRpc)
     }).pipe(Effect.provide(layer))
-  return { calls, run }
+  return { calls, fetch, run }
 }
 
 const slot = (value: number) => () => ({ result: value })
@@ -248,5 +250,46 @@ describe("SolanaRpc", () => {
       expect(value).toBe(BigInt(7))
       expect(calls).toStrictEqual(["a:getGenesisHash", "a:getSlot", "b:getGenesisHash", "b:getSlot"])
     }))
+  })
+})
+
+describe("layerConfig", () => {
+  const endpoints = Config.all([Config.all({ name: Config.succeed("a"), url: Config.Redacted("SOLANA_RPC_URL") })])
+  const run = (env: Record<string, string>) => {
+    const { calls, fetch } = setup({ a: { getSlot: slot(300) } })
+    const layer = SolanaRpc.layerConfig({ network: Config.succeed("Solana"), endpoints, retries: Config.succeed(0) })
+      .pipe(
+        Layer.provide(FetchHttpClient.layer),
+        Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)),
+        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+      )
+    return {
+      calls,
+      effect: Effect.gen(function*() {
+        return yield* (yield* SolanaRpc.SolanaRpc).getSlot(confirmed)
+      }).pipe(Effect.provide(layer))
+    }
+  }
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({ SOLANA_RPC_URL: "https://a.rpc.test/secret-key" })
+      expect(yield* effect).toStrictEqual(BigInt(300))
+      expect(calls.length).toBeGreaterThan(0)
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({})
+      expect(yield* Effect.flip(effect)).toMatchObject({ _tag: "ConfigError" })
+      expect(calls).toStrictEqual([])
+    }))
+
+  it("keeps the endpoint url redacted", () => {
+    SolanaRpc.layerConfig({
+      network: Config.succeed("Solana"),
+      // @ts-expect-error a plain string url is rejected
+      endpoints: Config.all([Config.all({ name: Config.succeed("a"), url: Config.String("SOLANA_RPC_URL") })])
+    })
   })
 })

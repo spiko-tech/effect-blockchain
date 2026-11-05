@@ -46,6 +46,7 @@
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -218,3 +219,22 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link StarknetIndexer} like {@link layer}, reading the options from `Config`.
+ *
+ * @example
+ * ```ts
+ * import * as StarknetIndexer from "@effect-blockchain/starknet/StarknetIndexer"
+ * import * as Config from "effect/Config"
+ *
+ * const IndexerLive = StarknetIndexer.layerConfig({ confirmations: Config.Int("STARKNET_CONFIRMATIONS") })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<NonNullable<Parameters<typeof layer>[0]>>
+): Layer.Layer<StarknetIndexer, Config.ConfigError, StarknetRpc> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))

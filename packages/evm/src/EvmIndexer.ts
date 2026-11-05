@@ -41,6 +41,7 @@
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -180,3 +181,21 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link EvmIndexer} like {@link layer}, reading the options from `Config`.
+ *
+ * @example
+ * ```ts
+ * import * as EvmIndexer from "@effect-blockchain/evm/EvmIndexer"
+ * import * as Config from "effect/Config"
+ *
+ * const IndexerLive = EvmIndexer.layerConfig({ confirmations: Config.Int("ETHEREUM_CONFIRMATIONS") })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<NonNullable<Parameters<typeof layer>[0]>>
+): Layer.Layer<EvmIndexer, Config.ConfigError, EvmRpc.EvmRpc> => Layer.unwrap(Effect.map(Config.unwrap(options), layer))

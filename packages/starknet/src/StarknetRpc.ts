@@ -23,6 +23,7 @@
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import type * as Arr from "effect/Array"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -295,3 +296,25 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link StarknetRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ *
+ * @example
+ * ```ts
+ * import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
+ * import * as Config from "effect/Config"
+ *
+ * const RpcLive = StarknetRpc.layerConfig({
+ *   network: Config.succeed("Starknet"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STARKNET_RPC_URL") })])
+ * })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Parameters<typeof layer>[0]>
+): Layer.Layer<StarknetRpc, Config.ConfigError, HttpClient.HttpClient> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))

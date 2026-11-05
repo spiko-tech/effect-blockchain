@@ -22,6 +22,7 @@
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -218,3 +219,25 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link EvmRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ *
+ * @example
+ * ```ts
+ * import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
+ * import * as Config from "effect/Config"
+ *
+ * const RpcLive = EvmRpc.layerConfig({
+ *   network: Config.succeed("Ethereum"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("ETHEREUM_RPC_URL") })])
+ * })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Parameters<typeof layer>[0]>
+): Layer.Layer<EvmRpc, Config.ConfigError, HttpClient.HttpClient> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))
