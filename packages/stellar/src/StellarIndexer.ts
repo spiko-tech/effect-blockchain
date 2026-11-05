@@ -22,11 +22,10 @@ import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Order from "effect/Order"
-import * as Result from "effect/Result"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import { defaultConfirmations } from "./StellarNetwork.ts"
 import { StellarRpc } from "./StellarRpc.ts"
-import type { StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
+import type { StellarEventsFilter, StellarEventsPage, StellarRpcError } from "./StellarRpc.ts"
 
 /**
  * Default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
@@ -99,41 +98,38 @@ export const layer = (options: {
           rpc.getLatestLedger,
           (ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))
         ),
-        fetchEvents: (filter) =>
-          Effect.gen(function*() {
-            const groups = Arr.chunksOf(filter.contractIds, maxContractIds)
-            const events: Array<StellarContractEvent> = []
-            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += range) {
-              const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
-              const chunk: Array<StellarContractEvent> = []
-              for (const contractIds of groups) {
-                const groupFilter = { ...filter, contractIds, fromBlock, toBlock, limit }
-                // a failed cursor page drops the group's partial events and restarts it from its first page, once
-                for (let attempt = 1;; attempt++) {
-                  const first = yield* rpc.getEvents(groupFilter)
-                  const found = [...first.events]
-                  let cursor = first.cursor
-                  let failure: StellarRpcError | undefined
-                  while (cursor !== undefined) {
-                    const page = yield* Effect.result(rpc.getEvents({ ...groupFilter, cursor }))
-                    if (Result.isFailure(page)) {
-                      failure = page.failure
-                      break
-                    }
-                    found.push(...page.success.events)
-                    cursor = page.success.cursor
-                  }
-                  if (failure === undefined) {
-                    chunk.push(...found)
-                    break
-                  }
-                  if (attempt === 2) return yield* Effect.fail(failure)
-                }
-              }
-              events.push(...(groups.length > 1 ? Arr.sort(chunk, byId) : chunk))
-            }
-            return events.filter((event) => event.inSuccessfulContractCall)
-          })
+        fetchEvents: (filter) => {
+          if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
+          const groups = Arr.chunksOf(filter.contractIds, maxContractIds)
+          const chunks = Arr.makeBy(
+            Number((filter.toBlock - filter.fromBlock) / range) + 1,
+            (i) => filter.fromBlock + BigInt(i) * range
+          )
+          return Effect.forEach(chunks, (fromBlock) => {
+            const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
+            return Effect.forEach(groups, (contractIds) => {
+              const groupFilter = { ...filter, contractIds, fromBlock, toBlock, limit }
+              // the events of `pages` and of `page` onwards, the later pages pinned to the cursor's endpoint
+              const paging = (
+                pages: ReadonlyArray<ReadonlyArray<StellarContractEvent>>,
+                page: StellarEventsPage
+              ): Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError> =>
+                page.cursor === undefined
+                  ? Effect.succeed(Arr.flatten([...pages, page.events]))
+                  : Effect.flatMap(
+                    rpc.getEvents({ ...groupFilter, cursor: page.cursor }),
+                    (next) => paging([...pages, page.events], next)
+                  )
+              const firstPage = rpc.getEvents(groupFilter)
+              // a failed cursor page drops the group's partial events and restarts it from its first page, once
+              return Effect.flatMap(firstPage, (first) =>
+                Effect.catch(
+                  paging([], first),
+                  () => Effect.flatMap(firstPage, (first) => paging([], first))
+                ))
+            }).pipe(Effect.map((found) => groups.length > 1 ? Arr.sort(Arr.flatten(found), byId) : Arr.flatten(found)))
+          }).pipe(Effect.map((chunks) => Arr.flatten(chunks).filter((event) => event.inSuccessfulContractCall)))
+        }
       })
     })
   )
