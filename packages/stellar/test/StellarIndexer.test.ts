@@ -6,9 +6,11 @@ import { StellarContractEvent } from "@effect-blockchain/stellar/StellarContract
 import * as StellarIndexer from "@effect-blockchain/stellar/StellarIndexer"
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { StrKey } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -558,4 +560,33 @@ describe("StellarIndexer.streamEvents", () => {
       })
     )
   })
+})
+
+describe("layerConfig", () => {
+  const lastConfirmed = (env: Record<string, string>) =>
+    Effect.gen(function*() {
+      return yield* (yield* StellarIndexer.StellarIndexer).lastConfirmedBlock
+    }).pipe(
+      Effect.provide(
+        StellarIndexer.layerConfig({ confirmations: Config.Int("STELLAR_CONFIRMATIONS") }).pipe(
+          Layer.provide(
+            Layer.mock(StellarRpc.StellarRpc)({
+              network: "Stellar",
+              getLatestLedger: Effect.succeed({ sequence: BigInt(100), id: "ab", protocolVersion: 23 })
+            })
+          ),
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+        )
+      )
+    )
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      expect(yield* lastConfirmed({ STELLAR_CONFIRMATIONS: "10" })).toBe(BigInt(90))
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      expect(yield* Effect.flip(lastConfirmed({}))).toMatchObject({ _tag: "ConfigError" })
+    }))
 })

@@ -37,6 +37,7 @@ import {
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE
 } from "@solana/kit"
 import type * as Arr from "effect/Array"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -307,3 +308,25 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link SolanaRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ *
+ * @example
+ * ```ts
+ * import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
+ * import * as Config from "effect/Config"
+ *
+ * const RpcLive = SolanaRpc.layerConfig({
+ *   network: Config.succeed("Solana"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("SOLANA_RPC_URL") })])
+ * })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Parameters<typeof layer>[0]>
+): Layer.Layer<SolanaRpc, Config.ConfigError, HttpClient.HttpClient> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))

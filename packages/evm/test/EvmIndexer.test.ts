@@ -7,6 +7,8 @@ import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import { describe, expect, it } from "@effect/vitest"
 import type * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -421,4 +423,28 @@ describe("EvmNetwork.defaultConfirmations", () => {
     expect(EvmNetwork.defaultConfirmations("Sepolia")).toBe(64)
     expect(EvmNetwork.defaultConfirmations("Arbitrum")).toBe(240)
   })
+})
+
+describe("layerConfig", () => {
+  const lastConfirmed = (env: Record<string, string>) =>
+    Effect.gen(function*() {
+      return yield* (yield* EvmIndexer.EvmIndexer).lastConfirmedBlock
+    }).pipe(
+      Effect.provide(
+        EvmIndexer.layerConfig({ confirmations: Config.Int("ETHEREUM_CONFIRMATIONS") }).pipe(
+          Layer.provide(Layer.mock(EvmRpc.EvmRpc)({ network: "Ethereum", blockNumber: Effect.succeed(BigInt(100)) })),
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+        )
+      )
+    )
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      expect(yield* lastConfirmed({ ETHEREUM_CONFIRMATIONS: "10" })).toBe(BigInt(90))
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      expect(yield* Effect.flip(lastConfirmed({}))).toMatchObject({ _tag: "ConfigError" })
+    }))
 })

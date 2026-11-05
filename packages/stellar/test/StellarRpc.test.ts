@@ -5,6 +5,8 @@ import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { StrKey } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -85,7 +87,7 @@ const setup = (nodes: Record<string, Node>) => {
     Effect.gen(function*() {
       return yield* f(yield* StellarRpc.StellarRpc)
     }).pipe(Effect.provide(layer))
-  return { calls, run }
+  return { calls, fetch, run }
 }
 
 const filter = { contractIds: [CONTRACT] as const, fromBlock: BigInt(10), toBlock: BigInt(20) }
@@ -393,5 +395,48 @@ describe("StellarRpc", () => {
         expect(calls).toStrictEqual([])
       })
     )
+  })
+})
+
+describe("layerConfig", () => {
+  const endpoints = Config.all([Config.all({ name: Config.succeed("a"), url: Config.Redacted("STELLAR_RPC_URL") })])
+  const run = (env: Record<string, string>) => {
+    const { calls, fetch } = setup({
+      a: { getLatestLedger: () => ({ result: { id: "ab".repeat(32), protocolVersion: 23, sequence: 100 } }) }
+    })
+    const layer = StellarRpc.layerConfig({ network: Config.succeed("Stellar"), endpoints, retries: Config.succeed(0) })
+      .pipe(
+        Layer.provide(FetchHttpClient.layer),
+        Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)),
+        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+      )
+    return {
+      calls,
+      effect: Effect.gen(function*() {
+        return yield* (yield* StellarRpc.StellarRpc).getLatestLedger
+      }).pipe(Effect.provide(layer))
+    }
+  }
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({ STELLAR_RPC_URL: "https://a.rpc.test/secret-key" })
+      expect(yield* effect).toStrictEqual({ id: "ab".repeat(32), protocolVersion: 23, sequence: BigInt(100) })
+      expect(calls.length).toBeGreaterThan(0)
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({})
+      expect(yield* Effect.flip(effect)).toMatchObject({ _tag: "ConfigError" })
+      expect(calls).toStrictEqual([])
+    }))
+
+  it("keeps the endpoint url redacted", () => {
+    StellarRpc.layerConfig({
+      network: Config.succeed("Stellar"),
+      // @ts-expect-error a plain string url is rejected
+      endpoints: Config.all([Config.all({ name: Config.succeed("a"), url: Config.String("STELLAR_RPC_URL") })])
+    })
   })
 })

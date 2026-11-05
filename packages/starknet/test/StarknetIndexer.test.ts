@@ -5,6 +5,8 @@ import * as StarknetIndexer from "@effect-blockchain/starknet/StarknetIndexer"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
@@ -480,4 +482,30 @@ describe("StarknetIndexer.streamEvents", () => {
       expect(calls).toStrictEqual(["a:first", "a:a-1", "a:first", "a:a-1", "a:first", "a:a-1"])
     })
   })
+})
+
+describe("layerConfig", () => {
+  const lastConfirmed = (env: Record<string, string>) =>
+    Effect.gen(function*() {
+      return yield* (yield* StarknetIndexer.StarknetIndexer).lastConfirmedBlock
+    }).pipe(
+      Effect.provide(
+        StarknetIndexer.layerConfig({ confirmations: Config.Int("STARKNET_CONFIRMATIONS") }).pipe(
+          Layer.provide(
+            Layer.mock(StarknetRpc.StarknetRpc)({ network: "Starknet", blockNumber: Effect.succeed(BigInt(100)) })
+          ),
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+        )
+      )
+    )
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      expect(yield* lastConfirmed({ STARKNET_CONFIRMATIONS: "10" })).toBe(BigInt(90))
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      expect(yield* Effect.flip(lastConfirmed({}))).toMatchObject({ _tag: "ConfigError" })
+    }))
 })

@@ -23,6 +23,7 @@
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -380,3 +381,25 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link StellarRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ *
+ * @example
+ * ```ts
+ * import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
+ * import * as Config from "effect/Config"
+ *
+ * const RpcLive = StellarRpc.layerConfig({
+ *   network: Config.succeed("Stellar"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STELLAR_RPC_URL") })])
+ * })
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Parameters<typeof layer>[0]>
+): Layer.Layer<StellarRpc, Config.ConfigError, HttpClient.HttpClient> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))

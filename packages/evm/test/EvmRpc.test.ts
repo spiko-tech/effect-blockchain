@@ -5,6 +5,8 @@ import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -64,7 +66,7 @@ const setup = (nodes: Record<string, Node>) => {
     Effect.gen(function*() {
       return yield* f(yield* EvmRpc.EvmRpc)
     }).pipe(Effect.provide(layer))
-  return { calls, run }
+  return { calls, fetch, run }
 }
 
 const filter: EvmRpc.EvmLogsFilter = { addresses: [TOKEN], fromBlock: BigInt(10), toBlock: BigInt(20) }
@@ -239,5 +241,46 @@ describe("EvmRpc", () => {
       expect(logs).toStrictEqual([])
       expect(calls).toStrictEqual([])
     }))
+  })
+})
+
+describe("layerConfig", () => {
+  const endpoints = Config.all([Config.all({ name: Config.succeed("a"), url: Config.Redacted("ETHEREUM_RPC_URL") })])
+  const run = (env: Record<string, string>) => {
+    const { calls, fetch } = setup({ a: { eth_blockNumber: head(42) } })
+    const layer = EvmRpc.layerConfig({ network: Config.succeed("Ethereum"), endpoints, retries: Config.succeed(0) })
+      .pipe(
+        Layer.provide(FetchHttpClient.layer),
+        Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)),
+        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+      )
+    return {
+      calls,
+      effect: Effect.gen(function*() {
+        return yield* (yield* EvmRpc.EvmRpc).blockNumber
+      }).pipe(Effect.provide(layer))
+    }
+  }
+
+  it.effect("builds from config", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({ ETHEREUM_RPC_URL: "https://a.rpc.test/secret-key" })
+      expect(yield* effect).toStrictEqual(BigInt(42))
+      expect(calls.length).toBeGreaterThan(0)
+    }))
+
+  it.effect("fails with a ConfigError when a value is missing", () =>
+    Effect.gen(function*() {
+      const { calls, effect } = run({})
+      expect(yield* Effect.flip(effect)).toMatchObject({ _tag: "ConfigError" })
+      expect(calls).toStrictEqual([])
+    }))
+
+  it("keeps the endpoint url redacted", () => {
+    EvmRpc.layerConfig({
+      network: Config.succeed("Ethereum"),
+      // @ts-expect-error a plain string url is rejected
+      endpoints: Config.all([Config.all({ name: Config.succeed("a"), url: Config.String("ETHEREUM_RPC_URL") })])
+    })
   })
 })
