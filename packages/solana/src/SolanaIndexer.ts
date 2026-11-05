@@ -19,13 +19,17 @@
  * @since 0.1.0
  */
 import * as Arr from "effect/Array"
+import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import type * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
 import type { SolanaAddress } from "./SolanaAddress.ts"
-import { defaultConfirmations } from "./SolanaNetwork.ts"
-import { SolanaRpc, type SolanaRpcError, type SolanaSignatureInfo, type SolanaTransactionInfo } from "./SolanaRpc.ts"
+import * as SolanaNetwork from "./SolanaNetwork.ts"
+import type { SolanaRpcError, SolanaTransactionInfo } from "./SolanaRpc.ts"
+import { SolanaRpc } from "./SolanaRpc.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
 
 /**
@@ -42,6 +46,19 @@ export interface SolanaIndexedTransaction extends SolanaTransactionInfo {
 }
 
 /**
+ * A {@link SolanaIndexer} `fetchTransactions` filter: the address whose transactions are read, over the inclusive slot
+ * range `[fromBlock, toBlock]`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaIndexerFilter {
+  readonly address: SolanaAddress
+  readonly fromBlock: bigint
+  readonly toBlock: bigint
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -52,20 +69,18 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
    * The transactions touching `address` in slots `fromBlock..toBlock` (both inclusive), in chain order. Empty when
    * `fromBlock > toBlock`.
    */
-  readonly fetchTransactions: (filter: {
-    readonly address: SolanaAddress
-    readonly fromBlock: bigint
-    readonly toBlock: bigint
-  }) => Effect.Effect<ReadonlyArray<SolanaIndexedTransaction>, SolanaRpcError>
+  readonly fetchTransactions: (
+    filter: SolanaIndexerFilter
+  ) => Effect.Effect<ReadonlyArray<SolanaIndexedTransaction>, SolanaRpcError>
 }>()("@effect-blockchain/solana/SolanaIndexer") {}
 
 // the node's maximum `limit`
-const pageSize = 1000
-const commitment = "finalized"
+const PAGE_SIZE = 1000
+const COMMITMENT = "finalized"
 
 /**
  * Builds a {@link SolanaIndexer} on the provided {@link SolanaRpc}. `confirmations` defaults to
- * `defaultConfirmations` of the rpc's network.
+ * {@link SolanaNetwork.defaultConfirmations} of the rpc's network.
  *
  * There is no `maxBlockRange`: `getSignaturesForAddress` takes no slot range, only a page size, so a range cannot be
  * split into chunks.
@@ -75,44 +90,48 @@ const commitment = "finalized"
  */
 export const layer = (options: {
   readonly confirmations?: number | undefined
-}): Layer.Layer<SolanaIndexer, never, SolanaRpc> =>
+} = {}): Layer.Layer<SolanaIndexer, never, SolanaRpc> =>
   Layer.effect(
     SolanaIndexer,
     Effect.gen(function*() {
       const rpc = yield* SolanaRpc
-      const confirmations = BigInt(options.confirmations ?? defaultConfirmations(rpc.network))
+      const confirmations = BigInt(options.confirmations ?? SolanaNetwork.defaultConfirmations(rpc.network))
 
       return SolanaIndexer.of({
-        lastConfirmedBlock: rpc.getSlot({ commitment }).pipe(
-          Effect.map((slot) => slot > confirmations ? slot - confirmations : BigInt(0))
+        lastConfirmedBlock: rpc.getSlot({ commitment: COMMITMENT }).pipe(
+          Effect.map((slot) => BigInt_.max(slot - confirmations, BigInt(0))),
+          Effect.withSpan("SolanaIndexer.lastConfirmedBlock")
         ),
         fetchTransactions: Effect.fn("SolanaIndexer.fetchTransactions")(function*(filter) {
           if (filter.fromBlock > filter.toBlock) return []
-          // pages from `before` back to the first short page or the first page reaching below `fromBlock`
-          const pagesFrom = (
-            before: SolanaTransactionHash | undefined
-          ): Effect.Effect<Array<ReadonlyArray<SolanaSignatureInfo>>, SolanaRpcError> =>
-            rpc.getSignaturesForAddress({
-              address: filter.address,
-              before,
-              limit: pageSize,
-              commitment,
-              minContextSlot: filter.toBlock
-            }).pipe(Effect.flatMap((page) => {
-              const last = page.at(-1)
-              return last === undefined || page.length < pageSize || last.slot < filter.fromBlock
-                ? Effect.succeed([page])
-                : Effect.map(pagesFrom(last.signature), (older) => [page, ...older])
-            }))
+          // pages from the head back to the first short page or the first page reaching below `fromBlock`
+          const signatures = yield* Stream.paginate(
+            Option.none<SolanaTransactionHash>(),
+            (before) =>
+              rpc.getSignaturesForAddress({
+                address: filter.address,
+                before: Option.getOrUndefined(before),
+                limit: PAGE_SIZE,
+                commitment: COMMITMENT,
+                minContextSlot: filter.toBlock
+              }).pipe(Effect.map((page) => {
+                const last = page.at(-1)
+                return [
+                  page,
+                  last === undefined || page.length < PAGE_SIZE || last.slot < filter.fromBlock
+                    ? Option.none()
+                    : Option.some(Option.some(last.signature))
+                ] as const
+              }))
+          ).pipe(Stream.runCollect)
           // The node lists newest first, so reversed, slots ascend. Within a slot the node's order is not documented:
           // reversing it is a best guess at execution order, not a guarantee. `transactionIndex`, which some providers
           // add, is not in the rpc model.
           const kept = Arr.reverse(
-            Arr.filter(Arr.flatten(yield* pagesFrom(undefined)), ({ slot }) =>
-              slot >= filter.fromBlock && slot <= filter.toBlock)
+            Arr.filter(signatures, ({ slot }) => slot >= filter.fromBlock && slot <= filter.toBlock)
           )
           return yield* Effect.forEach(kept, ({ err, signature }) =>
-            rpc.getTransaction({ signature, commitment }).pipe(
+            rpc.getTransaction({ signature, commitment: COMMITMENT }).pipe(
               Effect.map((tx): SolanaIndexedTransaction => ({ signature, err, ...tx }))
             ))
         })

@@ -64,8 +64,11 @@ export const layer = (options: {
       const confirmations = BigInt(options.confirmations ?? EvmNetwork.defaultConfirmations(rpc.network))
       const size = BigInt(maxBlockRange)
       return EvmIndexer.of({
-        lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
-        fetchLogs: (filter) => {
+        lastConfirmedBlock: rpc.blockNumber.pipe(
+          Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0))),
+          Effect.withSpan("EvmIndexer.lastConfirmedBlock")
+        ),
+        fetchLogs: Effect.fn("EvmIndexer.fetchLogs")((filter) => {
           if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
           const count = Number((filter.toBlock - filter.fromBlock) / size) + 1
           return Effect.forEach(
@@ -73,7 +76,7 @@ export const layer = (options: {
             (fromBlock) =>
               rpc.getLogs({ ...filter, fromBlock, toBlock: BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock) })
           ).pipe(Effect.map(Arr.flatten))
-        }
+        })
       })
     })
   )

@@ -10,8 +10,8 @@
  * - inside a chunk, `getEvents` is paged with its cursor until the cursor is `undefined`.
  *
  * Failures: the first page of a chunk goes through the RPC fallback, so its error is final. A later page is pinned to
- * the endpoint that issued the cursor and has no fallback: when it fails, the chunk's partial events are dropped and
- * the chunk restarts once from its first page (on any endpoint). A second cursor page failure fails the call with
+ * the endpoint that issued the cursor and has no fallback: when it fails, the group's partial events in the chunk are
+ * dropped and the group restarts once from its first page (on any endpoint). A second cursor page failure fails the call with
  * that error. Every error is a {@link StellarRpcError}, e.g. `Pruned` when no endpoint retains `fromBlock`.
  *
  * @since 0.1.0
@@ -21,11 +21,13 @@ import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Order from "effect/Order"
+import * as Stream from "effect/Stream"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
-import { defaultConfirmations } from "./StellarNetwork.ts"
+import * as StellarNetwork from "./StellarNetwork.ts"
+import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
 import { StellarRpc } from "./StellarRpc.ts"
-import type { StellarEventsFilter, StellarEventsPage, StellarRpcError } from "./StellarRpc.ts"
 
 /**
  * Default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
@@ -35,7 +37,7 @@ import type { StellarEventsFilter, StellarEventsPage, StellarRpcError } from "./
  * @since 0.1.0
  * @category constants
  */
-export const defaultMaxBlockRange = 10000
+export const DEFAULT_MAX_BLOCK_RANGE = 10_000
 
 /**
  * A {@link StellarEventsFilter} without its paging fields (`limit`, `cursor`), over the inclusive ledger range
@@ -62,15 +64,16 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
   ) => Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarIndexer") {}
 
-const maxContractIds = 5
+const MAX_CONTRACT_IDS = 5
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
 
 /**
  * Builds a {@link StellarIndexer} over the provided {@link StellarRpc}.
  *
- * - `confirmations`: ledgers kept behind the latest one, default `defaultConfirmations` of the RPC's network.
- * - `maxBlockRange`: ledgers per chunk, a positive integer, default {@link defaultMaxBlockRange}.
+ * - `confirmations`: ledgers kept behind the latest one, default {@link StellarNetwork.defaultConfirmations} of the
+ *   RPC's network.
+ * - `maxBlockRange`: ledgers per chunk, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
  * - `limit`: `getEvents` page size, default the RPC's (1000), at most 10000.
  *
  * @since 0.1.0
@@ -85,22 +88,22 @@ export const layer = (options: {
     StellarIndexer,
     Effect.gen(function*() {
       const rpc = yield* StellarRpc
-      const confirmations = BigInt(options.confirmations ?? defaultConfirmations(rpc.network))
-      const maxBlockRange = options.maxBlockRange ?? defaultMaxBlockRange
-      if (!Number.isInteger(maxBlockRange) || maxBlockRange < 1) {
+      const maxBlockRange = options.maxBlockRange ?? DEFAULT_MAX_BLOCK_RANGE
+      if (!Number.isSafeInteger(maxBlockRange) || maxBlockRange < 1) {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
+      const confirmations = BigInt(options.confirmations ?? StellarNetwork.defaultConfirmations(rpc.network))
       const range = BigInt(maxBlockRange)
       const { limit } = options
 
       return StellarIndexer.of({
-        lastConfirmedBlock: Effect.map(
-          rpc.getLatestLedger,
-          (ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))
+        lastConfirmedBlock: rpc.getLatestLedger.pipe(
+          Effect.map((ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))),
+          Effect.withSpan("StellarIndexer.lastConfirmedBlock")
         ),
-        fetchEvents: (filter) => {
+        fetchEvents: Effect.fn("StellarIndexer.fetchEvents")((filter) => {
           if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
-          const groups = Arr.chunksOf(filter.contractIds, maxContractIds)
+          const groups = Arr.chunksOf(filter.contractIds, MAX_CONTRACT_IDS)
           const chunks = Arr.makeBy(
             Number((filter.toBlock - filter.fromBlock) / range) + 1,
             (i) => filter.fromBlock + BigInt(i) * range
@@ -108,28 +111,25 @@ export const layer = (options: {
           return Effect.forEach(chunks, (fromBlock) => {
             const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
             return Effect.forEach(groups, (contractIds) => {
-              const groupFilter = { ...filter, contractIds, fromBlock, toBlock, limit }
-              // the events of `pages` and of `page` onwards, the later pages pinned to the cursor's endpoint
-              const paging = (
-                pages: ReadonlyArray<ReadonlyArray<StellarContractEvent>>,
-                page: StellarEventsPage
-              ): Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError> =>
-                page.cursor === undefined
-                  ? Effect.succeed(Arr.flatten([...pages, page.events]))
-                  : Effect.flatMap(
-                    rpc.getEvents({ ...groupFilter, cursor: page.cursor }),
-                    (next) => paging([...pages, page.events], next)
-                  )
-              const firstPage = rpc.getEvents(groupFilter)
-              // a failed cursor page drops the group's partial events and restarts it from its first page, once
-              return Effect.flatMap(firstPage, (first) =>
-                Effect.catch(
-                  paging([], first),
-                  () => Effect.flatMap(firstPage, (first) => paging([], first))
-                ))
+              const group = { ...filter, contractIds, fromBlock, toBlock, limit }
+              // pages until the cursor is undefined. The first page (no cursor) has the fallback chain, a cursor page
+              // has not: a failed cursor page drops the group's events and restarts it once from its first page
+              return Stream.paginate(
+                Option.none<StellarEventsCursor>(),
+                (cursor) =>
+                  rpc.getEvents({ ...group, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
+                    onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
+                    onSuccess: (page) =>
+                      [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
+                  }))
+              ).pipe(
+                Stream.runCollect,
+                Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
+                Effect.mapError((error) => "cursorPage" in error ? error.cursorPage : error)
+              )
             }).pipe(Effect.map((found) => groups.length > 1 ? Arr.sort(Arr.flatten(found), byId) : Arr.flatten(found)))
           }).pipe(Effect.map((chunks) => Arr.flatten(chunks).filter((event) => event.inSuccessfulContractCall)))
-        }
+        })
       })
     })
   )

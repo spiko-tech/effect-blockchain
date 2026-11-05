@@ -11,6 +11,7 @@ import * as Exit from "effect/Exit"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
+import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 
 const fixtures = new URL("fixtures/", import.meta.url)
@@ -195,7 +196,7 @@ describe("EvmIndexer", () => {
     Effect.gen(function*() {
       for (const maxBlockRange of [0, -1, 1.5]) {
         const exit = yield* Effect.exit(provide(fetchPinned, chunked("alchemy").layer, { maxBlockRange }))
-        expect(Exit.isFailure(exit) && !Exit.hasFails(exit)).toBe(true)
+        expect(Result.getOrUndefined(Exit.findDefect(exit))).toBeInstanceOf(RangeError)
       }
     }))
 })

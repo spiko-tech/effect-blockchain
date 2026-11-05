@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
+import * as Result from "effect/Result"
 import type * as Schema from "effect/Schema"
 
 type Params = { readonly [key: string]: Schema.Json }
@@ -296,9 +297,11 @@ describe("StellarIndexer", () => {
 
   it.effect("dies on a maxBlockRange that is not a positive integer", () =>
     Effect.gen(function*() {
-      const exit = yield* Effect.exit(
-        setup([{ name: "node", handle: fake }], { maxBlockRange: 0 }).run((indexer) => indexer.lastConfirmedBlock)
-      )
-      assert.isTrue(Exit.hasDies(exit))
+      for (const maxBlockRange of [0, -1, 1.5]) {
+        const exit = yield* Effect.exit(
+          setup([{ name: "node", handle: fake }], { maxBlockRange }).run((indexer) => indexer.lastConfirmedBlock)
+        )
+        assert.instanceOf(Result.getOrUndefined(Exit.findDefect(exit)), RangeError)
+      }
     }))
 })
