@@ -14,15 +14,48 @@
  * dropped and the group restarts once from its first page (on any endpoint). A second cursor page failure fails the call with
  * that error. Every error is a {@link StellarRpcError}, e.g. `Pruned` when no endpoint retains `fromBlock`.
  *
+ * **Streaming**
+ *
+ * `streamEvents` follows the confirmed latest ledger from `fromBlock`: each step reads `lastConfirmedBlock` and fetches
+ * the next `maxBlockRange` ledgers at most, up to it, through `fetchEvents`, as one {@link StellarIndexerBatch}. A
+ * batch is emitted even when it has no events, so the caller's cursor moves on a quiet contract. Caught up, the stream
+ * sleeps `pollInterval` and checks again; with a `toBlock` it ends after the batch reaching it. With `retry`, a step
+ * failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same ledger; any
+ * other failure, or an exhausted schedule, fails the stream. `Pruned` is one of them: RPC nodes keep about 7 days of
+ * ledgers, so a `fromBlock` older than that fails the stream at once and the caller picks a newer `fromBlock`.
+ * Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart from the ledger after it. Run one
+ * stream per (network, filter) at a time: the indexer does not coordinate processes, so a service with several
+ * replicas provides the exclusivity itself, for example with a Postgres advisory lock.
+ *
+ * ```ts
+ * import * as Effect from "effect/Effect"
+ * import * as Stream from "effect/Stream"
+ * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
+ * import type { StellarIndexerFilter } from "@effect-blockchain/stellar/StellarIndexer"
+ *
+ * declare const filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
+ * declare const cursor: bigint
+ * declare const save: (ledger: bigint) => Effect.Effect<void>
+ *
+ * const program = Effect.gen(function*() {
+ *   const indexer = yield* StellarIndexer
+ *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1) }).pipe(
+ *     Stream.runForEach((batch) => save(batch.toBlock))
+ *   )
+ * })
+ * ```
+ *
  * @since 0.1.0
  */
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Order from "effect/Order"
+import type * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
@@ -49,6 +82,19 @@ export const DEFAULT_MAX_BLOCK_RANGE = 10_000
 export type StellarIndexerFilter = Omit<StellarEventsFilter, "limit" | "cursor">
 
 /**
+ * The events of the ledgers `[fromBlock, toBlock]` (both inclusive), in chain order, emitted by
+ * {@link StellarIndexer.Service.streamEvents}. `events` can be empty.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface StellarIndexerBatch {
+  readonly fromBlock: bigint
+  readonly toBlock: bigint
+  readonly events: ReadonlyArray<StellarContractEvent>
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -62,9 +108,39 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
   readonly fetchEvents: (
     filter: StellarIndexerFilter
   ) => Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError>
+  /**
+   * The events matching `filter` from `fromBlock` on, one batch of at most `maxBlockRange` confirmed ledgers at a
+   * time, following the latest ledger: see the module's "Streaming" section.
+   *
+   * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
+   * - `pollInterval`: the wait once caught up, defaults to {@link DEFAULT_POLL_INTERVAL}.
+   * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same ledger. Off by
+   *   default: the first failure fails the stream. `Pruned` is never retried.
+   */
+  readonly streamEvents: (options: {
+    readonly filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
+    readonly fromBlock: bigint
+    readonly toBlock?: bigint | undefined
+    readonly pollInterval?: Duration.Input | undefined
+    // the schedule's output is ignored
+    readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
+  }) => Stream.Stream<StellarIndexerBatch, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarIndexer") {}
 
+/**
+ * The default `pollInterval` of {@link StellarIndexer.Service.streamEvents}: the wait before reading the latest ledger
+ * again once caught up.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
+
 const MAX_CONTRACT_IDS = 5
+
+// the reasons a later attempt can fix: the others answer the same at the same ledger
+const isTransient = (error: StellarRpcError): boolean =>
+  error.reason === "Unavailable" || error.reason === "InvalidResponse" || error.reason === "Lagging"
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
 
@@ -96,40 +172,64 @@ export const layer = (options: {
       const range = BigInt(maxBlockRange)
       const { limit } = options
 
+      const lastConfirmedBlock = rpc.getLatestLedger.pipe(
+        Effect.map((ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))),
+        Effect.withSpan("StellarIndexer.lastConfirmedBlock")
+      )
+      const fetchEvents = Effect.fn("StellarIndexer.fetchEvents")((filter: StellarIndexerFilter) => {
+        if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
+        const groups = Arr.chunksOf(filter.contractIds, MAX_CONTRACT_IDS)
+        const chunks = Arr.makeBy(
+          Number((filter.toBlock - filter.fromBlock) / range) + 1,
+          (i) => filter.fromBlock + BigInt(i) * range
+        )
+        return Effect.forEach(chunks, (fromBlock) => {
+          const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
+          return Effect.forEach(groups, (contractIds) => {
+            const group = { ...filter, contractIds, fromBlock, toBlock, limit }
+            // pages until the cursor is undefined. The first page (no cursor) has the fallback chain, a cursor page
+            // has not: a failed cursor page drops the group's events and restarts it once from its first page
+            return Stream.paginate(
+              Option.none<StellarEventsCursor>(),
+              (cursor) =>
+                rpc.getEvents({ ...group, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
+                  onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
+                  onSuccess: (page) =>
+                    [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
+                }))
+            ).pipe(
+              Stream.runCollect,
+              Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
+              Effect.mapError((error) => "cursorPage" in error ? error.cursorPage : error)
+            )
+          }).pipe(Effect.map((found) => groups.length > 1 ? Arr.sort(Arr.flatten(found), byId) : Arr.flatten(found)))
+        }).pipe(Effect.map((chunks) => Arr.flatten(chunks).filter((event) => event.inSuccessfulContractCall)))
+      })
       return StellarIndexer.of({
-        lastConfirmedBlock: rpc.getLatestLedger.pipe(
-          Effect.map((ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))),
-          Effect.withSpan("StellarIndexer.lastConfirmedBlock")
-        ),
-        fetchEvents: Effect.fn("StellarIndexer.fetchEvents")((filter) => {
-          if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
-          const groups = Arr.chunksOf(filter.contractIds, MAX_CONTRACT_IDS)
-          const chunks = Arr.makeBy(
-            Number((filter.toBlock - filter.fromBlock) / range) + 1,
-            (i) => filter.fromBlock + BigInt(i) * range
+        lastConfirmedBlock,
+        fetchEvents,
+        streamEvents: ({ filter, fromBlock, pollInterval = DEFAULT_POLL_INTERVAL, retry, toBlock }) => {
+          if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
+          // one step from the next ledger to read: a batch up to the confirmed ledger, or a sleep once caught up
+          const step = (
+            next: bigint
+          ): Effect.Effect<readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<bigint>], StellarRpcError> =>
+            lastConfirmedBlock.pipe(
+              Effect.flatMap((confirmed) => {
+                const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
+                if (next > cap) return Effect.as(Effect.sleep(pollInterval), [[], Option.some(next)])
+                const end = BigInt_.min(next + range - BigInt(1), cap)
+                return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
+                  [{ fromBlock: next, toBlock: end, events }],
+                  end === toBlock ? Option.none() : Option.some(end + BigInt(1))
+                ]))
+              })
+            )
+          return Stream.paginate(
+            fromBlock,
+            retry === undefined ? step : (next) => Effect.retry(step(next), { schedule: retry, while: isTransient })
           )
-          return Effect.forEach(chunks, (fromBlock) => {
-            const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
-            return Effect.forEach(groups, (contractIds) => {
-              const group = { ...filter, contractIds, fromBlock, toBlock, limit }
-              // pages until the cursor is undefined. The first page (no cursor) has the fallback chain, a cursor page
-              // has not: a failed cursor page drops the group's events and restarts it once from its first page
-              return Stream.paginate(
-                Option.none<StellarEventsCursor>(),
-                (cursor) =>
-                  rpc.getEvents({ ...group, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
-                    onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
-                    onSuccess: (page) =>
-                      [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
-                  }))
-              ).pipe(
-                Stream.runCollect,
-                Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
-                Effect.mapError((error) => "cursorPage" in error ? error.cursorPage : error)
-              )
-            }).pipe(Effect.map((found) => groups.length > 1 ? Arr.sort(Arr.flatten(found), byId) : Arr.flatten(found)))
-          }).pipe(Effect.map((chunks) => Arr.flatten(chunks).filter((event) => event.inSuccessfulContractCall)))
-        })
+        }
       })
     })
   )
