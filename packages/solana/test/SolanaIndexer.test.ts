@@ -1,3 +1,4 @@
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
 import * as SolanaIndexer from "@effect-blockchain/solana/SolanaIndexer"
@@ -205,7 +206,7 @@ describe("SolanaIndexer", () => {
     })
     return run((indexer) =>
       Effect.flip(indexer.fetchTransactions({ address: EUTBL, fromBlock: BigInt(99), toBlock: BigInt(99) }))
-    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Pruned", method: "getTransaction" })))
+    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Pruned" }, method: "getTransaction" })))
   })
 
   it.effect("falls back to the next endpoint when one has not reached toBlock", () => {
@@ -251,7 +252,7 @@ const pinnedBatches = [[FROM, BigInt(11), 4], [BigInt(12), BigInt(15), 2], [BigI
  * A fake `SolanaRpc` over `chain`: the head is `state.head`, every call is logged in `state.calls` (a transaction by
  * its index in `chain`) and the call numbered `n` (from 1) fails with `failAt.get(n)`.
  */
-const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, SolanaRpc.SolanaRpcError["reason"]> = new Map()) => {
+const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()) => {
   const state = { head, calls: new Array<string>() }
   const call = <A>(method: string, value: () => A) =>
     Effect.suspend(() => {
@@ -259,7 +260,7 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, SolanaRpc.SolanaRpcEr
       const reason = failAt.get(state.calls.length)
       return reason === undefined
         ? Effect.sync(value)
-        : Effect.fail(new SolanaRpc.SolanaRpcError({ reason, method, endpoint: "fake", cause: new Error(reason) }))
+        : Effect.fail(new SolanaRpc.SolanaRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
     })
   const history = Arr.reverse(chain)
   const layer = Layer.succeed(
@@ -415,8 +416,8 @@ describe("SolanaIndexer.streamTransactions", () => {
       expect(bounds(batches)).toStrictEqual(pinnedBatches)
     }))
 
-  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
-    it.effect(`retries a group failing with ${reason} at the same group`, () => {
+  for (const reason of [new JsonRpc.Unavailable(), new JsonRpc.InvalidResponse(), new JsonRpc.Lagging()]) {
+    it.effect(`retries a group failing with ${reason._tag} at the same group`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[7, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer).pipe(
         Effect.map(({ batches, exit }) => {
@@ -429,7 +430,7 @@ describe("SolanaIndexer.streamTransactions", () => {
   }
 
   it.effect("retries a failed signature paging at the same slot", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[2, "Lagging"]]))
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Lagging()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer).pipe(
       Effect.map(({ batches }) => {
         expect(bounds(batches)).toStrictEqual(pinnedBatches)
@@ -439,7 +440,7 @@ describe("SolanaIndexer.streamTransactions", () => {
   })
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same slot", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[1, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Unavailable()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer).pipe(
       Effect.map(({ batches }) => {
         expect(bounds(batches)).toStrictEqual(pinnedBatches)
@@ -448,8 +449,14 @@ describe("SolanaIndexer.streamTransactions", () => {
     )
   })
 
-  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
-    it.effect(`fails at once on ${reason}, retry or not`, () => {
+  for (
+    const reason of [
+      new JsonRpc.Pruned(),
+      new JsonRpc.Rejected(),
+      new JsonRpc.WrongNetwork({ expected: "a", actual: "b" })
+    ]
+  ) {
+    it.effect(`fails at once on ${reason._tag}, retry or not`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[7, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer).pipe(
         Effect.map(({ batches, exit }) => {
@@ -462,10 +469,13 @@ describe("SolanaIndexer.streamTransactions", () => {
   }
 
   it.effect("fails with the last error once the retry schedule is exhausted", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[7, "Unavailable"], [8, "Lagging"]]))
+    const { layer, state } = fakeRpc(
+      TO,
+      new Map<number, JsonRpc.Reason>([[7, new JsonRpc.Unavailable()], [8, new JsonRpc.Lagging()]])
+    )
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer).pipe(
       Effect.map(({ batches, exit }) => {
-        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Lagging" } })
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Lagging" } } })
         expect(batches).toHaveLength(1)
         expect(state.calls).toHaveLength(8)
       })
@@ -473,10 +483,10 @@ describe("SolanaIndexer.streamTransactions", () => {
   })
 
   it.effect("fails on the first failure without retry", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[7, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map([[7, new JsonRpc.Unavailable()]]))
     return provide(collect(streamOptions), layer).pipe(
       Effect.map(({ batches, exit }) => {
-        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Unavailable" } })
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
         expect(batches).toHaveLength(1)
         expect(state.calls).toHaveLength(7)
       })

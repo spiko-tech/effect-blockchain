@@ -74,11 +74,11 @@ describe("EvmRpc fixtures", () => {
     it.effect(`fixture: ${provider} invalid-params`, () =>
       setup([{ name: provider, cases: ["chainId", "blockNumber", "invalid-params"] }]).run((rpc) =>
         Effect.flip(rpc.getLogs({ ...filter, topics: [[EvmHexData.make("0xab")]] }))
-      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: -32602 }))))
+      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602 }))))
 
     it.effect(`fixture: ${provider} invalid-key`, () =>
       setup([{ name: provider, cases: ["invalid-key"] }]).run((rpc) => Effect.flip(rpc.chainId)).pipe(
-        Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: 401 }))
+        Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401 }))
       ))
 
     // the provider's own reply (Alchemy -32602 "block range extends beyond current head block", Infura an empty `[]`)
@@ -89,7 +89,7 @@ describe("EvmRpc fixtures", () => {
         Effect.flip(rpc.getLogs({ ...filter, fromBlock: BigInt(0xfffffff6), toBlock: BigInt(0xffffffff) }))
       )
         .pipe(Effect.map((error) => {
-          expect(error).toMatchObject({ reason: "Lagging", method: "eth_getLogs" })
+          expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "eth_getLogs" })
           expect(served).toStrictEqual([`${provider} chainId`, `${provider} blockNumber`])
         }))
     })
@@ -100,7 +100,7 @@ describe("EvmRpc fixtures", () => {
   it.effect("fixture: alchemy getLogs-range-too-large", () =>
     setup([{ name: "alchemy", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }]).run((rpc) =>
       Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
-    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: 400 }))))
+    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 400 }))))
 
   // Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a plan limit another endpoint may not have:
   // Rejected falls back. The replay matches on params and only the wide range has recorded refusals, so Alchemy's
@@ -112,8 +112,10 @@ describe("EvmRpc fixtures", () => {
     ])
     return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))).pipe(
       Effect.map((error) => {
-        expect(error).toMatchObject({ reason: "Unavailable", code: 400, endpoint: "alchemy" })
-        expect(error.cause).toMatchObject({ errors: [{ reason: "Rejected", code: -32602, endpoint: "infura" }, {}] })
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 400, endpoint: "alchemy" })
+        expect(error.cause).toMatchObject({
+          errors: [{ reason: { _tag: "Rejected" }, code: -32602, endpoint: "infura" }, {}]
+        })
         expect(served).toStrictEqual([
           "infura chainId",
           "infura blockNumber",
@@ -134,7 +136,7 @@ describe("EvmRpc fixtures", () => {
     ])
     return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, topics: [[EvmHexData.make("0xab")]] }))).pipe(
       Effect.map((error) => {
-        expect(error).toMatchObject({ reason: "Rejected", code: -32602, endpoint: "infura" })
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602, endpoint: "infura" })
         expect(served).toStrictEqual([
           "alchemy chainId",
           "alchemy blockNumber",

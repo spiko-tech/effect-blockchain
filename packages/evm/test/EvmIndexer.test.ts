@@ -1,3 +1,4 @@
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
@@ -167,7 +168,12 @@ describe("EvmIndexer", () => {
   it.effect("fails with the first failing chunk's error and sends no further chunk", () => {
     const { layer, ranges } = chunked("alchemy", { failAt: 2 })
     return provide(Effect.flip(fetchPinned), layer, { maxBlockRange: 3 }).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ _tag: "EvmRpcError", reason: "Unavailable", code: 503, method: "eth_getLogs" })
+      expect(error).toMatchObject({
+        _tag: "EvmRpcError",
+        reason: { _tag: "Unavailable" },
+        code: 503,
+        method: "eth_getLogs"
+      })
       expect(ranges).toHaveLength(2)
     }))
   })
@@ -194,7 +200,7 @@ describe("EvmIndexer", () => {
     const fetch: typeof globalThis.fetch = async () => new Response("down", { status: 503 })
     const layer = rpcLayer([{ name: "a", url: Redacted.make("https://a.rpc.test") }], fetch)
     return provide(Effect.flip(lastConfirmedBlock), layer).pipe(
-      Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", code: 503 }))
+      Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 503 }))
     )
   })
 
@@ -218,8 +224,8 @@ const pinnedLogs = Schema.decodeUnknownSync(Schema.Array(EvmLog))(
 // an HTTP reply on EVM.
 const fakeRpc = (
   head: bigint,
-  failAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map(),
-  headFailAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map()
+  failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
+  headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
 ) => {
   const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
   const layer = Layer.succeed(
@@ -232,7 +238,12 @@ const fakeRpc = (
         return reason === undefined
           ? Effect.succeed(state.head)
           : Effect.fail(
-            new EvmRpc.EvmRpcError({ reason, method: "eth_blockNumber", endpoint: "fake", cause: new Error(reason) })
+            new EvmRpc.EvmRpcError({
+              reason,
+              method: "eth_blockNumber",
+              endpoint: "fake",
+              cause: new Error(reason._tag)
+            })
           )
       }),
       getLogs: (filter) =>
@@ -244,7 +255,7 @@ const fakeRpc = (
               pinnedLogs.filter((log) => log.blockNumber >= filter.fromBlock && log.blockNumber <= filter.toBlock)
             )
             : Effect.fail(
-              new EvmRpc.EvmRpcError({ reason, method: "eth_getLogs", endpoint: "fake", cause: new Error(reason) })
+              new EvmRpc.EvmRpcError({ reason, method: "eth_getLogs", endpoint: "fake", cause: new Error(reason._tag) })
             )
         })
     })
@@ -345,8 +356,8 @@ describe("EvmIndexer.streamLogs", () => {
       expect(bounds(batches)).toStrictEqual([[FROM, TO - BigInt(1), 3], [TO, TO, 2]])
     }))
 
-  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
-    it.effect(`retries a step failing with ${reason} at the same block`, () => {
+  for (const reason of [new JsonRpc.Unavailable(), new JsonRpc.InvalidResponse(), new JsonRpc.Lagging()]) {
+    it.effect(`retries a step failing with ${reason._tag} at the same block`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
         confirmations: 0,
@@ -360,8 +371,14 @@ describe("EvmIndexer.streamLogs", () => {
     })
   }
 
-  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
-    it.effect(`fails at once on ${reason}, retry or not`, () => {
+  for (
+    const reason of [
+      new JsonRpc.Pruned(),
+      new JsonRpc.Rejected(),
+      new JsonRpc.WrongNetwork({ expected: "a", actual: "b" })
+    ]
+  ) {
+    it.effect(`fails at once on ${reason._tag}, retry or not`, () => {
       const { layer, state } = fakeRpc(TO, new Map([[2, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
         confirmations: 0,
@@ -375,7 +392,7 @@ describe("EvmIndexer.streamLogs", () => {
   }
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same block", () => {
-    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, new JsonRpc.Unavailable()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -388,22 +405,25 @@ describe("EvmIndexer.streamLogs", () => {
   })
 
   it.effect("fails with the last error once the retry schedule is exhausted", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    const { layer, state } = fakeRpc(
+      TO,
+      new Map<number, JsonRpc.Reason>([[2, new JsonRpc.Unavailable()], [3, new JsonRpc.Lagging()]])
+    )
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
     }).pipe(Effect.map(({ batches, exit }) => {
-      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Lagging" } })
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Lagging" } } })
       expect(batches).toHaveLength(1)
       expect(state.ranges).toHaveLength(3)
     }))
   })
 
   it.effect("fails on the first failure without retry", () => {
-    const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
     return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
       Effect.map(({ batches, exit }) => {
-        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: "Unavailable" } })
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
         expect(batches).toHaveLength(1)
         expect(state.ranges).toHaveLength(2)
       })

@@ -89,14 +89,18 @@ describe("StarknetRpc fixtures", () => {
       )
         .pipe(
           Effect.map((error) =>
-            expect(error).toMatchObject({ reason: "Lagging", method: "starknet_getEvents", endpoint: provider })
+            expect(error).toMatchObject({
+              reason: { _tag: "Lagging" },
+              method: "starknet_getEvents",
+              endpoint: provider
+            })
           )
         ))
 
     it.effect(`fixture: ${provider} getEvents chunk size too big`, () =>
       replay([{ name: provider, cases: [...network, "getEvents-chunk-too-big"] }])((rpc) =>
         Effect.flip(rpc.getEvents({ ...filter, chunkSize: 10000 }))
-      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: 31 }))))
+      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 31 }))))
 
     it.effect(`fixture: ${provider} getEvents invalid continuation token`, () =>
       replay([{ name: provider, cases: [...network, "getEvents-invalid-token"] }])((rpc) =>
@@ -106,12 +110,12 @@ describe("StarknetRpc fixtures", () => {
             cursor: StarknetRpc.StarknetEventsCursor.make({ endpoint: provider, cursor: "invalid" })
           })
         )
-      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: "Rejected", code: 33 }))))
+      ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 33 }))))
 
     it.effect(`fixture: ${provider} invalid key`, () =>
       replay([{ name: provider, cases: ["invalid-key"] }])((rpc) => Effect.flip(rpc.chainId)).pipe(
         Effect.map((error) =>
-          expect(error).toMatchObject({ reason: "Unavailable", code: 401, method: "starknet_chainId" })
+          expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401, method: "starknet_chainId" })
         )
       ))
   }

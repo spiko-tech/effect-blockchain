@@ -43,6 +43,7 @@
  *
  * @since 0.1.0
  */
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
@@ -129,10 +130,6 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 
-// the reasons a later attempt can fix: the others answer the same at the same block
-const isTransient = (error: StarknetRpcError): boolean =>
-  error.reason === "Unavailable" || error.reason === "InvalidResponse" || error.reason === "Lagging"
-
 /**
  * Builds a {@link StarknetIndexer} over the provided {@link StarknetRpc}.
  *
@@ -212,7 +209,10 @@ export const layer = (options: {
             )
           return Stream.paginate(
             fromBlock,
-            retry === undefined ? step : (next) => Effect.retry(step(next), { schedule: retry, while: isTransient })
+            retry === undefined
+              ? step
+              : (next) =>
+                Effect.retry(step(next), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })

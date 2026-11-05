@@ -49,7 +49,11 @@ export interface StarknetRpcEndpoint {
 }
 
 /**
- * Why a call failed:
+ * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
+ * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
+ * `AggregateError` of every endpoint's error, in order.
+ *
+ * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -61,33 +65,10 @@ export interface StarknetRpcEndpoint {
  * | `WrongNetwork` | the endpoint's `starknet_chainId` is not the configured network's | no |
  *
  * @since 0.1.0
- * @category models
- */
-export const StarknetRpcErrorReason = Schema.Literals([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned",
-  "Rejected",
-  "WrongNetwork"
-])
-
-/**
- * @since 0.1.0
- * @category models
- */
-export type StarknetRpcErrorReason = typeof StarknetRpcErrorReason.Type
-
-/**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
- *
- * @since 0.1.0
  * @category errors
  */
 export class StarknetRpcError extends Schema.TaggedError<StarknetRpcError>()("StarknetRpcError", {
-  reason: StarknetRpcErrorReason,
+  reason: JsonRpc.Reason,
   method: Schema.String,
   endpoint: Schema.String,
   code: Schema.optional(Schema.Number),
@@ -97,7 +78,7 @@ export class StarknetRpcError extends Schema.TaggedError<StarknetRpcError>()("St
    * @since 0.1.0
    */
   override get message(): string {
-    return `${this.method} failed on ${this.endpoint}: ${this.reason}${
+    return `${this.method} failed on ${this.endpoint}: ${this.reason._tag}${
       this.code === undefined ? "" : ` (${this.code})`
     }`
   }
@@ -188,7 +169,7 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
 
 // error codes from the Starknet JSON-RPC spec v0.9 (starknet_api_openrpc.json), plus the common provider ones
-const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map([
+const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   // UNEXPECTED_ERROR, JSON-RPC internal error and provider rate limits: the endpoint is struggling, retry then fall back
   [63, "Unavailable"],
   [-32603, "Unavailable"],
@@ -241,7 +222,7 @@ export const layer = (options: {
                 ? Effect.succeed(expectedChainId)
                 : Effect.fail(
                   new StarknetRpcError({
-                    reason: "WrongNetwork",
+                    reason: new JsonRpc.WrongNetwork({ expected: expectedChainId, actual: chainId }),
                     method: RpcMethods.chainId.name,
                     endpoint,
                     cause: new Error(`expected chain ID ${expectedChainId} for ${network}, got ${chainId}`)
@@ -280,7 +261,7 @@ export const layer = (options: {
             return yield* rpc.fail(
               endpoint,
               method,
-              "InvalidResponse",
+              new JsonRpc.InvalidResponse(),
               new Error(`event of ${invalid.transactionHash} in block ${invalid.blockNumber} is outside the filter`)
             )
           }

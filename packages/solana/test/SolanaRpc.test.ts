@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
 import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
 import { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
@@ -172,7 +173,7 @@ describe("SolanaRpc", () => {
         const error = yield* pruned.run((rpc) =>
           Effect.flip(rpc.getTransaction({ signature: SIGNATURE, ...confirmed }))
         )
-        expect(error).toMatchObject({ reason: "Pruned", method: "getTransaction" })
+        expect(error).toMatchObject({ reason: { _tag: "Pruned" }, method: "getTransaction" })
         expect(error.message).toBe("getTransaction failed on a: Pruned")
       })
     )
@@ -201,7 +202,7 @@ describe("SolanaRpc", () => {
 
   it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
-      const cases: ReadonlyArray<readonly [number, SolanaRpc.SolanaRpcErrorReason]> = [
+      const cases: ReadonlyArray<readonly [number, JsonRpc.CodeReason]> = [
         [429, "Unavailable"],
         [-32603, "Unavailable"],
         [-32005, "Unavailable"],
@@ -220,7 +221,7 @@ describe("SolanaRpc", () => {
         const error = yield* setup({ a: { getSlot: () => ({ error: { code, message: "no" } }) } }).run((rpc) =>
           Effect.flip(rpc.getSlot(confirmed))
         )
-        expect(error, String(code)).toMatchObject({ reason, code, method: "getSlot", endpoint: "a" })
+        expect(error, String(code)).toMatchObject({ reason: { _tag: reason }, code, method: "getSlot", endpoint: "a" })
         expect(error.message).toBe(`getSlot failed on a: ${reason} (${code})`)
       }
     }))
@@ -229,7 +230,11 @@ describe("SolanaRpc", () => {
     const devnet = () => ({ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" })
     const { calls, run } = setup({ a: { getGenesisHash: devnet, getSlot: slot(1) }, b: {} })
     return run((rpc) => Effect.flip(rpc.getSlot(confirmed))).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "WrongNetwork", method: "getGenesisHash", endpoint: "a" })
+      expect(error).toMatchObject({
+        reason: { _tag: "WrongNetwork", actual: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG" },
+        method: "getGenesisHash",
+        endpoint: "a"
+      })
       expect(calls).toStrictEqual(["a:getGenesisHash"])
     }))
   })

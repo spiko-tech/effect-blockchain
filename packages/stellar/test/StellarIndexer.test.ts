@@ -1,3 +1,4 @@
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 // Runs the real `StellarRpc` + `StellarIndexer` layers over recorded Quasar replies (see StellarRpc.fixtures.test.ts),
 // with hand-written replies for what the fixtures do not cover (the last page of a range, failures, edge cases).
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
@@ -206,7 +207,7 @@ describe("StellarIndexer", () => {
       const error = yield* run((indexer) =>
         Effect.flip(indexer.fetchEvents({ ...recorded, contractIds: [EUTBL] }))
       )
-      assert.strictEqual(error.reason, "Unavailable")
+      assert.strictEqual(error.reason._tag, "Unavailable")
       assert.strictEqual(error.endpoint, "quasar")
       assert.deepStrictEqual(served.filter((name) => name.includes("getEvents")), [
         "quasar getEvents-eutbl-page-1",
@@ -290,7 +291,7 @@ describe("StellarIndexer", () => {
       const error = yield* run((indexer) =>
         Effect.flip(indexer.fetchEvents({ contractIds: [EUTBL], fromBlock: BigInt(10), toBlock: BigInt(20) }))
       )
-      assert.strictEqual(error.reason, "Pruned")
+      assert.strictEqual(error.reason._tag, "Pruned")
     }))
 
   it.effect("lastConfirmedBlock is the latest ledger minus the confirmations, never below 0", () =>
@@ -340,12 +341,12 @@ const pinnedRanges = pinnedBatches.map(([from, to]) => [from, to] as const)
 // n-th `getLatestLedger` call with `headFailAt.get(n)`.
 const fakeRpc = (
   head: bigint,
-  failAt: ReadonlyMap<number, StellarRpc.StellarRpcError["reason"]> = new Map(),
-  headFailAt: ReadonlyMap<number, StellarRpc.StellarRpcError["reason"]> = new Map()
+  failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
+  headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
 ) => {
   const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
-  const fail = (reason: StellarRpc.StellarRpcError["reason"], method: string) =>
-    Effect.fail(new StellarRpc.StellarRpcError({ reason, method, endpoint: "fake", cause: new Error(reason) }))
+  const fail = (reason: JsonRpc.Reason, method: string) =>
+    Effect.fail(new StellarRpc.StellarRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const layer = Layer.succeed(
     StellarRpc.StellarRpc,
     StellarRpc.StellarRpc.of({
@@ -397,7 +398,7 @@ const provide = <A, E>(
 ) => effect.pipe(Effect.provide(StellarIndexer.layer(options).pipe(Layer.provide(rpc))))
 
 const reasonOf = (exit: Exit.Exit<unknown, StellarRpc.StellarRpcError>) =>
-  Option.getOrUndefined(Exit.findErrorOption(exit))?.reason
+  Option.getOrUndefined(Exit.findErrorOption(exit))?.reason._tag
 
 describe("StellarIndexer.streamEvents", () => {
   it.effect("catches up in batches of maxBlockRange, empty ones included, and ends at toBlock", () => {
@@ -472,8 +473,8 @@ describe("StellarIndexer.streamEvents", () => {
       assert.deepStrictEqual(bounds(batches), [[S_FROM, S_TO - BigInt(1), 3], [S_TO, S_TO, 2]])
     }))
 
-  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
-    it.effect(`retries a step failing with ${reason} at the same ledger`, () => {
+  for (const reason of [new JsonRpc.Unavailable(), new JsonRpc.InvalidResponse(), new JsonRpc.Lagging()]) {
+    it.effect(`retries a step failing with ${reason._tag} at the same ledger`, () => {
       const { layer, state } = fakeRpc(S_TO, new Map([[2, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
         confirmations: 0,
@@ -487,14 +488,20 @@ describe("StellarIndexer.streamEvents", () => {
     })
   }
 
-  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
-    it.effect(`fails at once on ${reason}, retry or not`, () => {
+  for (
+    const reason of [
+      new JsonRpc.Pruned(),
+      new JsonRpc.Rejected(),
+      new JsonRpc.WrongNetwork({ expected: "a", actual: "b" })
+    ]
+  ) {
+    it.effect(`fails at once on ${reason._tag}, retry or not`, () => {
       const { layer, state } = fakeRpc(S_TO, new Map([[2, reason]]))
       return provide(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
         confirmations: 0,
         maxBlockRange: 3
       }).pipe(Effect.map(({ batches, exit }) => {
-        assert.strictEqual(reasonOf(exit), reason)
+        assert.strictEqual(reasonOf(exit), reason._tag)
         assert.lengthOf(batches, 1)
         assert.lengthOf(state.ranges, 2)
       }))
@@ -524,7 +531,7 @@ describe("StellarIndexer.streamEvents", () => {
     }))
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same ledger", () => {
-    const { layer, state } = fakeRpc(S_TO, new Map(), new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(S_TO, new Map(), new Map([[2, new JsonRpc.Unavailable()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -537,7 +544,10 @@ describe("StellarIndexer.streamEvents", () => {
   })
 
   it.effect("fails with the last error once the retry schedule is exhausted", () => {
-    const { layer, state } = fakeRpc(S_TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    const { layer, state } = fakeRpc(
+      S_TO,
+      new Map<number, JsonRpc.Reason>([[2, new JsonRpc.Unavailable()], [3, new JsonRpc.Lagging()]])
+    )
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -549,7 +559,7 @@ describe("StellarIndexer.streamEvents", () => {
   })
 
   it.effect("fails on the first failure without retry", () => {
-    const { layer, state } = fakeRpc(S_TO, new Map([[2, "Unavailable"]]))
+    const { layer, state } = fakeRpc(S_TO, new Map([[2, new JsonRpc.Unavailable()]]))
     return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
       Effect.map(({ batches, exit }) => {
         assert.strictEqual(reasonOf(exit), "Unavailable")

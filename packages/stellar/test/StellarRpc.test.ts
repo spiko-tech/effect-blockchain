@@ -204,7 +204,7 @@ describe("StellarRpc", () => {
       for (const [code, reason] of [[-32603, "Unavailable"], [-32602, "Rejected"]] as const) {
         const { run } = setup({ a: { getLatestLedger: () => ({ error: { code, message: "boom" } }) } })
         const error = yield* run((rpc) => Effect.flip(rpc.getLatestLedger))
-        expect(error).toMatchObject({ reason, code })
+        expect(error).toMatchObject({ reason: { _tag: reason }, code })
         expect(error.message).toBe(`getLatestLedger failed on a: ${reason} (${code})`)
       }
     }))
@@ -216,7 +216,11 @@ describe("StellarRpc", () => {
       b: {}
     })
     return run((rpc) => Effect.flip(rpc.getLatestLedger)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "WrongNetwork", method: "getNetwork", endpoint: "a" })
+      expect(error).toMatchObject({
+        reason: { _tag: "WrongNetwork", expected: toPassphrase("Stellar"), actual: testnet },
+        method: "getNetwork",
+        endpoint: "a"
+      })
       expect(error.message).toBe("getNetwork failed on a: WrongNetwork")
       assert.instanceOf(error.cause, Error)
       expect(error.cause.message).toBe(`expected passphrase "${toPassphrase("Stellar")}" for Stellar, got "${testnet}"`)
@@ -264,13 +268,18 @@ describe("StellarRpc", () => {
     Effect.gen(function*() {
       for (
         const [message, reason] of [
-          ["startLedger must be within the ledger range: 11 - 100", "Pruned"],
+          ["startLedger must be within the ledger range: 11 - 100", { _tag: "Pruned" }],
           [
             "startLedger must be between the oldest ledger: 11 and the latest ledger: 100 for this rpc instance.",
-            "Pruned"
+            { _tag: "Pruned" }
           ],
-          ["startLedger must be within the ledger range: 1 - 9", "Lagging"]
-        ]
+          // the head is the range's end, toBlock the requested start
+          ["startLedger must be within the ledger range: 1 - 9", {
+            _tag: "Lagging",
+            head: BigInt(9),
+            toBlock: BigInt(10)
+          }]
+        ] as const
       ) {
         const { run } = setup({ a: { getEvents: () => ({ error: { code: -32600, message } }) } })
         const error = yield* run((rpc) => Effect.flip(rpc.getEvents(filter)))
@@ -280,7 +289,12 @@ describe("StellarRpc", () => {
 
   it.effect("returns Lagging when no endpoint reached toBlock", () =>
     setup({ a: { getHealth: health(15) } }).run((rpc) => Effect.flip(rpc.getEvents(filter))).pipe(
-      Effect.map((error) => expect(error).toMatchObject({ reason: "Lagging", method: "getEvents" }))
+      Effect.map((error) =>
+        expect(error).toMatchObject({
+          reason: { _tag: "Lagging", head: BigInt(15), toBlock: BigInt(20) },
+          method: "getEvents"
+        })
+      )
     ))
 
   it.effect("returns a cursor until the cursor passes toBlock", () =>
@@ -325,7 +339,7 @@ describe("StellarRpc", () => {
     const { calls, run } = setup({ a: {} })
     const cursor = StellarRpc.StellarEventsCursor.make({ endpoint: "gone", cursor: windowEnd(15) })
     return run((rpc) => Effect.flip(rpc.getEvents({ ...filter, cursor }))).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "Rejected", endpoint: "gone" })
+      expect(error).toMatchObject({ reason: { _tag: "Rejected" }, endpoint: "gone" })
       assert.instanceOf(error.cause, Error)
       expect(error.cause.message).toBe("no endpoint named gone")
       expect(calls).toStrictEqual([])
@@ -343,7 +357,7 @@ describe("StellarRpc", () => {
     return run((rpc) =>
       rpc.getEvents(filter).pipe(
         Effect.flatMap((first) => Effect.flip(rpc.getEvents({ ...filter, cursor: first.cursor }))),
-        Effect.map((error) => expect(error).toMatchObject({ reason: "Unavailable", endpoint: "a" }))
+        Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, endpoint: "a" }))
       )
     )
   })
@@ -351,7 +365,7 @@ describe("StellarRpc", () => {
   it.effect("fails Lagging when a cursor page stops at the endpoint's latest ledger", () =>
     setup({ a: { getEvents: page([], windowEnd(15), 15), getHealth: health(100) } }).run((rpc) =>
       Effect.flip(rpc.getEvents(filter)).pipe(
-        Effect.map((error) => expect(error).toMatchObject({ reason: "Lagging" }))
+        Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Lagging" } }))
       )
     ))
 
@@ -359,7 +373,7 @@ describe("StellarRpc", () => {
     Effect.gen(function*() {
       for (const bad of [{ contractId: OTHER }, { ledger: 9 }, { type: "system" }]) {
         const { run } = setup({ a: { getEvents: page([rawEvent(bad)], windowEnd(20)) } })
-        expect((yield* run((rpc) => Effect.flip(rpc.getEvents(filter)))).reason, JSON.stringify(bad)).toBe(
+        expect((yield* run((rpc) => Effect.flip(rpc.getEvents(filter)))).reason._tag, JSON.stringify(bad)).toBe(
           "InvalidResponse"
         )
       }

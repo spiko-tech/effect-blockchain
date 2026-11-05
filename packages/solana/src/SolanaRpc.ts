@@ -62,7 +62,11 @@ export interface SolanaRpcEndpoint {
 }
 
 /**
- * Why a call failed:
+ * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
+ * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
+ * `AggregateError` of every endpoint's error, in order.
+ *
+ * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -74,33 +78,10 @@ export interface SolanaRpcEndpoint {
  * | `WrongNetwork` | the endpoint's genesis hash is not the configured network's | no |
  *
  * @since 0.1.0
- * @category models
- */
-export const SolanaRpcErrorReason = Schema.Literals([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned",
-  "Rejected",
-  "WrongNetwork"
-])
-
-/**
- * @since 0.1.0
- * @category models
- */
-export type SolanaRpcErrorReason = typeof SolanaRpcErrorReason.Type
-
-/**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
- *
- * @since 0.1.0
  * @category errors
  */
 export class SolanaRpcError extends Schema.TaggedError<SolanaRpcError>()("SolanaRpcError", {
-  reason: SolanaRpcErrorReason,
+  reason: JsonRpc.Reason,
   method: Schema.String,
   endpoint: Schema.String,
   code: Schema.optional(Schema.Number),
@@ -110,7 +91,7 @@ export class SolanaRpcError extends Schema.TaggedError<SolanaRpcError>()("Solana
    * @since 0.1.0
    */
   override get message(): string {
-    return `${this.method} failed on ${this.endpoint}: ${this.reason}${
+    return `${this.method} failed on ${this.endpoint}: ${this.reason._tag}${
       this.code === undefined ? "" : ` (${this.code})`
     }`
   }
@@ -199,7 +180,7 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
 }>()("@effect-blockchain/solana/SolanaRpc") {}
 
 // JSON-RPC codes from @solana/errors, any other code is `Rejected`
-const codeReasons: ReadonlyMap<number, SolanaRpcErrorReason> = new Map([
+const codeReasons: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [429, "Unavailable"],
   [SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR, "Unavailable"],
   [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY, "Unavailable"],
@@ -256,7 +237,7 @@ export const layer = (options: {
                 ? Effect.succeed(expectedGenesisHash)
                 : Effect.fail(
                   new SolanaRpcError({
-                    reason: "WrongNetwork",
+                    reason: new JsonRpc.WrongNetwork({ expected: expectedGenesisHash, actual: genesisHash }),
                     method: RpcMethods.getGenesisHash.name,
                     endpoint,
                     cause: new Error(`expected genesis hash ${expectedGenesisHash} for ${network}, got ${genesisHash}`)
@@ -283,7 +264,7 @@ export const layer = (options: {
                 rpc.fail(
                   endpoint,
                   RpcMethods.getTransaction.name,
-                  "Pruned",
+                  new JsonRpc.Pruned(),
                   new Error(`transaction ${signature} not found`)
                 )
               )

@@ -50,7 +50,11 @@ export interface StellarRpcEndpoint {
 }
 
 /**
- * Why a call failed:
+ * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
+ * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
+ * `AggregateError` of every endpoint's error, in order.
+ *
+ * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -64,33 +68,10 @@ export interface StellarRpcEndpoint {
  * A call with a cursor never falls back, whatever the reason.
  *
  * @since 0.1.0
- * @category models
- */
-export const StellarRpcErrorReason = Schema.Literals([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned",
-  "Rejected",
-  "WrongNetwork"
-])
-
-/**
- * @since 0.1.0
- * @category models
- */
-export type StellarRpcErrorReason = typeof StellarRpcErrorReason.Type
-
-/**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
- *
- * @since 0.1.0
  * @category errors
  */
 export class StellarRpcError extends Schema.TaggedError<StellarRpcError>()("StellarRpcError", {
-  reason: StellarRpcErrorReason,
+  reason: JsonRpc.Reason,
   method: Schema.String,
   endpoint: Schema.String,
   code: Schema.optional(Schema.Number),
@@ -100,7 +81,7 @@ export class StellarRpcError extends Schema.TaggedError<StellarRpcError>()("Stel
    * @since 0.1.0
    */
   override get message(): string {
-    return `${this.method} failed on ${this.endpoint}: ${this.reason}${
+    return `${this.method} failed on ${this.endpoint}: ${this.reason._tag}${
       this.code === undefined ? "" : ` (${this.code})`
     }`
   }
@@ -206,7 +187,7 @@ export class StellarRpc extends Context.Service<StellarRpc, {
 }>()("@effect-blockchain/stellar/StellarRpc") {}
 
 // JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures, retry then fall back
-const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map([[-32603, "Unavailable"]])
+const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([[-32603, "Unavailable"]])
 
 // stellar-rpc's out-of-range start, current ("startLedger must be within the ledger range: X - Y") and older
 // ("startLedger must be between the oldest ledger: X and the latest ledger: Y ...")
@@ -257,7 +238,7 @@ export const layer = (options: {
             Effect.flatMap((info) =>
               info.passphrase === passphrase ? Effect.succeed(info) : Effect.fail(
                 new StellarRpcError({
-                  reason: "WrongNetwork",
+                  reason: new JsonRpc.WrongNetwork({ expected: passphrase, actual: info.passphrase }),
                   method: RpcMethods.getNetwork.name,
                   endpoint,
                   cause: new Error(`expected passphrase "${passphrase}" for ${network}, got "${info.passphrase}"`)
@@ -281,7 +262,7 @@ export const layer = (options: {
           return yield* fail(
             endpoint,
             method,
-            "Lagging",
+            new JsonRpc.Lagging({ head: health.latestLedger, toBlock }),
             new Error(`latest ledger ${health.latestLedger} is below toBlock ${toBlock}`)
           )
         }
@@ -289,7 +270,7 @@ export const layer = (options: {
           return yield* fail(
             endpoint,
             method,
-            "Pruned",
+            new JsonRpc.Pruned(),
             new Error(`oldest ledger ${health.oldestLedger} is above fromBlock ${fromBlock}`)
           )
         }
@@ -297,12 +278,14 @@ export const layer = (options: {
 
       // `start` is lazy: a cursor that failed to encode is not a TOID
       const outOfRange = (error: StellarRpcError, start: () => bigint): StellarRpcError => {
-        const match = error.reason === "Rejected" && error.cause instanceof Error
+        const match = error.reason._tag === "Rejected" && error.cause instanceof Error
           ? ledgerRangeError.exec(error.cause.message)
           : null
         if (match === null) return error
         return new StellarRpcError({
-          reason: start() < BigInt(match[1]) ? "Pruned" : "Lagging",
+          reason: start() < BigInt(match[1])
+            ? new JsonRpc.Pruned()
+            : new JsonRpc.Lagging({ head: BigInt(match[2]), toBlock: start() }),
           method: error.method,
           endpoint: error.endpoint,
           code: error.code,
@@ -338,7 +321,7 @@ export const layer = (options: {
           return yield* fail(
             endpoint,
             method,
-            "InvalidResponse",
+            new JsonRpc.InvalidResponse(),
             new Error(`event ${invalid.id} is outside the filter`)
           )
         }
@@ -349,7 +332,7 @@ export const layer = (options: {
           return yield* fail(
             endpoint,
             method,
-            "Lagging",
+            new JsonRpc.Lagging({ head: page.latestLedger, toBlock }),
             new Error(`latest ledger ${page.latestLedger} is below toBlock ${toBlock}`)
           )
         }

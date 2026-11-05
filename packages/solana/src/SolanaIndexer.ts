@@ -52,6 +52,7 @@
  *
  * @since 0.1.0
  */
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
@@ -162,10 +163,6 @@ export const DEFAULT_MAX_BATCH_SIZE = 100
  * @category constants
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
-
-// the reasons a later attempt can fix: the others answer the same at the same slot
-const isTransient = (error: SolanaRpcError): boolean =>
-  error.reason === "Unavailable" || error.reason === "InvalidResponse" || error.reason === "Lagging"
 
 // consecutive groups of at most `max` signatures, a slot never split: a full group still takes its last slot's others
 const groupBySlot = (
@@ -298,7 +295,8 @@ export const layer = (options: {
             { next: fromBlock, cap: fromBlock, groups: [] } satisfies Position,
             retry === undefined
               ? step
-              : (position) => Effect.retry(step(position), { schedule: retry, while: isTransient })
+              : (position) =>
+                Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })

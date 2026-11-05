@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import { StarknetEvent } from "@effect-blockchain/starknet/StarknetEvent"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
@@ -188,7 +189,7 @@ describe("StarknetRpc", () => {
     const { calls, run } = setup({ a: { starknet_blockNumber: head(20), starknet_getEvents: invalid }, b: {} })
     const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "a", cursor: "x" })
     return run((rpc) => Effect.flip(rpc.getEvents({ ...filter, cursor }))).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "Rejected", code: 33, endpoint: "a" })
+      expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 33, endpoint: "a" })
       expect(calls.every((call) => call.startsWith("a:"))).toBe(true)
     }))
   })
@@ -197,7 +198,7 @@ describe("StarknetRpc", () => {
     const { calls, run } = setup({ a: {} })
     const cursor = StarknetRpc.StarknetEventsCursor.make({ endpoint: "gone", cursor: "x" })
     return run((rpc) => Effect.flip(rpc.getEvents({ ...filter, cursor }))).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "Rejected", endpoint: "gone" })
+      expect(error).toMatchObject({ reason: { _tag: "Rejected" }, endpoint: "gone" })
       assert.instanceOf(error.cause, Error)
       expect(error.cause.message).toBe("no endpoint named gone")
       expect(calls).toStrictEqual([])
@@ -206,7 +207,7 @@ describe("StarknetRpc", () => {
 
   it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
-      const cases: Array<readonly [number, StarknetRpc.StarknetRpcErrorReason]> = [
+      const cases: Array<readonly [number, JsonRpc.CodeReason]> = [
         [63, "Unavailable"],
         [-32603, "Unavailable"],
         [-32005, "Unavailable"],
@@ -218,7 +219,7 @@ describe("StarknetRpc", () => {
       for (const [code, reason] of cases) {
         const { run } = setup({ a: { starknet_blockNumber: () => ({ error: { code, message: "no" } }) } })
         const error = yield* run((rpc) => Effect.flip(rpc.blockNumber))
-        expect(error).toMatchObject({ reason, code, method: "starknet_blockNumber", endpoint: "a" })
+        expect(error).toMatchObject({ reason: { _tag: reason }, code, method: "starknet_blockNumber", endpoint: "a" })
         expect(error.message).toBe(`starknet_blockNumber failed on a: ${reason} (${code})`)
       }
     }))
@@ -226,7 +227,11 @@ describe("StarknetRpc", () => {
   it.effect("fails WrongNetwork on a network mismatch", () => {
     const { calls, run } = setup({ a: { starknet_chainId: () => ({ result: "0x534e5f5345504f4c4941" }) }, b: {} })
     return run((rpc) => Effect.flip(rpc.chainId)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "WrongNetwork", method: "starknet_chainId", endpoint: "a" })
+      expect(error).toMatchObject({
+        reason: { _tag: "WrongNetwork", expected: "SN_MAIN", actual: "SN_SEPOLIA" },
+        method: "starknet_chainId",
+        endpoint: "a"
+      })
       expect(error.message).toBe("starknet_chainId failed on a: WrongNetwork")
       assert.instanceOf(error.cause, Error)
       expect(error.cause.message).toBe("expected chain ID SN_MAIN for Starknet, got SN_SEPOLIA")
@@ -276,7 +281,7 @@ describe("StarknetRpc", () => {
 
   it.effect("returns Lagging when no endpoint reached toBlock", () =>
     setup({ a: { starknet_blockNumber: head(15) } }).run((rpc) => Effect.flip(rpc.getEvents(filter))).pipe(
-      Effect.map((error) => expect(error).toMatchObject({ reason: "Lagging", method: "starknet_getEvents" }))
+      Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "starknet_getEvents" }))
     ))
 
   it.effect("rejects pre-confirmed, out-of-range and foreign events", () =>
@@ -293,7 +298,7 @@ describe("StarknetRpc", () => {
         const { run } = setup({
           a: { starknet_blockNumber: head(20), starknet_getEvents: () => ({ result: { events: [rawEvent(bad)] } }) }
         })
-        expect((yield* run((rpc) => Effect.flip(rpc.getEvents(filter)))).reason, JSON.stringify(bad)).toBe(
+        expect((yield* run((rpc) => Effect.flip(rpc.getEvents(filter)))).reason._tag, JSON.stringify(bad)).toBe(
           "InvalidResponse"
         )
       }

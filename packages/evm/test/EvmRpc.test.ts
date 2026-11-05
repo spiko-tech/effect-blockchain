@@ -1,3 +1,4 @@
+import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import { EvmLog } from "@effect-blockchain/evm/EvmLog"
@@ -128,7 +129,7 @@ describe("EvmRpc", () => {
 
   it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
-      const cases: Array<readonly [number, EvmRpc.EvmRpcErrorReason]> = [
+      const cases: Array<readonly [number, JsonRpc.CodeReason]> = [
         [-32005, "Unavailable"],
         [-32603, "Unavailable"],
         [-32007, "Unavailable"],
@@ -138,14 +139,28 @@ describe("EvmRpc", () => {
       ]
       for (const [code, reason] of cases) {
         const { run } = setup({ a: { eth_blockNumber: () => ({ error: { code, message: "no" } }) } })
-        expect(yield* run((rpc) => Effect.flip(rpc.blockNumber))).toMatchObject({ reason, code })
+        expect(yield* run((rpc) => Effect.flip(rpc.blockNumber))).toMatchObject({ reason: { _tag: reason }, code })
       }
     }))
+
+  it.effect("matches a reason with catchReason", () => {
+    const { run } = setup({ a: { eth_chainId: () => ({ result: "0x89" }) } })
+    return run((rpc) =>
+      rpc.chainId.pipe(
+        Effect.map(String),
+        Effect.catchReason("EvmRpcError", "WrongNetwork", (reason) => Effect.succeed(reason.actual))
+      )
+    ).pipe(Effect.map((actual) => expect(actual).toBe("137")))
+  })
 
   it.effect("fails WrongNetwork on a network mismatch", () => {
     const { calls, run } = setup({ a: { eth_chainId: () => ({ result: "0x89" }) } })
     return run((rpc) => Effect.flip(rpc.chainId)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "WrongNetwork", method: "eth_chainId", endpoint: "a" })
+      expect(error).toMatchObject({
+        reason: { _tag: "WrongNetwork", expected: "1", actual: "137" },
+        method: "eth_chainId",
+        endpoint: "a"
+      })
       expect(error.message).toBe("eth_chainId failed on a: WrongNetwork")
       expect(calls).toStrictEqual(["a:eth_chainId"])
     }))
@@ -188,7 +203,7 @@ describe("EvmRpc", () => {
 
   it.effect("returns Lagging when no endpoint reached toBlock", () =>
     setup({ a: { eth_blockNumber: head(15) } }).run((rpc) => Effect.flip(rpc.getLogs(filter))).pipe(
-      Effect.map((error) => expect(error).toMatchObject({ reason: "Lagging", method: "eth_getLogs" }))
+      Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "eth_getLogs" }))
     ))
 
   it.effect("rejects removed, out-of-range, foreign and pending logs", () =>
@@ -203,7 +218,7 @@ describe("EvmRpc", () => {
         ]
       ) {
         const { run } = setup({ a: { eth_blockNumber: head(20), eth_getLogs: () => ({ result: [rawLog(bad)] }) } })
-        expect((yield* run((rpc) => Effect.flip(rpc.getLogs(filter)))).reason, JSON.stringify(bad)).toBe(
+        expect((yield* run((rpc) => Effect.flip(rpc.getLogs(filter)))).reason._tag, JSON.stringify(bad)).toBe(
           "InvalidResponse"
         )
       }

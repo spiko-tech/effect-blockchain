@@ -31,7 +31,66 @@ import * as Schema from "effect/Schema"
 import * as SynchronizedRef from "effect/SynchronizedRef"
 
 /**
- * Why a call failed:
+ * The endpoint could not answer: transport, attempt timeout, HTTP error status or an `Unavailable` JSON-RPC code,
+ * after the retries. `status` is the HTTP status when there is one.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class Unavailable extends Schema.TaggedError<Unavailable>()("Unavailable", {
+  status: Schema.optional(Schema.Number)
+}) {}
+
+/**
+ * The reply is not JSON or fails its schema.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class InvalidResponse extends Schema.TaggedError<InvalidResponse>()("InvalidResponse", {}) {}
+
+/**
+ * The endpoint is behind the requested block. `head` (the endpoint's) and `toBlock` (the requested one) are set when
+ * known, unset when the endpoint answered a `Lagging` JSON-RPC code.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class Lagging extends Schema.TaggedError<Lagging>()("Lagging", {
+  head: Schema.optional(Schema.BigInt),
+  toBlock: Schema.optional(Schema.BigInt)
+}) {}
+
+/**
+ * The endpoint lacks the requested history.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class Pruned extends Schema.TaggedError<Pruned>()("Pruned", {}) {}
+
+/**
+ * Any other JSON-RPC error, or params that do not encode.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class Rejected extends Schema.TaggedError<Rejected>()("Rejected", {}) {}
+
+/**
+ * The endpoint does not serve the configured network: `expected` is the configured network's identifier, `actual`
+ * the endpoint's.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export class WrongNetwork extends Schema.TaggedError<WrongNetwork>()("WrongNetwork", {
+  expected: Schema.String,
+  actual: Schema.String
+}) {}
+
+/**
+ * Why a call failed, the `reason` of every chain error:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -42,23 +101,50 @@ import * as SynchronizedRef from "effect/SynchronizedRef"
  * | `Rejected` | any other JSON-RPC error, or params that do not encode. Not retried, as the same endpoint would answer the same, but providers disagree on limits (e.g. a block range): another may answer | yes |
  * | `WrongNetwork` | the endpoint does not serve the configured network | no |
  *
+ * Each reason is a tagged error, matched with `Effect.catchReason` or `Effect.catchReasons`:
+ *
+ * ```ts
+ * import * as Effect from "effect/Effect"
+ * import * as Schema from "effect/Schema"
+ * import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+ *
+ * // shaped like `EvmRpcError`, `SolanaRpcError`, `StarknetRpcError` and `StellarRpcError`
+ * class ChainRpcError extends Schema.TaggedError<ChainRpcError>()("ChainRpcError", { reason: JsonRpc.Reason }) {}
+ *
+ * declare const getLogs: Effect.Effect<ReadonlyArray<string>, ChainRpcError>
+ *
+ * // a pruned range has no logs left to read here, any other reason stays a ChainRpcError
+ * const logs = getLogs.pipe(Effect.catchReason("ChainRpcError", "Pruned", () => Effect.succeed([])))
+ * ```
+ *
  * @since 0.1.0
- * @category models
+ * @category reasons
  */
-export const Reason = Schema.Literals([
-  "Unavailable",
-  "InvalidResponse",
-  "Lagging",
-  "Pruned",
-  "Rejected",
-  "WrongNetwork"
-])
+export const Reason = Schema.Union([Unavailable, InvalidResponse, Lagging, Pruned, Rejected, WrongNetwork])
 
 /**
  * @since 0.1.0
- * @category models
+ * @category reasons
  */
 export type Reason = typeof Reason.Type
+
+/**
+ * The reasons a JSON-RPC error code maps to in `Options.codes`.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export type CodeReason = Exclude<Reason["_tag"], "WrongNetwork">
+
+/**
+ * Whether a later attempt can fix `reason`: `Unavailable`, `InvalidResponse` and `Lagging`. The others answer the
+ * same at the same block.
+ *
+ * @since 0.1.0
+ * @category reasons
+ */
+export const isTransient = (reason: Reason): boolean =>
+  reason._tag === "Unavailable" || reason._tag === "InvalidResponse" || reason._tag === "Lagging"
 
 /**
  * What `makeError` receives. `cause` never contains the endpoint URL.
@@ -133,7 +219,7 @@ export type Send<E, J = Schema.Json> = <Params, A>(method: Method<Params, A, J>,
  * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
  *   408/429/500/502/503/504 and the `Unavailable` codes are retried with an exponential backoff from `retryDelay`
  *   (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status is not retried.
- * - `codes` maps JSON-RPC error codes to a reason, any other code is `Rejected`.
+ * - `codes` maps JSON-RPC error codes to a reason tag, any other code is `Rejected`.
  * - `parseBody` parses a reply body, default `JSON.parse` (an empty body is `null`).
  * - `checkNetwork` asks `endpoint` for its network and fails `WrongNetwork` on a mismatch.
  * - `makeError` builds the chain's error. `E` is inferred from it alone, so annotate its parameter:
@@ -149,7 +235,7 @@ export interface Options<Info, E, J = Schema.Json> {
   readonly timeout?: Duration.Input | undefined
   readonly retries?: number | undefined
   readonly retryDelay?: Duration.Input | undefined
-  readonly codes: ReadonlyMap<number, Reason>
+  readonly codes: ReadonlyMap<number, CodeReason>
   readonly parseBody?: ((text: string) => J) | undefined
   readonly checkNetwork: (send: Send<NoInfer<E>, J>, endpoint: string) => Effect.Effect<Info, NoInfer<E>>
   readonly makeError: (fields: ErrorFields) => E
@@ -188,6 +274,8 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
     latest: Effect.Effect<bigint, E>
   ) => Effect.Effect<void, E>
 }
+
+const fromCode = { Unavailable, InvalidResponse, Lagging, Pruned, Rejected }
 
 // `bigint` codes for a `parseBody` that reads integers as `bigint`
 const ErrorReply = Schema.Struct({
@@ -236,17 +324,21 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
       }))
 
   const classify = (error: SendError): { readonly reason: Reason; readonly code?: number | undefined } => {
-    if (error instanceof JsonRpcError) return { reason: codes.get(error.code) ?? "Rejected", code: error.code }
+    if (error instanceof JsonRpcError) {
+      return { reason: new fromCode[codes.get(error.code) ?? "Rejected"](), code: error.code }
+    }
     if (HttpClientError.isHttpClientError(error)) {
       switch (error.reason._tag) {
-        case "StatusCodeError":
-          return { reason: "Unavailable", code: error.reason.response.status }
+        case "StatusCodeError": {
+          const status = error.reason.response.status
+          return { reason: new Unavailable({ status }), code: status }
+        }
         case "DecodeError":
         case "EmptyBodyError":
-          return { reason: "InvalidResponse" }
+          return { reason: new InvalidResponse() }
       }
     }
-    return { reason: "Unavailable" }
+    return { reason: new Unavailable() }
   }
 
   const client = (yield* HttpClient.HttpClient).pipe(
@@ -290,7 +382,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   const send = <Params, A>(endpoint: Endpoint, method: Method<Params, A, J>, params: Params) =>
     Effect.gen(function*() {
       const encoded = yield* Schema.encodeEffect(method.params)(params).pipe(
-        Effect.mapError((cause) => fail(endpoint, method.name, "Rejected", cause))
+        Effect.mapError((cause) => fail(endpoint, method.name, new Rejected(), cause))
       )
       // one request per HTTP call: the id is never matched
       const json = yield* HttpClientRequest.post(Redacted.value(endpoint.url)).pipe(
@@ -309,7 +401,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
         Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
       )
       const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
-        Effect.mapError((cause) => fail(endpoint, method.name, "InvalidResponse", cause))
+        Effect.mapError((cause) => fail(endpoint, method.name, new InvalidResponse(), cause))
       )
       return reply.result
     }).pipe(
@@ -326,7 +418,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
         : options.checkNetwork((method, params) => send(endpoint, method, params), endpoint.name).pipe(
           Effect.result,
           Effect.flatMap((checked) =>
-            Result.isFailure(checked) && checked.failure.reason !== "WrongNetwork"
+            Result.isFailure(checked) && checked.failure.reason._tag !== "WrongNetwork"
               ? Effect.fail(checked.failure)
               : Effect.succeed([checked, Option.some(checked)] as const)
           )
@@ -335,32 +427,29 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   const call = <Params, A>(endpoint: Endpoint, method: Method<Params, A, J>, params: Params) =>
     checkNetwork(endpoint).pipe(Effect.andThen(send(endpoint, method, params)))
 
-  const withFallback = Effect.fnUntraced(function*<A>(
-    f: (endpoint: Endpoint) => Effect.Effect<A, E>
-  ): Effect.fn.Return<A, E> {
-    const errors: Array<E> = []
-    for (const endpoint of endpoints) {
-      const result = yield* Effect.result(f(endpoint))
-      if (Result.isSuccess(result)) return result.success
-      errors.push(result.failure)
-      if (result.failure.reason === "WrongNetwork") break
-    }
-    const last = errors[errors.length - 1]
-    if (errors.length === 1) return yield* Effect.fail(last)
-    return yield* Effect.fail(makeError({
-      reason: last.reason,
-      method: last.method,
-      endpoint: last.endpoint,
-      code: last.code,
-      cause: new AggregateError(errors, `${errors.length} endpoints failed`)
-    }))
-  })
+  const withFallback = <A>(f: (endpoint: Endpoint) => Effect.Effect<A, E>): Effect.Effect<A, E> => {
+    const from = (index: number, errors: ReadonlyArray<E>): Effect.Effect<A, E> =>
+      Effect.catch(Effect.suspend(() => f(endpoints[index])), (last) => {
+        const tried = [...errors, last]
+        if (last.reason._tag !== "WrongNetwork" && index + 1 < endpoints.length) return from(index + 1, tried)
+        return Effect.fail(
+          tried.length === 1 ? last : makeError({
+            reason: last.reason,
+            method: last.method,
+            endpoint: last.endpoint,
+            code: last.code,
+            cause: new AggregateError(tried, `${tried.length} endpoints failed`)
+          })
+        )
+      })
+    return from(0, [])
+  }
 
   const endpointOf = (method: string, cursor: { readonly endpoint: string }): Effect.Effect<Endpoint, E> => {
     const endpoint = endpoints.find((endpoint) => endpoint.name === cursor.endpoint)
     return endpoint === undefined
       ? Effect.fail(makeError({
-        reason: "Rejected",
+        reason: new Rejected(),
         method,
         endpoint: cursor.endpoint,
         cause: new Error(`no endpoint named ${cursor.endpoint}`)
@@ -379,7 +468,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     yield* Ref.update(endpoint.head, BigInt_.max(head))
     if (head < toBlock) {
       return yield* Effect.fail(
-        fail(endpoint, method, "Lagging", new Error(`head ${head} is below toBlock ${toBlock}`))
+        fail(endpoint, method, new Lagging({ head, toBlock }), new Error(`head ${head} is below toBlock ${toBlock}`))
       )
     }
   })

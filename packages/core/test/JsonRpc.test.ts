@@ -18,7 +18,7 @@ class FakeRpcError extends Schema.TaggedError<FakeRpcError>()("FakeRpcError", {
   cause: Schema.Defect()
 }) {}
 
-const codes: ReadonlyMap<number, JsonRpc.Reason> = new Map([
+const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [-32005, "Unavailable"],
   [429, "Unavailable"],
   [24, "Lagging"],
@@ -79,7 +79,7 @@ const setup = (
       send(chainIdMethod, undefined).pipe(
         Effect.filterOrFail((id) => id === "fake-1", (id) =>
           new FakeRpcError({
-            reason: "WrongNetwork",
+            reason: new JsonRpc.WrongNetwork({ expected: "fake-1", actual: id }),
             method: chainIdMethod.name,
             endpoint,
             cause: new Error(`expected fake-1, got ${id}`)
@@ -150,9 +150,16 @@ describe("JsonRpc", () => {
     Effect.gen(function*() {
       const { run } = setup({ a: { blockNumber: down }, b: { blockNumber: () => ({ result: "nope" }) } })
       const error = yield* run((rpc) => Effect.flip(rpc.blockNumber))
-      expect(error).toMatchObject({ reason: "InvalidResponse", endpoint: "b" })
+      expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, endpoint: "b" })
       assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ endpoint: "a", reason: "Unavailable", code: 503 }, { endpoint: "b" }])
+      expect(error.cause.message).toBe("2 endpoints failed")
+      expect(error.cause.errors).toMatchObject([{
+        endpoint: "a",
+        reason: { _tag: "Unavailable", status: 503 },
+        code: 503
+      }, {
+        endpoint: "b"
+      }])
     }))
 
   it.effect("falls back after an invalid response and succeeds on the next endpoint", () => {
@@ -171,7 +178,10 @@ describe("JsonRpc", () => {
 
       const wrong = setup({ a: { chainId: () => ({ result: "fake-2" }), blockNumber: head(1) }, b: {} })
       const errors = yield* wrong.run((rpc) => Effect.zip(Effect.flip(rpc.blockNumber), Effect.flip(rpc.blockNumber)))
-      expect(errors.map((error) => error.reason)).toStrictEqual(["WrongNetwork", "WrongNetwork"])
+      expect(errors.map((error) => error.reason)).toMatchObject([
+        { _tag: "WrongNetwork", expected: "fake-1", actual: "fake-2" },
+        { _tag: "WrongNetwork" }
+      ])
       expect(wrong.calls).toStrictEqual(["a:chainId"])
     }))
 
@@ -181,7 +191,7 @@ describe("JsonRpc", () => {
       a: { chainId: () => ++attempts === 1 ? down() : { result: "fake-1" }, blockNumber: head(1) }
     })
     return run((rpc) => Effect.zip(Effect.flip(rpc.blockNumber), rpc.blockNumber)).pipe(Effect.map(([error]) => {
-      expect(error.reason).toBe("Unavailable")
+      expect(error.reason._tag).toBe("Unavailable")
       expect(calls).toStrictEqual(["a:chainId", "a:chainId", "a:blockNumber"])
     }))
   })
@@ -265,7 +275,7 @@ describe("JsonRpc", () => {
     const forbidden = () => new Response("forbidden", { status: 403 })
     const { calls, run } = setup({ a: { blockNumber: forbidden }, b: { blockNumber: forbidden } }, { retries: 3 })
     return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "Unavailable", code: 403, endpoint: "b" })
+      expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 403, endpoint: "b" })
       expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
     }))
   })
@@ -274,7 +284,12 @@ describe("JsonRpc", () => {
     Effect.gen(function*() {
       for (const status of [429, 503]) {
         const error = yield* failure(() => new Response("busy", { status }))
-        expect(error).toMatchObject({ reason: "Unavailable", code: status, method: "blockNumber", endpoint: "a" })
+        expect(error).toMatchObject({
+          reason: { _tag: "Unavailable" },
+          code: status,
+          method: "blockNumber",
+          endpoint: "a"
+        })
       }
     }))
 
@@ -282,15 +297,15 @@ describe("JsonRpc", () => {
   it.live("classifies a timeout and a transport error as Unavailable", () =>
     Effect.gen(function*() {
       const timeout = yield* failure(hang, { timeout: "20 millis" })
-      expect(timeout.reason).toBe("Unavailable")
+      expect(timeout.reason._tag).toBe("Unavailable")
       assert.instanceOf(timeout.cause, Error)
       expect(timeout.cause.message).toBe("timed out after 20ms")
-      expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason).toBe("Unavailable")
+      expect((yield* failure(() => Promise.reject(new TypeError("fetch failed")))).reason._tag).toBe("Unavailable")
     }))
 
   it.effect("classifies JSON-RPC codes", () =>
     Effect.gen(function*() {
-      const cases: Array<readonly [number, JsonRpc.Reason]> = [
+      const cases: Array<readonly [number, JsonRpc.CodeReason]> = [
         [-32005, "Unavailable"],
         [429, "Unavailable"],
         [24, "Lagging"],
@@ -299,15 +314,18 @@ describe("JsonRpc", () => {
         [3, "Rejected"]
       ]
       for (const [code, reason] of cases) {
-        expect(yield* failure(() => ({ error: { code, message: "no" } }))).toMatchObject({ reason, code })
+        expect(yield* failure(() => ({ error: { code, message: "no" } }))).toMatchObject({
+          reason: { _tag: reason },
+          code
+        })
       }
     }))
 
   it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
     Effect.gen(function*() {
-      expect((yield* failure(() => ({ result: "twenty" }))).reason).toBe("InvalidResponse")
-      expect((yield* failure(() => new Response("<html>"))).reason).toBe("InvalidResponse")
-      expect((yield* failure(() => new Response(null))).reason).toBe("InvalidResponse")
+      expect((yield* failure(() => ({ result: "twenty" }))).reason._tag).toBe("InvalidResponse")
+      expect((yield* failure(() => new Response("<html>"))).reason._tag).toBe("InvalidResponse")
+      expect((yield* failure(() => new Response(null))).reason._tag).toBe("InvalidResponse")
     }))
 
   it.effect("fails Rejected without a request when params do not encode", () => {
@@ -318,7 +336,7 @@ describe("JsonRpc", () => {
         calls.length = 0
         // a negative block is not a valid param
         const error = yield* Effect.flip(rpc.getRange(-1))
-        expect(error).toMatchObject({ reason: "Rejected", method: "getRange", endpoint: "a" })
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, method: "getRange", endpoint: "a" })
         expect(calls).toStrictEqual([])
       })
     )
@@ -383,9 +401,9 @@ describe("JsonRpc", () => {
       b: { blockNumber: () => ({ error: { code: -32602, message: "invalid params" } }) }
     }, { parseBody })
     return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: "Rejected", code: -32602, endpoint: "b" })
+      expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602, endpoint: "b" })
       assert.instanceOf(error.cause, AggregateError)
-      expect(error.cause.errors).toMatchObject([{ reason: "Unavailable", code: -32005 }, { code: -32602 }])
+      expect(error.cause.errors).toMatchObject([{ reason: { _tag: "Unavailable" }, code: -32005 }, { code: -32602 }])
       expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
     }))
   })
@@ -411,7 +429,11 @@ describe("JsonRpc", () => {
   it.effect("returns Lagging when no endpoint reached toBlock", () =>
     setup({ a: { blockNumber: head(15) } }).run((rpc) => Effect.flip(rpc.getRange(20))).pipe(
       Effect.map((error) => {
-        expect(error).toMatchObject({ reason: "Lagging", method: "getRange", endpoint: "a" })
+        expect(error).toMatchObject({
+          reason: { _tag: "Lagging", head: BigInt(15), toBlock: BigInt(20) },
+          method: "getRange",
+          endpoint: "a"
+        })
         assert.instanceOf(error.cause, Error)
         expect(error.cause.message).toBe("head 15 is below toBlock 20")
       })
@@ -423,9 +445,67 @@ describe("JsonRpc", () => {
       Effect.gen(function*() {
         expect((yield* rpc.engine.endpointOf("getRange", { endpoint: "b" })).name).toBe("b")
         const error = yield* Effect.flip(rpc.engine.endpointOf("getRange", { endpoint: "gone" }))
-        expect(error).toMatchObject({ reason: "Rejected", method: "getRange", endpoint: "gone" })
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, method: "getRange", endpoint: "gone" })
         expect(calls).toStrictEqual([])
       })
     )
+  })
+})
+
+describe("JsonRpc reasons", () => {
+  it("isTransient is true for Unavailable, InvalidResponse and Lagging only", () => {
+    const reasons = [
+      new JsonRpc.Unavailable({ status: 503 }),
+      new JsonRpc.InvalidResponse(),
+      new JsonRpc.Lagging({ head: BigInt(1), toBlock: BigInt(2) }),
+      new JsonRpc.Pruned(),
+      new JsonRpc.Rejected(),
+      new JsonRpc.WrongNetwork({ expected: "a", actual: "b" })
+    ]
+    expect(reasons.filter(JsonRpc.isTransient).map((reason) => reason._tag)).toStrictEqual([
+      "Unavailable",
+      "InvalidResponse",
+      "Lagging"
+    ])
+  })
+
+  it.effect("catchReason matches a chain error's reason and keeps the others", () => {
+    const fail = (reason: JsonRpc.Reason) =>
+      Effect.fail(new FakeRpcError({ reason, method: "getRange", endpoint: "a", cause: new Error("no") }))
+    const recover = (reason: JsonRpc.Reason) =>
+      fail(reason).pipe(Effect.catchReason("FakeRpcError", "Pruned", () => Effect.succeed("pruned")), Effect.flip)
+    return Effect.gen(function*() {
+      expect(yield* Effect.flip(recover(new JsonRpc.Pruned()))).toBe("pruned")
+      expect(yield* recover(new JsonRpc.Rejected())).toMatchObject({ reason: { _tag: "Rejected" }, endpoint: "a" })
+    })
+  })
+
+  it.effect("withFallback fails with a single endpoint's error as is", () =>
+    setup({ a: { blockNumber: down } }).run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: { _tag: "Unavailable", status: 503 }, code: 503, endpoint: "a" })
+      expect(error.cause).not.toBeInstanceOf(AggregateError)
+    })))
+
+  it.effect("withFallback stops on WrongNetwork without an aggregate", () => {
+    const { calls, run } = setup({ a: { chainId: () => ({ result: "fake-2" }) }, b: { blockNumber: head(1) } })
+    return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: { _tag: "WrongNetwork", actual: "fake-2" }, endpoint: "a" })
+      expect(error.cause).not.toBeInstanceOf(AggregateError)
+      expect(calls).toStrictEqual(["a:chainId"])
+    }))
+  })
+
+  it.effect("withFallback stops on WrongNetwork after other failures, aggregating them", () => {
+    const { calls, run } = setup({
+      a: { blockNumber: down },
+      b: { chainId: () => ({ result: "fake-2" }) },
+      c: { blockNumber: head(1) }
+    })
+    return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
+      expect(error).toMatchObject({ reason: { _tag: "WrongNetwork" }, endpoint: "b" })
+      assert.instanceOf(error.cause, AggregateError)
+      expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
+      expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId"])
+    }))
   })
 })
