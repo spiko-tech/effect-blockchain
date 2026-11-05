@@ -2,18 +2,25 @@
 // with hand-written replies for what the fixtures do not cover (the last page of a range, failures, edge cases).
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
+import { StellarContractEvent } from "@effect-blockchain/stellar/StellarContractEvent"
 import * as StellarIndexer from "@effect-blockchain/stellar/StellarIndexer"
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, it } from "@effect/vitest"
 import { StrKey } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
+import * as Fiber from "effect/Fiber"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import * as Result from "effect/Result"
-import type * as Schema from "effect/Schema"
+import * as Schedule from "effect/Schedule"
+import * as Schema from "effect/Schema"
+import * as Stream from "effect/Stream"
+import * as TestClock from "effect/testing/TestClock"
 
 type Params = { readonly [key: string]: Schema.Json }
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } }
@@ -304,4 +311,251 @@ describe("StellarIndexer", () => {
         assert.instanceOf(Result.getOrUndefined(Exit.findDefect(exit)), RangeError)
       }
     }))
+})
+
+// ledgers 10 to 19, maxBlockRange 3: four batches, the second without events. The event of a failed call is dropped.
+const S_FROM = BigInt(10)
+const S_TO = BigInt(19)
+const streamEvents = Schema.decodeUnknownSync(Schema.Array(StellarContractEvent))([
+  rawEvent(USTBL, 10),
+  rawEvent(USTBL, 12),
+  rawEvent(EUTBL, 14, 0, false),
+  rawEvent(USTBL, 17),
+  rawEvent(USTBL, 19),
+  rawEvent(EUTBL, 19, 1)
+])
+const pinnedBatches: Array<readonly [bigint, bigint, number]> = [[S_FROM, S_FROM + BigInt(2), 2], [
+  S_FROM + BigInt(3),
+  S_FROM + BigInt(5),
+  0
+], [
+  S_FROM + BigInt(6),
+  S_FROM + BigInt(8),
+  1
+], [S_TO, S_TO, 2]]
+const pinnedRanges = pinnedBatches.map(([from, to]) => [from, to] as const)
+
+// A fake `StellarRpc`: `getLatestLedger` reads `state.head`, `getEvents` answers the events inside the range in one
+// page and records it in `state.ranges`. The n-th `getEvents` call (1-based) fails with `failAt.get(n)` when set, the
+// n-th `getLatestLedger` call with `headFailAt.get(n)`.
+const fakeRpc = (
+  head: bigint,
+  failAt: ReadonlyMap<number, StellarRpc.StellarRpcError["reason"]> = new Map(),
+  headFailAt: ReadonlyMap<number, StellarRpc.StellarRpcError["reason"]> = new Map()
+) => {
+  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
+  const fail = (reason: StellarRpc.StellarRpcError["reason"], method: string) =>
+    Effect.fail(new StellarRpc.StellarRpcError({ reason, method, endpoint: "fake", cause: new Error(reason) }))
+  const layer = Layer.succeed(
+    StellarRpc.StellarRpc,
+    StellarRpc.StellarRpc.of({
+      network: "Stellar",
+      getNetwork: Effect.die("unused"),
+      getLatestLedger: Effect.suspend(() => {
+        const reason = headFailAt.get(++state.heads)
+        return reason === undefined
+          ? Effect.succeed({ sequence: state.head, id: "ab", protocolVersion: 23 })
+          : fail(reason, "getLatestLedger")
+      }),
+      getEvents: (filter) =>
+        Effect.suspend(() => {
+          state.ranges.push([filter.fromBlock, filter.toBlock])
+          const reason = failAt.get(state.ranges.length)
+          return reason === undefined
+            ? Effect.succeed({
+              events: streamEvents.filter((event) =>
+                event.blockNumber >= filter.fromBlock && event.blockNumber <= filter.toBlock
+              ),
+              cursor: undefined
+            })
+            : fail(reason, "getEvents")
+        })
+    })
+  )
+  return { layer, state }
+}
+
+const streamOptions = { filter: { contractIds: [EUTBL, USTBL] as const }, fromBlock: S_FROM, toBlock: S_TO }
+
+const bounds = (batches: ReadonlyArray<StellarIndexer.StellarIndexerBatch>) =>
+  batches.map((batch) => [batch.fromBlock, batch.toBlock, batch.events.length] as const)
+
+const collect = (options: Parameters<StellarIndexer.StellarIndexer["Service"]["streamEvents"]>[0]) =>
+  Effect.gen(function*() {
+    const batches = new Array<StellarIndexer.StellarIndexerBatch>()
+    const exit = yield* (yield* StellarIndexer.StellarIndexer).streamEvents(options).pipe(
+      Stream.runForEach((batch) => Effect.sync(() => batches.push(batch))),
+      Effect.exit
+    )
+    return { batches, exit }
+  })
+
+const provide = <A, E>(
+  effect: Effect.Effect<A, E, StellarIndexer.StellarIndexer>,
+  rpc: Layer.Layer<StellarRpc.StellarRpc>,
+  options?: Parameters<typeof StellarIndexer.layer>[0]
+) => effect.pipe(Effect.provide(StellarIndexer.layer(options).pipe(Layer.provide(rpc))))
+
+const reasonOf = (exit: Exit.Exit<unknown, StellarRpc.StellarRpcError>) =>
+  Option.getOrUndefined(Exit.findErrorOption(exit))?.reason
+
+describe("StellarIndexer.streamEvents", () => {
+  it.effect("catches up in batches of maxBlockRange, empty ones included, and ends at toBlock", () => {
+    const { layer, state } = fakeRpc(S_TO + BigInt(5))
+    return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        assert.isTrue(Exit.isSuccess(exit))
+        assert.deepStrictEqual(bounds(batches), pinnedBatches)
+        assert.deepStrictEqual(
+          batches.flatMap((batch) => batch.events),
+          streamEvents.filter((event) => event.inSuccessfulContractCall)
+        )
+        assert.deepStrictEqual(state.ranges, pinnedRanges)
+      })
+    )
+  })
+
+  it.effect("emits a batch without events", () => {
+    const { layer } = fakeRpc(S_TO)
+    const options = { ...streamOptions, fromBlock: S_FROM + BigInt(3), toBlock: S_FROM + BigInt(5) }
+    return provide(collect(options), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ batches }) =>
+        assert.deepStrictEqual(bounds(batches), [[S_FROM + BigInt(3), S_FROM + BigInt(5), 0]])
+      )
+    )
+  })
+
+  it.effect("is empty without a call when fromBlock > toBlock", () => {
+    const { layer, state } = fakeRpc(S_TO)
+    return provide(collect({ ...streamOptions, fromBlock: S_TO + BigInt(1) }), layer).pipe(
+      Effect.map(({ batches }) => {
+        assert.deepStrictEqual(batches, [])
+        assert.deepStrictEqual(state.ranges, [])
+      })
+    )
+  })
+
+  for (const pollInterval of [undefined, "1 minute"] as const) {
+    it.effect(`polls the latest ledger every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+      Effect.gen(function*() {
+        const wait = pollInterval === undefined ? StellarIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const { layer, state } = fakeRpc(S_FROM + BigInt(2))
+        const batches = new Array<StellarIndexer.StellarIndexerBatch>()
+        const options = { filter: streamOptions.filter, fromBlock: S_FROM, pollInterval }
+        const run = Effect.gen(function*() {
+          yield* (yield* StellarIndexer.StellarIndexer).streamEvents(options).pipe(
+            Stream.runForEach((batch) => Effect.sync(() => batches.push(batch)))
+          )
+        })
+        yield* provide(run, layer, { confirmations: 0, maxBlockRange: 3 }).pipe(Effect.forkChild)
+        yield* TestClock.adjust(0)
+        assert.deepStrictEqual(bounds(batches), pinnedBatches.slice(0, 1))
+        state.head = S_TO
+        yield* TestClock.adjust(Duration.subtract(wait, Duration.millis(1)))
+        assert.lengthOf(batches, 1)
+        yield* TestClock.adjust(Duration.millis(1))
+        assert.deepStrictEqual(bounds(batches), pinnedBatches)
+        yield* TestClock.adjust(Duration.times(wait, 3))
+        assert.lengthOf(batches, 4)
+        assert.lengthOf(state.ranges, 4)
+      }))
+  }
+
+  it.effect("waits for toBlock to be confirmed", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(S_TO - BigInt(1))
+      const fiber = yield* provide(collect(streamOptions), layer, { confirmations: 0 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      state.head = S_TO + BigInt(10)
+      yield* TestClock.adjust(StellarIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches } = yield* Fiber.join(fiber)
+      assert.deepStrictEqual(bounds(batches), [[S_FROM, S_TO - BigInt(1), 3], [S_TO, S_TO, 2]])
+    }))
+
+  for (const reason of ["Unavailable", "InvalidResponse", "Lagging"] as const) {
+    it.effect(`retries a step failing with ${reason} at the same ledger`, () => {
+      const { layer, state } = fakeRpc(S_TO, new Map([[2, reason]]))
+      return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        assert.isTrue(Exit.isSuccess(exit))
+        assert.deepStrictEqual(bounds(batches), pinnedBatches)
+        assert.deepStrictEqual(state.ranges[1], state.ranges[2])
+        assert.lengthOf(state.ranges, 5)
+      }))
+    })
+  }
+
+  for (const reason of ["Pruned", "Rejected", "WrongNetwork"] as const) {
+    it.effect(`fails at once on ${reason}, retry or not`, () => {
+      const { layer, state } = fakeRpc(S_TO, new Map([[2, reason]]))
+      return provide(collect({ ...streamOptions, retry: Schedule.recurs(5) }), layer, {
+        confirmations: 0,
+        maxBlockRange: 3
+      }).pipe(Effect.map(({ batches, exit }) => {
+        assert.strictEqual(reasonOf(exit), reason)
+        assert.lengthOf(batches, 1)
+        assert.lengthOf(state.ranges, 2)
+      }))
+    })
+  }
+
+  it.effect("fails Pruned at once, retry or not, when no endpoint retains fromBlock", () =>
+    Effect.gen(function*() {
+      // the real `StellarRpc`: the node keeps ledgers 50 to 100, the stream starts at 10. `getLatestLedger` already
+      // told the head, so the retention comes from the node's own out-of-range error
+      const { requests, run } = setup([{
+        name: "node",
+        handle: (method, params) =>
+          method === "getEvents"
+            ? { error: { code: -32600, message: "startLedger must be within the ledger range: 50 - 100" } }
+            : fake(method, params)
+      }])
+      const exit = yield* run((indexer) =>
+        indexer.streamEvents({ ...streamOptions, toBlock: undefined, retry: Schedule.recurs(5) }).pipe(
+          Stream.runCollect,
+          Effect.exit
+        )
+      )
+      assert.strictEqual(reasonOf(exit), "Pruned")
+      assert.lengthOf(requests.filter((request) => request.includes("getLatestLedger")), 1)
+      assert.lengthOf(requests.filter((request) => request.includes("getEvents")), 1)
+    }))
+
+  it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same ledger", () => {
+    const { layer, state } = fakeRpc(S_TO, new Map(), new Map([[2, "Unavailable"]]))
+    return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      assert.isTrue(Exit.isSuccess(exit))
+      assert.deepStrictEqual(bounds(batches), pinnedBatches)
+      assert.deepStrictEqual(state.ranges, pinnedRanges)
+      assert.strictEqual(state.heads, 5)
+    }))
+  })
+
+  it.effect("fails with the last error once the retry schedule is exhausted", () => {
+    const { layer, state } = fakeRpc(S_TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))
+    return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      assert.strictEqual(reasonOf(exit), "Lagging")
+      assert.lengthOf(batches, 1)
+      assert.lengthOf(state.ranges, 3)
+    }))
+  })
+
+  it.effect("fails on the first failure without retry", () => {
+    const { layer, state } = fakeRpc(S_TO, new Map([[2, "Unavailable"]]))
+    return provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        assert.strictEqual(reasonOf(exit), "Unavailable")
+        assert.lengthOf(batches, 1)
+        assert.lengthOf(state.ranges, 2)
+      })
+    )
+  })
 })
