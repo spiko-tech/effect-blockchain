@@ -12,14 +12,16 @@
  *
  * @since 0.1.0
  */
+import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as Result from "effect/Result"
+import * as Option from "effect/Option"
+import * as Stream from "effect/Stream"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
-import type { StarknetEventsFilter, StarknetRpcError } from "./StarknetRpc.ts"
+import type { StarknetEventsCursor, StarknetEventsFilter, StarknetRpcError } from "./StarknetRpc.ts"
 import { StarknetRpc } from "./StarknetRpc.ts"
 
 /**
@@ -80,33 +82,31 @@ export const layer = (options: {
       return StarknetIndexer.of({
         lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
         fetchEvents: (filter) =>
-          Effect.gen(function*() {
-            const events: Array<StarknetEvent> = []
-            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += maxBlockRange) {
+          Effect.forEach(
+            filter.fromBlock > filter.toBlock ? [] : Arr.makeBy(
+              Number((filter.toBlock - filter.fromBlock) / maxBlockRange) + 1,
+              (i) => filter.fromBlock + BigInt(i) * maxBlockRange
+            ),
+            (fromBlock) => {
               const toBlock = BigInt_.min(fromBlock + maxBlockRange - BigInt(1), filter.toBlock)
               const chunk = { ...filter, fromBlock, toBlock, chunkSize: options.chunkSize }
-              // a failed cursor page drops the chunk's events and restarts it once from its first page
-              for (let attempt = 1;; attempt++) {
-                const first = yield* rpc.getEvents(chunk)
-                const chunkEvents = Array.from(first.events)
-                let cursor = first.cursor
-                while (cursor !== undefined) {
-                  const page = yield* Effect.result(rpc.getEvents({ ...chunk, cursor }))
-                  if (Result.isFailure(page)) {
-                    if (attempt === 2) return yield* Effect.fail(page.failure)
-                    break
-                  }
-                  chunkEvents.push(...page.success.events)
-                  cursor = page.success.cursor
-                }
-                if (cursor === undefined) {
-                  events.push(...chunkEvents)
-                  break
-                }
-              }
+              // pages until the cursor is absent. The first page (no cursor) has the fallback chain, a cursor page has
+              // not: a failed cursor page drops the chunk's events and restarts it once from its first page
+              return Stream.paginate(
+                Option.none<StarknetEventsCursor>(),
+                (cursor) =>
+                  rpc.getEvents({ ...chunk, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
+                    onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
+                    onSuccess: (page) =>
+                      [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
+                  }))
+              ).pipe(
+                Stream.runCollect,
+                Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
+                Effect.mapError((error) => "cursorPage" in error ? error.cursorPage : error)
+              )
             }
-            return events
-          })
+          ).pipe(Effect.map(Arr.flatten))
       })
     })
   )
