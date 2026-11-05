@@ -9,6 +9,7 @@
  *
  * @since 0.1.0
  */
+import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -64,15 +65,15 @@ export const layer = (options: {
       const size = BigInt(maxBlockRange)
       return EvmIndexer.of({
         lastConfirmedBlock: rpc.blockNumber.pipe(Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0)))),
-        fetchLogs: (filter) =>
-          Effect.gen(function*() {
-            const logs: Array<EvmLog> = []
-            for (let fromBlock = filter.fromBlock; fromBlock <= filter.toBlock; fromBlock += size) {
-              const toBlock = BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock)
-              logs.push(...(yield* rpc.getLogs({ ...filter, fromBlock, toBlock })))
-            }
-            return logs
-          })
+        fetchLogs: (filter) => {
+          if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
+          const count = Number((filter.toBlock - filter.fromBlock) / size) + 1
+          return Effect.forEach(
+            Arr.makeBy(count, (i) => filter.fromBlock + BigInt(i) * size),
+            (fromBlock) =>
+              rpc.getLogs({ ...filter, fromBlock, toBlock: BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock) })
+          ).pipe(Effect.map(Arr.flatten))
+        }
       })
     })
   )
