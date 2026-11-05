@@ -213,16 +213,28 @@ const pinnedLogs = Schema.decodeUnknownSync(Schema.Array(EvmLog))(
 )
 
 // A fake `EvmRpc`: `eth_blockNumber` reads `state.head`, `eth_getLogs` answers the pinned logs inside the range and
-// records it in `state.ranges`. The n-th `getLogs` call (1-based) fails with `failAt.get(n)` when set. A fake service
-// rather than a fake endpoint: `Pruned` cannot come from an HTTP reply on EVM.
-const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map()) => {
-  const state = { head, ranges: new Array<readonly [bigint, bigint]>() }
+// records it in `state.ranges`. The n-th `getLogs` call (1-based) fails with `failAt.get(n)` when set, the n-th
+// `blockNumber` call with `headFailAt.get(n)`. A fake service rather than a fake endpoint: `Pruned` cannot come from
+// an HTTP reply on EVM.
+const fakeRpc = (
+  head: bigint,
+  failAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map(),
+  headFailAt: ReadonlyMap<number, EvmRpc.EvmRpcError["reason"]> = new Map()
+) => {
+  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
   const layer = Layer.succeed(
     EvmRpc.EvmRpc,
     EvmRpc.EvmRpc.of({
       network: "Ethereum",
       chainId: Effect.die("unused"),
-      blockNumber: Effect.sync(() => state.head),
+      blockNumber: Effect.suspend(() => {
+        const reason = headFailAt.get(++state.heads)
+        return reason === undefined
+          ? Effect.succeed(state.head)
+          : Effect.fail(
+            new EvmRpc.EvmRpcError({ reason, method: "eth_blockNumber", endpoint: "fake", cause: new Error(reason) })
+          )
+      }),
       getLogs: (filter) =>
         Effect.suspend(() => {
           state.ranges.push([filter.fromBlock, filter.toBlock])
@@ -361,6 +373,19 @@ describe("EvmIndexer.streamLogs", () => {
       }))
     })
   }
+
+  it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same block", () => {
+    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, "Unavailable"]]))
+    return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0,
+      maxBlockRange: 3
+    }).pipe(Effect.map(({ batches, exit }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(bounds(batches)).toStrictEqual(pinnedBatches)
+      expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
+      expect(state.heads).toBe(5)
+    }))
+  })
 
   it.effect("fails with the last error once the retry schedule is exhausted", () => {
     const { layer, state } = fakeRpc(TO, new Map([[2, "Unavailable"], [3, "Lagging"]]))

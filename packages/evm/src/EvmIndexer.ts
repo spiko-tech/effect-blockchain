@@ -15,7 +15,8 @@
  * again; with a `toBlock` it ends after the batch reaching it. With `retry`, a step failing with a transient reason
  * (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same block; any other failure, or an exhausted
  * schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart
- * from the block after it.
+ * from the block after it. Run one stream per (network, filter) at a time: the indexer does not coordinate processes,
+ * so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"
@@ -174,7 +175,7 @@ export const layer = (options: {
           return Stream.paginate(
             fromBlock,
             retry === undefined ? step : (next) => Effect.retry(step(next), { schedule: retry, while: isTransient })
-          ).pipe(Stream.withSpan("EvmIndexer.streamLogs"))
+          )
         }
       })
     })
