@@ -18,6 +18,7 @@
  *
  * @since 0.1.0
  */
+import * as Arr from "effect/Array"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -87,25 +88,29 @@ export const layer = (options: {
         ),
         fetchTransactions: Effect.fn("SolanaIndexer.fetchTransactions")(function*(filter) {
           if (filter.fromBlock > filter.toBlock) return []
-          const kept: Array<SolanaSignatureInfo> = []
-          let before: SolanaTransactionHash | undefined
-          while (true) {
-            const page = yield* rpc.getSignaturesForAddress({
+          // pages from `before` back to the first short page or the first page reaching below `fromBlock`
+          const pagesFrom = (
+            before: SolanaTransactionHash | undefined
+          ): Effect.Effect<Array<ReadonlyArray<SolanaSignatureInfo>>, SolanaRpcError> =>
+            rpc.getSignaturesForAddress({
               address: filter.address,
               before,
               limit: pageSize,
               commitment,
               minContextSlot: filter.toBlock
-            })
-            kept.push(...page.filter(({ slot }) => slot >= filter.fromBlock && slot <= filter.toBlock))
-            const last = page.at(-1)
-            if (last === undefined || page.length < pageSize || last.slot < filter.fromBlock) break
-            before = last.signature
-          }
+            }).pipe(Effect.flatMap((page) => {
+              const last = page.at(-1)
+              return last === undefined || page.length < pageSize || last.slot < filter.fromBlock
+                ? Effect.succeed([page])
+                : Effect.map(pagesFrom(last.signature), (older) => [page, ...older])
+            }))
           // The node lists newest first, so reversed, slots ascend. Within a slot the node's order is not documented:
           // reversing it is a best guess at execution order, not a guarantee. `transactionIndex`, which some providers
           // add, is not in the rpc model.
-          kept.reverse()
+          const kept = Arr.reverse(
+            Arr.filter(Arr.flatten(yield* pagesFrom(undefined)), ({ slot }) =>
+              slot >= filter.fromBlock && slot <= filter.toBlock)
+          )
           return yield* Effect.forEach(kept, ({ err, signature }) =>
             rpc.getTransaction({ signature, commitment }).pipe(
               Effect.map((tx): SolanaIndexedTransaction => ({ signature, err, ...tx }))
