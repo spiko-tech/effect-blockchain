@@ -27,15 +27,16 @@
  * Each following step calls `getTransaction` for one group and emits it as one {@link SolanaIndexerBatch}, so a long
  * catch-up saves progress batch by batch and holds only the signature list in memory. The batches tile the range: the
  * first starts at `next`, each ends at its last slot and the next starts right after, the last ends at the confirmed
- * head. A range without signatures is one empty batch, so the caller's cursor moves on a quiet address. Caught up, the
- * stream reads the head again on the `poll` schedule until it reaches the next slot, the schedule starting afresh after
- * each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after
- * the batch reaching it. With `retry`, a step (the signature paging or one group's transactions) failing with a
- * transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same position; any other failure, or
- * an exhausted schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock` after handling a batch and
- * restart from the slot after it. Run one stream per (network, filter) at a time: the indexer does not coordinate
- * processes, so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory
- * lock.
+ * head. A range without signatures is one empty batch, so the caller's cursor moves on a quiet address. The head is
+ * read once per catch-up segment: `lastConfirmedBlock` is read again only once the stream reaches the head it last
+ * read. Caught up, the stream reads the head again on the `poll` schedule until it reaches the next slot, the schedule
+ * starting afresh after each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a
+ * `toBlock` it ends after the batch reaching it. With `retry`, a step (the signature paging or one group's
+ * transactions) failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same
+ * position; any other failure, or an exhausted schedule, fails the stream. Delivery is at-least-once: save
+ * `batch.toBlock` after handling a batch and restart from the slot after it. Run one stream per (network, filter) at a
+ * time: the indexer does not coordinate processes, so a service with several replicas provides the exclusivity itself,
+ * for example with a Postgres advisory lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"

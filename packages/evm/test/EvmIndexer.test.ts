@@ -300,6 +300,8 @@ describe("EvmIndexer.streamLogs", () => {
         expect(bounds(batches)).toStrictEqual(pinnedBatches)
         expect(batches.flatMap((batch) => batch.logs)).toStrictEqual(pinnedLogs)
         expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
+        // one head read for the whole catch-up: the head is above toBlock
+        expect(state.heads).toBe(1)
       })
     )
   })
@@ -370,6 +372,28 @@ describe("EvmIndexer.streamLogs", () => {
       expect(state.heads).toBe(7)
     }))
 
+  it.effect("stops a catch-up at the head it read and extends it on the next read", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(4))
+      const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.recurs(0) }
+      const run = Effect.gen(function*() {
+        yield* (yield* EvmIndexer.EvmIndexer).streamLogs(options).pipe(
+          // the head moves past TO while the first batch is handled
+          Stream.runForEach(() =>
+            Effect.sync(() => {
+              state.head = TO
+            })
+          )
+        )
+      })
+      yield* provide(run, layer, { confirmations: 0, maxBlockRange: 3 })
+      expect(state.ranges).toStrictEqual([[FROM, FROM + BigInt(2)], [FROM + BigInt(3), FROM + BigInt(4)], [
+        FROM + BigInt(5),
+        FROM + BigInt(7)
+      ], [FROM + BigInt(8), TO]])
+      expect(state.heads).toBe(3)
+    }))
+
   it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
     const { layer, state } = fakeRpc(FROM + BigInt(5))
     const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.recurs(0) }
@@ -377,7 +401,8 @@ describe("EvmIndexer.streamLogs", () => {
       Effect.map(({ batches, exit }) => {
         expect(Exit.isSuccess(exit)).toBe(true)
         expect(bounds(batches)).toStrictEqual(pinnedBatches.slice(0, 2))
-        expect(state.heads).toBe(3)
+        // once for the catch-up, once more when it reaches the head
+        expect(state.heads).toBe(2)
       })
     )
   })
@@ -434,6 +459,8 @@ describe("EvmIndexer.streamLogs", () => {
         expect(bounds(batches)).toStrictEqual(pinnedBatches)
         expect(state.ranges[1]).toStrictEqual(state.ranges[2])
         expect(state.ranges).toHaveLength(5)
+        // the retried step knows the head
+        expect(state.heads).toBe(1)
       }))
     })
   }
@@ -459,7 +486,7 @@ describe("EvmIndexer.streamLogs", () => {
   }
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same block", () => {
-    const { layer, state } = fakeRpc(TO, new Map(), new Map([[2, new JsonRpc.Unavailable()]]))
+    const { layer, state } = fakeRpc(TO, new Map(), new Map([[1, new JsonRpc.Unavailable()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -467,7 +494,7 @@ describe("EvmIndexer.streamLogs", () => {
       expect(Exit.isSuccess(exit)).toBe(true)
       expect(bounds(batches)).toStrictEqual(pinnedBatches)
       expect(state.ranges).toStrictEqual(pinnedBatches.map(([from, to]) => [from, to]))
-      expect(state.heads).toBe(5)
+      expect(state.heads).toBe(2)
     }))
   })
 
