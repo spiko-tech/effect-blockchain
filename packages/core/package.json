@@ -1,7 +1,6 @@
 {
   "name": "@effect-blockchain/core",
   "version": "0.0.0",
-  "private": true,
   "description": "Shared building blocks of the effect-blockchain chain packages",
   "keywords": [
     "typescript",
