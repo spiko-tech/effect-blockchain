@@ -1,4 +1,4 @@
-import { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
+import { StellarAccountAddress, StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
 import { StellarContractEvent } from "@effect-blockchain/stellar/StellarContractEvent"
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
@@ -12,6 +12,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
+import { account } from "./utils/ledgerMeta.ts"
 
 type Params = { readonly [key: string]: Schema.Json }
 type Reply = { readonly result: Schema.Json } | { readonly error: { code: number; message: string } } | Response
@@ -29,6 +30,16 @@ const eventId = (ledger: number, index = 0) =>
   `${toid(ledger).toString().padStart(19, "0")}-${String(index).padStart(10, "0")}`
 // the RPC's cursor at the end of a scanned window: the largest cursor in `ledger`
 const windowEnd = (ledger: number) => `${(toid(ledger) | BigInt(0xffffffff)).toString().padStart(19, "0")}-4294967295`
+
+const ACCOUNT = StellarAccountAddress.make(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1)))
+const accountEntryXdr = (address: string) => account(address, 7).data().toXDR("base64")
+
+const ledgers = (sequences: ReadonlyArray<number>) => ({
+  result: {
+    ledgers: sequences.map((sequence) => ({ sequence, ledgerCloseTime: "1700000000", metadataXdr: "AAAA" })),
+    latestLedger: 100
+  }
+})
 
 const baseEvent = {
   type: "contract",
@@ -397,6 +408,51 @@ describe("StellarRpc", () => {
       )
     )
   })
+
+  it.effect("sends getLedgers params, the limit only when set", () => {
+    const params: Array<Params | undefined> = []
+    const { run } = setup({
+      a: {
+        getLedgers: (p) => {
+          params.push(p)
+          return ledgers([12])
+        }
+      }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.getLedgers({ startLedger: BigInt(12) })).toStrictEqual([
+          { sequence: BigInt(12), closeTime: 1700000000, metadataXdr: "AAAA" }
+        ])
+        yield* rpc.getLedgers({ startLedger: BigInt(12), limit: 3 })
+        expect(params).toStrictEqual([{ startLedger: 12, pagination: {} }, {
+          startLedger: 12,
+          pagination: { limit: 3 }
+        }])
+      })
+    )
+  })
+
+  it.effect("fails getLedgers InvalidResponse on a page that does not start at startLedger", () =>
+    Effect.gen(function*() {
+      for (const sequences of [[], [13]]) {
+        const { run } = setup({ a: { getLedgers: () => ledgers(sequences) } })
+        const error = yield* run((rpc) => Effect.flip(rpc.getLedgers({ startLedger: BigInt(12) })))
+        expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getLedgers" })
+      }
+    }))
+
+  it.effect("fails getAccount InvalidResponse on a malformed entry or another account's", () =>
+    Effect.gen(function*() {
+      const other = accountEntryXdr(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 2)))
+      for (const xdr of ["AAAA", other]) {
+        const { run } = setup({
+          a: { getLedgerEntries: () => ({ result: { entries: [{ xdr, lastModifiedLedgerSeq: 5 }], latestLedger: 9 } }) }
+        })
+        const error = yield* run((rpc) => Effect.flip(rpc.getAccount({ address: ACCOUNT })))
+        expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getLedgerEntries" })
+      }
+    }))
 
   it.effect("makes no call for an empty range", () => {
     const { calls, run } = setup({ a: {} })
