@@ -136,7 +136,8 @@ describe("SolanaRpc", () => {
           params = p
           return raw(
             `"result":{"slot":12,"blockTime":1700000000,"transaction":["AQID","base64"],"version":0,` +
-              `"meta":{"err":null,"fee":5000,"preBalances":[18446744073709551615],"logMessages":["ok"]}}`
+              `"meta":{"err":{"InstructionError":[0,{"Custom":1}]},"fee":5000,"preBalances":[18446744073709551615],` +
+              `"postBalances":[18446744073709546615],"logMessages":["ok"]}}`
           )()
         }
       }
@@ -151,7 +152,13 @@ describe("SolanaRpc", () => {
         slot: BigInt(12),
         blockTime: BigInt(1700000000),
         transaction: "AQID",
-        meta: { err: null, fee: "5000", preBalances: ["18446744073709551615"], logMessages: ["ok"] }
+        // unknown fields dropped, the error kept as JSON
+        meta: {
+          err: { InstructionError: ["0", { Custom: "1" }] },
+          fee: BigInt(5000),
+          preBalances: [BigInt("18446744073709551615")],
+          postBalances: [BigInt("18446744073709546615")]
+        }
       })
     }))
   })

@@ -89,7 +89,12 @@ const setup = (options: {
     const fake = options.synthetic?.find((e) => json.method === "getTransaction" && e.signature === json.params[0])
     if (fake !== undefined) {
       return reply(json.id, {
-        result: { slot: fake.slot, blockTime: null, transaction: ["AQ==", "base64"], meta: { err: fake.err } }
+        result: {
+          slot: fake.slot,
+          blockTime: null,
+          transaction: ["AQ==", "base64"],
+          meta: { err: fake.err, fee: 5000, preBalances: [], postBalances: [] }
+        }
       })
     }
     return replay.fetch(input, { ...init, body: text })
@@ -150,7 +155,7 @@ describe("SolanaIndexer", () => {
         [TX_1, BigInt(TX_1_SLOT)]
       ])
       expect(txs.map((tx) => tx.err)).toStrictEqual([null, instructionError, null])
-      expect(txs[0]).toMatchObject({ blockTime: BigInt(1788168720), meta: { err: null, fee: "11173" } })
+      expect(txs[0]).toMatchObject({ blockTime: BigInt(1788168720), meta: { err: null, fee: BigInt(11173) } })
       expect(txs[2]?.transaction.startsWith("AVYBJWgkGJhjpWDnX/jt")).toBe(true)
       expect(pages).toStrictEqual([
         `alchemy {"limit":1000,"commitment":"finalized","minContextSlot":${TX_1_SLOT}}`,
@@ -181,7 +186,7 @@ describe("SolanaIndexer", () => {
       ])
     ).pipe(Effect.map(([txs, batches]) => {
       expect(txs.map((tx) => tx.transaction.signatures)).toStrictEqual([[TX_2], [TX_1]])
-      expect(txs[0]).toMatchObject({ signature: TX_2, err: null, meta: { fee: "11173" } })
+      expect(txs[0]).toMatchObject({ signature: TX_2, err: null, meta: { fee: BigInt(11173) } })
       expect(batches.flatMap((batch) => batch.transactions)).toStrictEqual(txs)
       expect(served.filter((s) => s.includes("json"))).toStrictEqual([
         "alchemy getTransaction-eutbl-2-json",
@@ -317,6 +322,7 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
       network: "Solana",
       getGenesisHash: Effect.die("unused"),
       getSlot: () => call("getSlot", () => state.head),
+      getBalance: () => Effect.die("unused"),
       getSignaturesForAddress: ({ before, limit }) =>
         call("getSignaturesForAddress", () => {
           const start = history.findIndex((e) => e.signature === before) + 1

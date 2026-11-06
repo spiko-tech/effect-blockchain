@@ -1,6 +1,7 @@
 /**
  * Solana transaction indexing on top of {@link SolanaRpc}: the last confirmed slot, the transactions touching an
- * address over a slot range, and a stream of them following the confirmed head. Blocks are slots.
+ * address over a slot range, its lamport balance at a slot, and streams of both following the confirmed head. Blocks
+ * are slots.
  *
  * Everything is read at `finalized` commitment. `getSignaturesForAddress` has no slot range, so a range is paged from
  * the head backwards until it passes `fromBlock`: the cost grows with the address's history since `fromBlock`, then
@@ -9,6 +10,7 @@
  *
  * @example
  * ```ts
+ * import type { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
  * import type { SolanaIndexerFilter } from "@effect-blockchain/solana/SolanaIndexer"
  * import { SolanaIndexer } from "@effect-blockchain/solana/SolanaIndexer"
  * import * as Effect from "effect/Effect"
@@ -25,6 +27,16 @@
  *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
  *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
+ *   )
+ * })
+ *
+ * declare const address: SolanaAddress
+ *
+ * // the lamports of `address` every 9000 slots (about an hour) from slot 400000000
+ * const balances = Effect.gen(function*() {
+ *   const indexer = yield* SolanaIndexer
+ *   yield* indexer.streamNativeBalance({ address, fromBlock: BigInt(400000000), step: 9000 }).pipe(
+ *     Stream.runForEach(({ balance, block }) => Effect.log(`${block}: ${balance}`))
  *   )
  * })
  * ```
@@ -45,13 +57,8 @@ import type * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
 import type { SolanaAddress } from "./SolanaAddress.ts"
 import * as SolanaNetwork from "./SolanaNetwork.ts"
-import type {
-  SolanaRpcError,
-  SolanaSignatureInfo,
-  SolanaTransactionEncoding,
-  SolanaTransactionInfo
-} from "./SolanaRpc.ts"
-import { SolanaRpc } from "./SolanaRpc.ts"
+import type { SolanaSignatureInfo, SolanaTransactionEncoding, SolanaTransactionInfo } from "./SolanaRpc.ts"
+import { balanceChange, SolanaRpc, SolanaRpcError } from "./SolanaRpc.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
 
 /**
@@ -123,6 +130,35 @@ export interface SolanaIndexerStreamOptions {
 }
 
 /**
+ * The lamports of an address at the end of slot `block`, emitted by {@link SolanaIndexer.Service.streamNativeBalance}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaNativeBalance {
+  readonly block: bigint
+  readonly balance: bigint
+}
+
+/**
+ * The {@link SolanaIndexer.Service.streamNativeBalance} options: a sample of the balance of `address` at `fromBlock`,
+ * `fromBlock + step`, `fromBlock + 2 * step`... `poll` and `retry` behave as in {@link SolanaIndexerStreamOptions}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaIndexerNativeBalanceOptions {
+  readonly address: SolanaAddress
+  readonly fromBlock: bigint
+  /** The stream ends after the last sample not above it, and is empty when `fromBlock > toBlock`. */
+  readonly toBlock?: bigint | undefined
+  /** The slots between two samples, a positive safe integer. */
+  readonly step: number
+  readonly poll?: Schedule.Schedule<unknown> | undefined
+  readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -155,6 +191,23 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
       options: SolanaIndexerStreamOptions & { readonly encoding: Encoding }
     ): Stream.Stream<SolanaIndexerBatch<Encoding>, SolanaRpcError>
   }
+  /**
+   * The lamports of `address` at the end of slot `block`: the `postBalances` of its newest transaction at or before
+   * `block`, else the `preBalances` of its first one after. At or above the confirmed head with no newer transaction,
+   * its `getBalance`: an address without any transaction reads its current balance there and 0 below.
+   */
+  readonly fetchNativeBalance: (options: {
+    readonly address: SolanaAddress
+    readonly block: bigint
+  }) => Effect.Effect<bigint, SolanaRpcError>
+  /**
+   * The lamports of `address` at every `step` slots from `fromBlock`, following the confirmed head. A sample only
+   * reads the meta of the newest transaction since the previous one, so epoch rewards, which change a balance without
+   * a transaction, show from the next transaction on.
+   */
+  readonly streamNativeBalance: (
+    options: SolanaIndexerNativeBalanceOptions
+  ) => Stream.Stream<SolanaNativeBalance, SolanaRpcError>
 }>()("@effect-blockchain/solana/SolanaIndexer") {}
 
 // the node's maximum `limit`
@@ -199,7 +252,19 @@ interface StreamPosition {
   readonly cap: bigint
   readonly groups: ReadonlyArray<Arr.NonEmptyReadonlyArray<SolanaSignatureInfo>>
 }
+// a sample, then the next stream position: the previous sample, none for the first
+type Sample = readonly [ReadonlyArray<SolanaNativeBalance>, Option.Option<Option.Option<SolanaNativeBalance>>]
 type Step = readonly [ReadonlyArray<SolanaIndexerBatch<SolanaTransactionEncoding>>, Option.Option<StreamPosition>]
+
+// retries a stream step failing with a transient reason at the same position
+const withRetry = <S, A>(
+  retry: Schedule.Schedule<unknown, SolanaRpcError> | undefined,
+  step: (position: S) => Effect.Effect<A, SolanaRpcError>
+) =>
+  retry === undefined
+    ? step
+    : (position: S) =>
+      Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
 
 /**
  * Builds a {@link SolanaIndexer} on the provided {@link SolanaRpc}.
@@ -230,34 +295,34 @@ export const layer = (options: {
         Effect.map((slot) => BigInt_.max(slot - confirmations, BigInt(0))),
         Effect.withSpan("SolanaIndexer.lastConfirmedBlock")
       )
-      // the signatures of `[fromBlock, toBlock]` in chain order, paged from the head back to the first short page or
-      // the first page reaching below `fromBlock`
-      const fetchSignatures = (filter: SolanaIndexerFilter) =>
+      // the signatures of `address`, newest first, a page read only when the previous one is consumed
+      const signatures = (address: SolanaAddress, minContextSlot: bigint) =>
         Stream.paginate(
           Option.none<SolanaTransactionHash>(),
           (before) =>
             rpc.getSignaturesForAddress({
-              address: filter.address,
+              address,
               before: Option.getOrUndefined(before),
               limit: PAGE_SIZE,
               commitment: COMMITMENT,
-              minContextSlot: filter.toBlock
+              minContextSlot
             }).pipe(Effect.map((page) => {
               const last = page.at(-1)
               return [
                 page,
-                last === undefined || page.length < PAGE_SIZE || last.slot < filter.fromBlock
-                  ? Option.none()
-                  : Option.some(Option.some(last.signature))
+                last === undefined || page.length < PAGE_SIZE ? Option.none() : Option.some(Option.some(last.signature))
               ] as const
             }))
-        ).pipe(
+        )
+      // the signatures of `[fromBlock, toBlock]` in chain order, paged from the head back to the first short page or
+      // the first page reaching below `fromBlock`
+      const fetchSignatures = (filter: SolanaIndexerFilter) =>
+        signatures(filter.address, filter.toBlock).pipe(
+          Stream.takeWhile(({ slot }) => slot >= filter.fromBlock),
           Stream.runCollect,
           // newest first, so reversed slots ascend. The order within a slot is undocumented: reversing it is a best
           // guess at execution order (`transactionIndex`, which some providers add, is not in the RPC model)
-          Effect.map((signatures) =>
-            Arr.reverse(Arr.filter(signatures, ({ slot }) => slot >= filter.fromBlock && slot <= filter.toBlock))
-          )
+          Effect.map((signatures) => Arr.reverse(Arr.filter(signatures, ({ slot }) => slot <= filter.toBlock)))
         )
       const fetchEach = (signatures: ReadonlyArray<SolanaSignatureInfo>, encoding: SolanaTransactionEncoding) =>
         Effect.forEach(signatures, ({ err, signature }) =>
@@ -342,18 +407,113 @@ export const layer = (options: {
         }
         return Stream.paginate(
           { next: fromBlock, cap: fromBlock, groups: [] } satisfies StreamPosition,
-          retry === undefined
-            ? step
-            : (position) =>
-              Effect.retry(step(position), {
-                schedule: retry,
-                while: (error) =>
-                  JsonRpc.isTransient(error.reason)
-              })
+          withRetry(retry, step)
         )
       }
 
-      return SolanaIndexer.of({ lastConfirmedBlock, fetchTransactions, streamTransactions })
+      const balanceOf = (address: SolanaAddress, signature: SolanaTransactionHash, side: "pre" | "post") =>
+        rpc.getTransaction({ signature, commitment: COMMITMENT, encoding: "json" }).pipe(
+          Effect.flatMap((tx) =>
+            Option.match(balanceChange(tx, address), {
+              onSome: (change) =>
+                Effect.succeed(change[side]),
+              onNone: () =>
+                Effect.fail(
+                  new SolanaRpcError({
+                    reason: new JsonRpc.InvalidResponse(),
+                    method: "getTransaction",
+                    endpoint: "SolanaIndexer",
+                    cause: new Error(`transaction ${signature} has no balance for ${address}`)
+                  })
+                )
+            })
+          )
+        )
+      // the balance at the end of `block`, at or below `confirmed`, given the sample before it when there is one
+      const balanceAt = Effect.fnUntraced(function*(
+        address: SolanaAddress,
+        block: bigint,
+        confirmed: bigint,
+        previous: Option.Option<SolanaNativeBalance>
+      ): Effect.fn.Return<bigint, SolanaRpcError> {
+        // read before the signatures, so that a transaction landing in between is listed
+        const current = Option.isNone(previous) && block >= confirmed
+          ? Option.some(yield* rpc.getBalance({ address }))
+          : Option.none()
+        // the newest signature, and the newest at or before `block` or else the oldest
+        const { last, newest } = yield* signatures(address, BigInt_.min(block, confirmed)).pipe(
+          Stream.takeUntil(({ slot }) => slot <= block),
+          Stream.runFold(
+            () => ({ newest: Option.none<SolanaSignatureInfo>(), last: Option.none<SolanaSignatureInfo>() }),
+            (acc, info) => ({ newest: Option.orElseSome(acc.newest, () => info), last: Option.some(info) })
+          )
+        )
+        if (
+          Option.isSome(current) &&
+          Option.match(newest, {
+            onNone: () => true,
+            onSome: ({ slot }) => slot <= BigInt_.min(block, current.value.slot)
+          })
+        ) {
+          return current.value.value
+        }
+        if (Option.isSome(last) && last.value.slot <= block) {
+          return Option.isSome(previous) && last.value.slot <= previous.value.block
+            ? previous.value.balance
+            : yield* balanceOf(address, last.value.signature, "post")
+        }
+        if (Option.isSome(previous)) return previous.value.balance
+        return Option.isSome(last) ? yield* balanceOf(address, last.value.signature, "pre") : BigInt(0)
+      })
+
+      const fetchNativeBalance = Effect.fn("SolanaIndexer.fetchNativeBalance")(
+        function*({ address, block }: { readonly address: SolanaAddress; readonly block: bigint }) {
+          return yield* balanceAt(address, block, yield* lastConfirmedBlock, Option.none())
+        }
+      )
+
+      const streamNativeBalance = (
+        { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }:
+          SolanaIndexerNativeBalanceOptions
+      ): Stream.Stream<SolanaNativeBalance, SolanaRpcError> => {
+        if (!Number.isSafeInteger(step) || step < 1) {
+          return Stream.die(new RangeError(`step must be a positive safe integer, got ${step}`))
+        }
+        if (toBlock !== undefined && fromBlock > toBlock) {
+          return Stream.empty
+        }
+        const sample = (
+          previous: Option.Option<SolanaNativeBalance>
+        ): Effect.Effect<Sample, SolanaRpcError> => {
+          const block = Option.match(previous, { onNone: () => fromBlock, onSome: (p) => p.block + BigInt(step) })
+          return lastConfirmedBlock.pipe(
+            Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= block }),
+            Effect.flatMap((confirmed) =>
+              confirmed < block
+                ? Effect.succeed<Sample>([[], Option.none()])
+                : balanceAt(address, block, confirmed, previous).pipe(Effect.map((balance): Sample => {
+                  const current = { block, balance }
+                  return [
+                    [current],
+                    toBlock !== undefined && block + BigInt(step) > toBlock
+                      ? Option.none()
+                      : Option.some(Option.some(current))
+                  ]
+                }))
+            ),
+            Effect.withSpan("SolanaIndexer.streamNativeBalance.sample")
+          )
+        }
+        return Stream.paginate(Option.none<SolanaNativeBalance>(), withRetry(retry, sample))
+      }
+
+      return SolanaIndexer.of({
+        lastConfirmedBlock,
+        fetchTransactions,
+        streamTransactions,
+        fetchNativeBalance,
+        streamNativeBalance
+      })
     })
   )
 
