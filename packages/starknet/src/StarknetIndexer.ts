@@ -138,8 +138,8 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 
-// a catch-up in progress: the next block to read, up to the confirmed head last read
-interface CatchUp {
+// the confirmed blocks [next, head] not indexed yet, empty once the stream reaches the head it last read
+interface IndexerConfirmedRange {
   readonly next: bigint
   readonly head: bigint
 }
@@ -210,8 +210,11 @@ export const layer = (options: {
           // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
           // stream), then a batch up to it
           const step = (
-            { head, next }: CatchUp
-          ): Effect.Effect<readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<CatchUp>], StarknetRpcError> =>
+            { head, next }: IndexerConfirmedRange
+          ): Effect.Effect<
+            readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<IndexerConfirmedRange>],
+            StarknetRpcError
+          > =>
             (next <= head
               ? Effect.succeed(head)
               : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
@@ -229,8 +232,8 @@ export const layer = (options: {
             { next: fromBlock, head: fromBlock - BigInt(1) },
             retry === undefined
               ? step
-              : (catchUp) =>
-                Effect.retry(step(catchUp), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+              : (remaining) =>
+                Effect.retry(step(remaining), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })

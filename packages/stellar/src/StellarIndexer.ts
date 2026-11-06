@@ -150,8 +150,8 @@ const MAX_CONTRACT_IDS = 5
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
 
-// a catch-up in progress: the next ledger to read, up to the confirmed head last read
-interface CatchUp {
+// the confirmed ledgers [next, head] not indexed yet, empty once the stream reaches the head it last read
+interface IndexerConfirmedRange {
   readonly next: bigint
   readonly head: bigint
 }
@@ -226,8 +226,11 @@ export const layer = (options: {
           // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
           // stream), then a batch up to it
           const step = (
-            { head, next }: CatchUp
-          ): Effect.Effect<readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<CatchUp>], StellarRpcError> =>
+            { head, next }: IndexerConfirmedRange
+          ): Effect.Effect<
+            readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<IndexerConfirmedRange>],
+            StellarRpcError
+          > =>
             (next <= head
               ? Effect.succeed(head)
               : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
@@ -245,8 +248,8 @@ export const layer = (options: {
             { next: fromBlock, head: fromBlock - BigInt(1) },
             retry === undefined
               ? step
-              : (catchUp) =>
-                Effect.retry(step(catchUp), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+              : (remaining) =>
+                Effect.retry(step(remaining), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })
