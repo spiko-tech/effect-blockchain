@@ -28,6 +28,13 @@ export const getBlockByNumber = make({
 })
 
 /** @internal */
+export const getBalance = make({
+  name: "eth_getBalance",
+  params: Schema.Tuple([EvmAddress, QuantityFromHex]),
+  result: QuantityFromHex
+})
+
+/** @internal */
 export const getLogs = make({
   name: "eth_getLogs",
   params: Schema.Tuple([

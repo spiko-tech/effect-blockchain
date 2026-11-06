@@ -10,6 +10,8 @@ const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 // blocks 26083549..26083558: 4 USTBL and 1 EUTBL Transfer logs, within Alchemy's free-tier 10-block range
 const FROM = 26083549
 const TO = 26083558
+// the Ethereum Foundation's wallet, lowercased as `EvmAddress` encodes it
+const FOUNDATION = "0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae"
 
 const hex = (n: number) => `0x${n.toString(16)}`
 const logsFilter = (fromBlock: string, toBlock: string, topics: Json = [TRANSFER]) => [
@@ -22,6 +24,8 @@ const cases: ReadonlyArray<Case> = [
   { name: "getLogs", method: "eth_getLogs", params: logsFilter(hex(FROM), hex(TO)) },
   // the block of the first `getLogs` log, transaction hashes only
   { name: "getBlockByNumber", method: "eth_getBlockByNumber", params: [hex(FROM), false] },
+  // state older than the last 128 blocks: only an archive node answers it
+  { name: "getBalance", method: "eth_getBalance", params: [FOUNDATION, hex(FROM)] },
   // 10010 blocks: above Alchemy's free tier (10) and Infura's (10000) limits
   { name: "getLogs-range-too-large", method: "eth_getLogs", params: logsFilter(hex(TO - 10009), hex(TO)) },
   { name: "getLogs-beyond-head", method: "eth_getLogs", params: logsFilter("0xfffffff6", "0xffffffff") },

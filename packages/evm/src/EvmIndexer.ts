@@ -1,9 +1,10 @@
 /**
- * EVM log indexing on top of {@link EvmRpc.EvmRpc}: the last confirmed block, the logs of a set of contracts over a
- * block range, and a stream of them following the confirmed head.
+ * EVM indexing on top of {@link EvmRpc.EvmRpc}: the last confirmed block, the logs of a set of contracts over a block
+ * range, the native balance of an address at a block, and streams of both following the confirmed head.
  *
  * A range is split into ranges of at most `maxBlockRange` blocks, one `eth_getLogs` after another. A failing range
- * fails the whole call and drops the logs already read: the caller retries the same range.
+ * fails the whole call and drops the logs already read: the caller retries the same range. A balance is one
+ * `eth_getBalance` per sample.
  *
  * @example
  * ```ts
@@ -27,6 +28,24 @@
  * })
  * ```
  *
+ * @example
+ * ```ts
+ * import type { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
+ * import { EvmIndexer } from "@effect-blockchain/evm/EvmIndexer"
+ * import * as Effect from "effect/Effect"
+ * import * as Stream from "effect/Stream"
+ *
+ * declare const address: EvmAddress
+ *
+ * // the balance in wei every 7200 blocks (about a day on Ethereum) up to the head, then every new 7200 blocks
+ * const daily = Effect.gen(function*() {
+ *   const indexer = yield* EvmIndexer
+ *   return indexer.streamNativeBalance({ address, fromBlock: BigInt(21_000_000), step: 7200 }).pipe(
+ *     Stream.tap(({ balance, block }) => Effect.log(`${block}: ${balance} wei`))
+ *   )
+ * })
+ * ```
+ *
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
@@ -40,6 +59,7 @@ import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
+import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmLog } from "./EvmLog.ts"
 import * as EvmNetwork from "./EvmNetwork.ts"
 import * as EvmRpc from "./EvmRpc.ts"
@@ -90,6 +110,35 @@ export interface EvmIndexerStreamOptions {
 }
 
 /**
+ * The native balance of an address in wei at the end of `block`, emitted by
+ * {@link EvmIndexer.Service.streamNativeBalance}.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface EvmNativeBalance {
+  readonly block: bigint
+  readonly balance: bigint
+}
+
+/**
+ * The {@link EvmIndexer.Service.streamNativeBalance} options: one sample at `fromBlock`, then every `step` blocks.
+ * `step` is a positive safe integer, `poll` and `retry` work as in {@link EvmIndexerStreamOptions}.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface EvmIndexerNativeBalanceOptions {
+  readonly address: EvmAddress
+  readonly fromBlock: bigint
+  /** The stream ends after the last sample not above it, and is empty when `fromBlock > toBlock`. */
+  readonly toBlock?: bigint | undefined
+  readonly step: number
+  readonly poll?: Schedule.Schedule<unknown> | undefined
+  readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -106,6 +155,24 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
    * the confirmed head.
    */
   readonly streamLogs: (options: EvmIndexerStreamOptions) => Stream.Stream<EvmIndexerBatch, EvmRpc.EvmRpcError>
+  /**
+   * The native balance of `address` in wei at the end of `block`, which needs an archive endpoint for an old block.
+   *
+   * @since 0.3.0
+   */
+  readonly fetchNativeBalance: (options: {
+    readonly address: EvmAddress
+    readonly block: bigint
+  }) => Effect.Effect<bigint, EvmRpc.EvmRpcError>
+  /**
+   * The native balance of `address` at `fromBlock`, `fromBlock + step`, ... (a sample at every step, changed or not),
+   * each read once its block is confirmed, following the confirmed head.
+   *
+   * @since 0.3.0
+   */
+  readonly streamNativeBalance: (
+    options: EvmIndexerNativeBalanceOptions
+  ) => Stream.Stream<EvmNativeBalance, EvmRpc.EvmRpcError>
 }>()("@effect-blockchain/evm/EvmIndexer") {}
 
 /**
@@ -129,6 +196,8 @@ interface StreamPosition {
   readonly next: bigint
   readonly head: bigint
 }
+
+type Page<A> = readonly [ReadonlyArray<A>, Option.Option<StreamPosition>]
 
 /**
  * Builds an {@link EvmIndexer} reading through the provided {@link EvmRpc.EvmRpc}.
@@ -157,6 +226,24 @@ export const layer = (options: {
         Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0))),
         Effect.withSpan("EvmIndexer.lastConfirmedBlock")
       )
+      // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
+      const confirmedHead = (poll: Schedule.Schedule<unknown>, { head, next }: StreamPosition) =>
+        next <= head
+          ? Effect.succeed(head)
+          : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }))
+      const paginate = <A>(
+        start: bigint,
+        retry: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined,
+        step: (position: StreamPosition) => Effect.Effect<Page<A>, EvmRpc.EvmRpcError>
+      ) =>
+        Stream.paginate(
+          // a head below `start`: the first step reads it
+          { next: start, head: start - BigInt(1) },
+          retry === undefined
+            ? step
+            : (position) =>
+              Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+        )
       const fetchLogs = Effect.fn("EvmIndexer.fetchLogs")((filter: EvmIndexerFilter) => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
         const count = Number((filter.toBlock - filter.fromBlock) / size) + 1
@@ -166,38 +253,56 @@ export const layer = (options: {
             rpc.getLogs({ ...filter, fromBlock, toBlock: BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock) })
         ).pipe(Effect.map(Arr.flatten))
       })
+      const fetchNativeBalance = Effect.fn("EvmIndexer.fetchNativeBalance")(
+        ({ address, block }: { readonly address: EvmAddress; readonly block: bigint }) =>
+          rpc.getBalance({ address, blockNumber: block })
+      )
       return EvmIndexer.of({
         lastConfirmedBlock,
         fetchLogs,
         streamLogs: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
-          const step = (
-            { head, next }: StreamPosition
-          ): Effect.Effect<
-            readonly [ReadonlyArray<EvmIndexerBatch>, Option.Option<StreamPosition>],
-            EvmRpc.EvmRpcError
-          > =>
-            (next <= head
-              ? Effect.succeed(head)
-              : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
-              .pipe(Effect.flatMap((confirmed) => {
-                const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-                if (next > cap) return Effect.succeed([[], Option.none()])
-                const end = BigInt_.min(next + size - BigInt(1), cap)
-                return fetchLogs({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((logs) => [
+          return paginate(fromBlock, retry, (position) =>
+            confirmedHead(poll, position).pipe(Effect.flatMap((confirmed) => {
+              const { next } = position
+              const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
+              if (next > cap) {
+                return Effect.succeed<Page<EvmIndexerBatch>>([[], Option.none()])
+              }
+              const end = BigInt_.min(next + size - BigInt(1), cap)
+              return fetchLogs({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((logs) =>
+                [
                   [{ fromBlock: next, toBlock: end, logs }],
                   end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), head: confirmed })
-                ]))
-              }))
-          return Stream.paginate(
-            // a head below `fromBlock`: the first step reads it
-            { next: fromBlock, head: fromBlock - BigInt(1) },
-            retry === undefined
-              ? step
-              : (remaining) =>
-                Effect.retry(step(remaining), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
-          )
+                ] as const
+              ))
+            })))
+        },
+        fetchNativeBalance,
+        streamNativeBalance: (
+          { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
+        ) => {
+          if (!Number.isSafeInteger(step) || step < 1) {
+            return Stream.die(new RangeError(`step must be a positive safe integer, got ${step}`))
+          }
+          if (toBlock !== undefined && fromBlock > toBlock) {
+            return Stream.empty
+          }
+          const stride = BigInt(step)
+          return paginate(fromBlock, retry, (position) =>
+            confirmedHead(poll, position).pipe(Effect.flatMap((confirmed) => {
+              const block = position.next
+              if (block > confirmed) {
+                return Effect.succeed<Page<EvmNativeBalance>>([[], Option.none()])
+              }
+              const next = block + stride
+              return fetchNativeBalance({ address, block }).pipe(Effect.map((balance) =>
+                [
+                  [{ block, balance }],
+                  toBlock !== undefined && next > toBlock ? Option.none() : Option.some({ next, head: confirmed })
+                ] as const
+              ))
+            })))
         }
       })
     })

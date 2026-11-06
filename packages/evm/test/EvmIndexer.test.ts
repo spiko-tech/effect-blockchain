@@ -221,33 +221,33 @@ const pinnedLogs = Schema.decodeUnknownSync(Schema.Array(EvmLog))(
 )
 
 // A fake `EvmRpc`: `eth_blockNumber` reads `state.head`, `eth_getLogs` answers the pinned logs inside the range and
-// records it in `state.ranges`. The n-th `getLogs` call (1-based) fails with `failAt.get(n)` when set, the n-th
-// `blockNumber` call with `headFailAt.get(n)`. A fake service rather than a fake endpoint: `Pruned` cannot come from
+// records it in `state.ranges`, `eth_getBalance` answers `balanceAt(block)` and records the block in `state.samples`.
+// The n-th `getLogs` or `getBalance` call (1-based) fails with `failAt.get(n)` when set, the n-th `blockNumber` call
+// with `headFailAt.get(n)`. A fake service rather than a fake endpoint: `Pruned` cannot come from
 // an HTTP reply on EVM.
 const fakeRpc = (
   head: bigint,
   failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
   headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
 ) => {
-  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
+  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>(), samples: new Array<bigint>() }
+  const fail = (method: string, reason: JsonRpc.Reason) =>
+    Effect.fail(new EvmRpc.EvmRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const layer = Layer.succeed(
     EvmRpc.EvmRpc,
     EvmRpc.EvmRpc.of({
       network: "Ethereum",
       chainId: Effect.die("unused"),
       getBlockByNumber: () => Effect.die("unused"),
+      getBalance: ({ blockNumber }) =>
+        Effect.suspend(() => {
+          state.samples.push(blockNumber)
+          const reason = failAt.get(state.samples.length)
+          return reason === undefined ? Effect.succeed(balanceAt(blockNumber)) : fail("eth_getBalance", reason)
+        }),
       blockNumber: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
-        return reason === undefined
-          ? Effect.succeed(state.head)
-          : Effect.fail(
-            new EvmRpc.EvmRpcError({
-              reason,
-              method: "eth_blockNumber",
-              endpoint: "fake",
-              cause: new Error(reason._tag)
-            })
-          )
+        return reason === undefined ? Effect.succeed(state.head) : fail("eth_blockNumber", reason)
       }),
       getLogs: (filter) =>
         Effect.suspend(() => {
@@ -257,14 +257,14 @@ const fakeRpc = (
             ? Effect.succeed(
               pinnedLogs.filter((log) => log.blockNumber >= filter.fromBlock && log.blockNumber <= filter.toBlock)
             )
-            : Effect.fail(
-              new EvmRpc.EvmRpcError({ reason, method: "eth_getLogs", endpoint: "fake", cause: new Error(reason._tag) })
-            )
+            : fail("eth_getLogs", reason)
         })
     })
   )
   return { layer, state }
 }
+
+const balanceAt = (block: bigint) => block * BigInt(10)
 
 const streamFilter: Omit<EvmRpc.EvmLogsFilter, "fromBlock" | "toBlock"> = {
   addresses: [EUTBL, USTBL],
@@ -520,6 +520,136 @@ describe("EvmIndexer.streamLogs", () => {
         expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
         expect(batches).toHaveLength(1)
         expect(state.ranges).toHaveLength(2)
+      })
+    )
+  })
+})
+
+const FOUNDATION = EvmAddress.make("0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae")
+
+const collectBalances = (options: EvmIndexer.EvmIndexerNativeBalanceOptions) =>
+  Effect.gen(function*() {
+    const samples = new Array<EvmIndexer.EvmNativeBalance>()
+    const exit = yield* (yield* EvmIndexer.EvmIndexer).streamNativeBalance(options).pipe(
+      Stream.runForEach((sample) => Effect.sync(() => samples.push(sample))),
+      Effect.exit
+    )
+    return { samples, exit }
+  })
+
+const sampled = (...blocks: ReadonlyArray<bigint>) => blocks.map((block) => ({ block, balance: balanceAt(block) }))
+
+describe("EvmIndexer.fetchNativeBalance", () => {
+  it.effect("reads the balance at the block", () => {
+    const { layer, state } = fakeRpc(TO)
+    const fetch = Effect.gen(function*() {
+      return yield* (yield* EvmIndexer.EvmIndexer).fetchNativeBalance({ address: FOUNDATION, block: FROM })
+    })
+    return provide(fetch, layer).pipe(Effect.map((balance) => {
+      expect(balance).toBe(balanceAt(FROM))
+      expect(state.samples).toStrictEqual([FROM])
+    }))
+  })
+})
+
+describe("EvmIndexer.streamNativeBalance", () => {
+  const options = { address: FOUNDATION, fromBlock: FROM, toBlock: TO, step: 4 }
+
+  it.effect("samples every step and ends at the last one not above toBlock", () => {
+    const { layer, state } = fakeRpc(TO + BigInt(5))
+    return provide(collectBalances(options), layer, { confirmations: 0 }).pipe(Effect.map(({ exit, samples }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(samples).toStrictEqual(sampled(FROM, FROM + BigInt(4), FROM + BigInt(8)))
+      expect(state.heads).toBe(1)
+    }))
+  })
+
+  it.effect("ends at toBlock when it is a sample, with step 1 sampling every block", () => {
+    const { layer } = fakeRpc(TO)
+    return provide(collectBalances({ ...options, fromBlock: TO - BigInt(2), step: 1 }), layer, { confirmations: 0 })
+      .pipe(Effect.map(({ samples }) => expect(samples).toStrictEqual(sampled(TO - BigInt(2), TO - BigInt(1), TO))))
+  })
+
+  it.effect("samples fromBlock alone when toBlock equals it", () => {
+    const { layer } = fakeRpc(TO)
+    return provide(collectBalances({ ...options, toBlock: FROM }), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ samples }) => expect(samples).toStrictEqual(sampled(FROM)))
+    )
+  })
+
+  it.effect("is empty without a call when fromBlock > toBlock", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provide(collectBalances({ ...options, fromBlock: TO + BigInt(1) }), layer).pipe(
+      Effect.map(({ samples }) => {
+        expect(samples).toStrictEqual([])
+        expect(state.samples).toStrictEqual([])
+        expect(state.heads).toBe(0)
+      })
+    )
+  })
+
+  it.effect("dies on a step that is not a positive safe integer", () =>
+    Effect.gen(function*() {
+      for (const step of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        const { exit } = yield* provide(collectBalances({ ...options, step }), fakeRpc(TO).layer)
+        expect(Result.getOrUndefined(Exit.findDefect(exit))).toBeInstanceOf(RangeError)
+      }
+    }))
+
+  it.effect("waits for a sample above the confirmed head, then catches up to toBlock", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(5))
+      const fiber = yield* provide(collectBalances(options), layer, { confirmations: 2 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      // FROM + 4 is above the confirmed head FROM + 3
+      expect(state.samples).toStrictEqual([FROM])
+      state.head = TO + BigInt(2)
+      yield* TestClock.adjust(EvmIndexer.DEFAULT_POLL_INTERVAL)
+      const { exit, samples } = yield* Fiber.join(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(samples).toStrictEqual(sampled(FROM, FROM + BigInt(4), FROM + BigInt(8)))
+    }))
+
+  it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
+    const { layer } = fakeRpc(FROM + BigInt(5))
+    const drain = { address: FOUNDATION, fromBlock: FROM, step: 4, poll: Schedule.recurs(0) }
+    return provide(collectBalances(drain), layer, { confirmations: 0 }).pipe(Effect.map(({ exit, samples }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(samples).toStrictEqual(sampled(FROM, FROM + BigInt(4)))
+    }))
+  })
+
+  it.effect("polls the head every DEFAULT_POLL_INTERVAL once caught up", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM)
+      yield* provide(collectBalances({ ...options, step: 9 }), layer, { confirmations: 0 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      expect(state.samples).toStrictEqual([FROM])
+      state.head = TO
+      yield* TestClock.adjust(Duration.subtract(EvmIndexer.DEFAULT_POLL_INTERVAL, Duration.millis(1)))
+      expect(state.samples).toStrictEqual([FROM])
+      yield* TestClock.adjust(Duration.millis(1))
+      expect(state.samples).toStrictEqual([FROM, TO])
+    }))
+
+  it.effect("retries a sample failing with a transient reason at the same block", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provide(collectBalances({ ...options, retry: Schedule.recurs(1) }), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ exit, samples }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(samples).toStrictEqual(sampled(FROM, FROM + BigInt(4), FROM + BigInt(8)))
+        expect(state.samples).toStrictEqual([FROM, FROM + BigInt(4), FROM + BigInt(4), FROM + BigInt(8)])
+      })
+    )
+  })
+
+  it.effect("fails at once on Pruned, retry or not", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Pruned()]]))
+    return provide(collectBalances({ ...options, retry: Schedule.recurs(5) }), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ exit, samples }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Pruned" } } })
+        expect(samples).toStrictEqual(sampled(FROM))
+        expect(state.samples).toHaveLength(2)
       })
     )
   })
