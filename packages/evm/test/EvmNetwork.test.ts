@@ -1,4 +1,5 @@
 import {
+  defaultConfirmations,
   EvmChainId,
   EvmNetwork,
   fromChainId,
@@ -33,7 +34,9 @@ const viemChains: Record<EvmNetwork, chains.Chain> = {
   BnbSmartChainTestnet: chains.bscTestnet,
   Gnosis: chains.gnosis,
   Linea: chains.linea,
-  LineaSepolia: chains.lineaSepolia
+  LineaSepolia: chains.lineaSepolia,
+  // viem leaves foundry untagged, a local dev node is a testnet here
+  Anvil: { ...chains.foundry, testnet: true }
 }
 
 describe("EvmNetwork", () => {
@@ -49,7 +52,13 @@ describe("EvmNetwork", () => {
     for (const network of networks) {
       expect(fromChainId(toChainId(network))).toStrictEqual(Option.some(network))
     }
-    expect(fromChainId(31337)).toStrictEqual(Option.none())
+    expect(fromChainId(1337)).toStrictEqual(Option.none())
+  })
+
+  it("Anvil is the local Foundry node on chain 31337 with no confirmations", () => {
+    expect(toChainId("Anvil")).toBe(31337)
+    expect(fromChainId(31337)).toStrictEqual(Option.some("Anvil"))
+    expect(defaultConfirmations("Anvil")).toBe(0)
   })
 
   it("chain IDs are unique and mainnets/testnets partition networks", () => {

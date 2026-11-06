@@ -526,10 +526,10 @@ describe("EvmIndexer.streamLogs", () => {
 })
 
 describe("EvmNetwork.defaultConfirmations", () => {
-  it("is a positive integer for every network, testnets as their mainnet", () => {
+  it("is a non-negative integer for every network, testnets as their mainnet", () => {
     for (const network of EvmNetwork.networks) {
       expect(Number.isSafeInteger(EvmNetwork.defaultConfirmations(network)), network).toBe(true)
-      expect(EvmNetwork.defaultConfirmations(network)).toBeGreaterThan(0)
+      expect(EvmNetwork.defaultConfirmations(network), network).toBeGreaterThanOrEqual(0)
     }
     expect(EvmNetwork.defaultConfirmations("Ethereum")).toBe(64)
     expect(EvmNetwork.defaultConfirmations("Sepolia")).toBe(64)

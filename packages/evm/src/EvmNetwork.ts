@@ -24,6 +24,9 @@ export const mainnets = [
 ] as const
 
 /**
+ * `Anvil` is the local Foundry node with its default chain ID 31337: a node started with another `--chain-id` must use
+ * the network matching that ID, since the network check compares chain IDs.
+ *
  * @since 0.1.0
  * @category constants
  */
@@ -36,7 +39,8 @@ export const testnets = [
   "OptimismSepolia",
   "AvalancheFuji",
   "BnbSmartChainTestnet",
-  "LineaSepolia"
+  "LineaSepolia",
+  "Anvil"
 ] as const
 
 /**
@@ -103,7 +107,8 @@ const chainIds: Record<EvmNetwork, number> = {
   BnbSmartChainTestnet: 97,
   Gnosis: 100,
   Linea: 59144,
-  LineaSepolia: 59141
+  LineaSepolia: 59141,
+  Anvil: 31337
 }
 
 /**
@@ -157,7 +162,9 @@ const confirmations: Record<EvmNetwork, number> = {
   Gnosis: 32,
   // ~1 min of 2s blocks, Circle Fast Transfer uses 1: https://developers.circle.com/cctp/required-block-confirmations
   Linea: 30,
-  LineaSepolia: 30
+  LineaSepolia: 30,
+  // local node mines instantly and never reorgs: https://getfoundry.sh/anvil/overview
+  Anvil: 0
 }
 
 /**
