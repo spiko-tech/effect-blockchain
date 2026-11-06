@@ -34,6 +34,13 @@ const filter = { address: EUTBL, fromBlock: BigInt(1380300), toBlock: BigInt(138
 const TRANSFER = "0x0099cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9"
 const felt = (value: string) => "0x" + value.slice(2).padStart(64, "0")
 
+const STRK = StarknetAddress.make("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
+const STAKING = StarknetAddress.make("0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7")
+const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
+const BLOCK = BigInt(1380308)
+// the staking contract's STRK in fri at BLOCK, the u256 low felt (high is 0)
+const STAKING_BALANCE = "0xe22138cc9bba4363cc54cf"
+
 const network = ["chainId", "blockNumber"]
 
 describe("StarknetRpc fixtures", () => {
@@ -126,6 +133,44 @@ describe("StarknetRpc fixtures", () => {
           })
         )
       ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 33 }))))
+
+    it.effect(`fixture: ${provider} call balanceOf`, () =>
+      replay([{ name: provider, cases: [...network, "call-balanceOf"] }])((rpc) =>
+        rpc.call({
+          contractAddress: STRK,
+          entryPointSelector: BALANCE_OF,
+          calldata: [STAKING],
+          blockNumber: BLOCK
+        })
+      ).pipe(Effect.map((felts) => expect(felts).toStrictEqual([felt(STAKING_BALANCE), felt("0x0")]))))
+
+    it.effect(`fixture: ${provider} getBalance`, () =>
+      replay([{ name: provider, cases: [...network, "call-balanceOf"] }])((rpc) =>
+        rpc.getBalance({ address: STAKING, blockNumber: BLOCK })
+      ).pipe(Effect.map((balance) => expect(balance).toBe(BigInt(STAKING_BALANCE)))))
+
+    it.effect(`fixture: ${provider} call on a missing contract`, () =>
+      replay([{ name: provider, cases: [...network, "call-contract-not-found"] }])((rpc) =>
+        Effect.flip(rpc.call({
+          contractAddress: StarknetAddress.make(felt("0x1")),
+          entryPointSelector: BALANCE_OF,
+          calldata: [STAKING],
+          blockNumber: BLOCK
+        }))
+      ).pipe(
+        Effect.map((error) =>
+          expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 20, method: "starknet_call" })
+        )
+      ))
+
+    it.effect(`fixture: ${provider} getBalance beyond head`, () =>
+      replay([{ name: provider, cases: network }])((rpc) =>
+        Effect.flip(rpc.getBalance({ address: STAKING, blockNumber: BigInt(99999999) }))
+      ).pipe(
+        Effect.map((error) =>
+          expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "starknet_call", endpoint: provider })
+        )
+      ))
 
     // HTTP 401: Alchemy's JSON-RPC -32600 body is Rejected, Infura's text body is Unavailable
     it.effect(`fixture: ${provider} invalid key`, () =>

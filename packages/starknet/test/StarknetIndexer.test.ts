@@ -275,13 +275,14 @@ const pinnedBatches = [[FROM, FROM + BigInt(2), 2], [FROM + BigInt(3), FROM + Bi
 
 // A fake `StarknetRpc`: `starknet_blockNumber` reads `state.head`, `starknet_getEvents` answers the pinned events
 // inside the range in one page and records it in `state.ranges`. The n-th `getEvents` call (1-based) fails with
-// `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`.
+// `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`. `getBalance` answers `block * 7`,
+// records the block in `state.samples` and fails its n-th call with `failAt.get(n)` too.
 const fakeRpc = (
   head: bigint,
   failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
   headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
 ) => {
-  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>() }
+  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>(), samples: new Array<bigint>() }
   const fail = (reason: JsonRpc.Reason, method: string) =>
     Effect.fail(new StarknetRpc.StarknetRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const layer = Layer.succeed(
@@ -291,6 +292,13 @@ const fakeRpc = (
       chainId: Effect.die("unused"),
       getBlockWithTxHashes: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
+      call: () => Effect.die("unused"),
+      getBalance: ({ blockNumber }) =>
+        Effect.suspend(() => {
+          state.samples.push(blockNumber)
+          const reason = failAt.get(state.samples.length)
+          return reason === undefined ? Effect.succeed(blockNumber * BigInt(7)) : fail(reason, "starknet_call")
+        }),
       blockNumber: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
         return reason === undefined ? Effect.succeed(state.head) : fail(reason, "starknet_blockNumber")
@@ -583,6 +591,119 @@ describe("StarknetIndexer.streamEvents", () => {
       ])
       expect(calls).toStrictEqual(["a:first", "a:a-1", "a:first", "a:a-1", "a:first", "a:a-1"])
     })
+  })
+})
+
+const sampleOptions = { address: TOKEN, fromBlock: FROM, toBlock: TO, step: 3 }
+
+const collectBalances = (options: StarknetIndexer.StarknetIndexerNativeBalanceOptions) =>
+  Effect.gen(function*() {
+    const samples = new Array<StarknetIndexer.StarknetNativeBalance>()
+    const exit = yield* (yield* StarknetIndexer.StarknetIndexer).streamNativeBalance(options).pipe(
+      Stream.runForEach((sample) => Effect.sync(() => samples.push(sample))),
+      Effect.exit
+    )
+    return { samples, exit }
+  })
+
+const sampled = (blocks: ReadonlyArray<bigint>) => blocks.map((block) => ({ block, balance: block * BigInt(7) }))
+
+describe("StarknetIndexer native balance", () => {
+  it.effect("fetchNativeBalance reads the balance at the block", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provideFake(
+      Effect.gen(function*() {
+        return yield* (yield* StarknetIndexer.StarknetIndexer).fetchNativeBalance({ address: TOKEN, block: FROM })
+      }),
+      layer
+    ).pipe(Effect.map((balance) => {
+      expect(balance).toBe(FROM * BigInt(7))
+      expect(state.samples).toStrictEqual([FROM])
+    }))
+  })
+
+  it.effect("samples every step, unchanged balances included, and ends at the last step not above toBlock", () => {
+    const { layer, state } = fakeRpc(TO + BigInt(5))
+    return provideFake(collectBalances(sampleOptions), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ exit, samples }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(samples).toStrictEqual(sampled([FROM, FROM + BigInt(3), FROM + BigInt(6), TO]))
+        expect(state.heads).toBe(1)
+      })
+    )
+  })
+
+  it.effect("ends below toBlock when no step lands on it", () => {
+    const { layer } = fakeRpc(TO)
+    return provideFake(collectBalances({ ...sampleOptions, step: 4 }), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ samples }) => expect(samples).toStrictEqual(sampled([FROM, FROM + BigInt(4), FROM + BigInt(8)])))
+    )
+  })
+
+  it.effect("is empty without a call when fromBlock > toBlock", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provideFake(collectBalances({ ...sampleOptions, fromBlock: TO + BigInt(1) }), layer).pipe(
+      Effect.map(({ samples }) => {
+        expect(samples).toStrictEqual([])
+        expect(state.heads).toBe(0)
+      })
+    )
+  })
+
+  for (const step of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    it.effect(`dies on a step of ${step}`, () => {
+      const { layer } = fakeRpc(TO)
+      return provideFake(collectBalances({ ...sampleOptions, step }), layer).pipe(
+        Effect.map(({ exit }) => expect(Exit.hasDies(exit)).toBe(true))
+      )
+    })
+  }
+
+  it.effect("waits on poll for a sample above the confirmed head", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(4))
+      const fiber = yield* provideFake(collectBalances(sampleOptions), layer, { confirmations: 0 }).pipe(
+        Effect.forkChild
+      )
+      yield* TestClock.adjust(0)
+      expect(state.samples).toStrictEqual([FROM, FROM + BigInt(3)])
+      state.head = TO
+      yield* TestClock.adjust(StarknetIndexer.DEFAULT_POLL_INTERVAL)
+      const { samples } = yield* Fiber.join(fiber)
+      expect(samples).toStrictEqual(sampled([FROM, FROM + BigInt(3), FROM + BigInt(6), TO]))
+    }))
+
+  it.effect("follows the head without toBlock and ends when poll ends", () => {
+    const { layer, state } = fakeRpc(FROM + BigInt(7))
+    const options = { address: TOKEN, fromBlock: FROM, step: 3, poll: Schedule.recurs(0) }
+    return provideFake(collectBalances(options), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ exit, samples }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(samples).toStrictEqual(sampled([FROM, FROM + BigInt(3), FROM + BigInt(6)]))
+        expect(state.heads).toBe(2)
+      })
+    )
+  })
+
+  it.effect("retries a sample failing with a transient reason at the same block, with retry", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provideFake(collectBalances({ ...sampleOptions, retry: Schedule.recurs(1) }), layer, {
+      confirmations: 0
+    }).pipe(Effect.map(({ exit, samples }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(samples).toStrictEqual(sampled([FROM, FROM + BigInt(3), FROM + BigInt(6), TO]))
+      expect(state.samples[1]).toBe(state.samples[2])
+    }))
+  })
+
+  it.effect("fails on the first failure without retry", () => {
+    const { layer } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provideFake(collectBalances(sampleOptions), layer, { confirmations: 0 }).pipe(
+      Effect.map(({ exit, samples }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+        expect(samples).toHaveLength(1)
+      })
+    )
   })
 })
 
