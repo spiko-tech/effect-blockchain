@@ -164,6 +164,34 @@ describe("SolanaIndexer", () => {
     }))
   })
 
+  it.effect("fetches and streams in the json encoding", () => {
+    const { run, served } = setup({
+      history: history.filter((e) => e !== failed),
+      cases: ["getSlot", "getTransaction-eutbl-1-json", "getTransaction-eutbl-2-json"]
+    })
+    return run((indexer) =>
+      Effect.all([
+        indexer.fetchTransactions(range, { encoding: "json" }),
+        indexer.streamTransactions({
+          filter: { address: EUTBL },
+          fromBlock: range.fromBlock,
+          toBlock: range.toBlock,
+          encoding: "json"
+        }).pipe(Stream.runCollect)
+      ])
+    ).pipe(Effect.map(([txs, batches]) => {
+      expect(txs.map((tx) => tx.transaction.signatures)).toStrictEqual([[TX_2], [TX_1]])
+      expect(txs[0]).toMatchObject({ signature: TX_2, err: null, meta: { fee: "11173" } })
+      expect(batches.flatMap((batch) => batch.transactions)).toStrictEqual(txs)
+      expect(served.filter((s) => s.includes("json"))).toStrictEqual([
+        "alchemy getTransaction-eutbl-2-json",
+        "alchemy getTransaction-eutbl-1-json",
+        "alchemy getTransaction-eutbl-2-json",
+        "alchemy getTransaction-eutbl-1-json"
+      ])
+    }))
+  })
+
   it.effect("returns nothing for a range without transactions, stopping at the first page below it", () => {
     const { pages, run } = setup({ history })
     return run((indexer) =>
@@ -265,6 +293,24 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
         : Effect.fail(new SolanaRpc.SolanaRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
     })
   const history = Arr.reverse(chain)
+  // always base64: the json encoding is replayed from fixtures
+  function getTransaction(
+    options: SolanaRpc.SolanaTransactionQuery & { readonly encoding?: "base64" | undefined }
+  ): Effect.Effect<SolanaRpc.SolanaTransactionInfo, SolanaRpc.SolanaRpcError>
+  function getTransaction<Encoding extends SolanaRpc.SolanaTransactionEncoding>(
+    options: SolanaRpc.SolanaTransactionQuery & { readonly encoding: Encoding }
+  ): Effect.Effect<SolanaRpc.SolanaTransactionInfo<Encoding>, SolanaRpc.SolanaRpcError>
+  function getTransaction(
+    { signature }: SolanaRpc.SolanaTransactionQuery
+  ): Effect.Effect<SolanaRpc.SolanaTransactionInfo<SolanaRpc.SolanaTransactionEncoding>, SolanaRpc.SolanaRpcError> {
+    const index = chain.findIndex((e) => e.signature === signature)
+    return call(`getTransaction ${index}`, () => ({
+      slot: chain[index]?.slot ?? BigInt(0),
+      blockTime: null,
+      transaction: "AQ==",
+      meta: null
+    }))
+  }
   const layer = Layer.succeed(
     SolanaRpc.SolanaRpc,
     SolanaRpc.SolanaRpc.of({
@@ -276,15 +322,7 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
           const start = history.findIndex((e) => e.signature === before) + 1
           return history.slice(start, start + (limit ?? 1000))
         }),
-      getTransaction: ({ signature }) => {
-        const index = chain.findIndex((e) => e.signature === signature)
-        return call(`getTransaction ${index}`, () => ({
-          slot: chain[index]?.slot ?? BigInt(0),
-          blockTime: null,
-          transaction: "AQ==",
-          meta: null
-        }))
-      }
+      getTransaction
     })
   )
   return { layer, state }
@@ -301,7 +339,7 @@ const streamOptions = { filter: { address: EUTBL }, fromBlock: FROM, toBlock: TO
 const bounds = (batches: ReadonlyArray<SolanaIndexer.SolanaIndexerBatch>) =>
   batches.map((batch) => [batch.fromBlock, batch.toBlock, batch.transactions.length])
 
-const collect = (options: Parameters<SolanaIndexer.SolanaIndexer["Service"]["streamTransactions"]>[0]) =>
+const collect = (options: SolanaIndexer.SolanaStreamOptions) =>
   Effect.gen(function*() {
     const batches = new Array<SolanaIndexer.SolanaIndexerBatch>()
     const exit = yield* (yield* SolanaIndexer.SolanaIndexer).streamTransactions(options).pipe(

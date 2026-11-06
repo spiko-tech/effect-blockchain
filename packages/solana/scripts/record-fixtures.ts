@@ -17,6 +17,7 @@ const FUTURE_SLOT = 999_999_999_999
 
 const finalized = { commitment: "finalized" }
 const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }
+const json = { ...base64, encoding: "json" }
 
 // params in the order and shape `src/internal/rpcMethods.ts` encodes them
 const cases: ReadonlyArray<Case> = [
@@ -34,6 +35,8 @@ const cases: ReadonlyArray<Case> = [
   },
   { name: "getTransaction-eutbl-1", method: "getTransaction", params: [TX_1, base64] },
   { name: "getTransaction-eutbl-2", method: "getTransaction", params: [TX_2, base64] },
+  { name: "getTransaction-eutbl-1-json", method: "getTransaction", params: [TX_1, json] },
+  { name: "getTransaction-eutbl-2-json", method: "getTransaction", params: [TX_2, json] },
   { name: "getTransaction-unknown", method: "getTransaction", params: [UNKNOWN_TX, base64] },
   {
     name: "getSignaturesForAddress-min-context-slot",

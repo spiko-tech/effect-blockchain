@@ -3,6 +3,12 @@ import { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
 import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
 import { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
+import {
+  getBase58Decoder,
+  getBase64Encoder,
+  getCompiledTransactionMessageDecoder,
+  getTransactionDecoder
+} from "@solana/kit"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
@@ -101,6 +107,44 @@ describe("SolanaRpc fixtures", () => {
         expect(tx.blockTime).toBe(BigInt(1788168720))
         expect(tx.meta).toMatchObject({ err: null, fee: "11173", preBalances: expect.arrayContaining(["2485421211"]) })
       })
+    ))
+
+  it.effect("fixture: alchemy getTransaction-eutbl-1-json and -2-json match their base64 recording", () =>
+    alchemy(
+      "getTransaction-eutbl-1",
+      "getTransaction-eutbl-1-json",
+      "getTransaction-eutbl-2",
+      "getTransaction-eutbl-2-json"
+    ).run((rpc) =>
+      Effect.forEach([TX_1, TX_2], (signature) =>
+        Effect.gen(function*() {
+          const base64 = yield* rpc.getTransaction({ signature, ...finalized, encoding: "base64" })
+          const json = yield* rpc.getTransaction({ signature, ...finalized, encoding: "json" })
+          expect({ ...json, transaction: null }).toStrictEqual({ ...base64, transaction: null })
+          // the json message is the base64 wire message, decoded by `@solana/kit`
+          const wire = getTransactionDecoder().decode(getBase64Encoder().encode(base64.transaction))
+          const message = getCompiledTransactionMessageDecoder().decode(wire.messageBytes)
+          if (message.version === 1) throw new Error("v1 messages have no compiled instructions")
+          expect(json.transaction).toStrictEqual({
+            signatures: [signature],
+            message: {
+              accountKeys: message.staticAccounts,
+              header: {
+                numRequiredSignatures: message.header.numSignerAccounts,
+                numReadonlySignedAccounts: message.header.numReadonlySignerAccounts,
+                numReadonlyUnsignedAccounts: message.header.numReadonlyNonSignerAccounts
+              },
+              recentBlockhash: message.lifetimeToken,
+              instructions: message.instructions.map((instruction) => ({
+                programIdIndex: instruction.programAddressIndex,
+                accounts: instruction.accountIndices ?? [],
+                data: getBase58Decoder().decode(instruction.data ?? new Uint8Array())
+              })),
+              addressTableLookups: []
+            }
+          })
+          expect(json.transaction.message.accountKeys).toContain(EUTBL)
+        }))
     ))
 
   it.effect("fixture: alchemy getTransaction-unknown", () =>

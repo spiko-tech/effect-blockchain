@@ -20,6 +20,16 @@
  *
  * Methods are named after the JSON-RPC method.
  *
+ * **Transaction encoding**
+ *
+ * `getTransaction` takes an `encoding`, `base64` by default:
+ * - `base64`: the signed wire transaction as one base64 string, for the `@solana/kit` decoders (e.g.
+ *   `getTransactionDecoder`) and for storing the exact bytes,
+ * - `json`: the transaction already split into signatures, account keys and compiled instructions (program and account
+ *   indexes, base58 `data`), for decoders working instruction by instruction with `meta.innerInstructions`.
+ *
+ * `meta` is the same in both. `jsonParsed` is not offered: its shape depends on the programs the node knows.
+ *
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
@@ -143,18 +153,87 @@ export interface SolanaSignatureInfo {
 }
 
 /**
- * A `getTransaction` result. `transaction` is the signed wire transaction, base64-encoded. `meta` is the raw status
- * meta (fee, balances, logs, inner instructions...) as JSON with every integer as a decimal string, so u64 values are
- * exact and the value can be stored as is. It is `null` when the node does not have it.
+ * The `getTransaction` encodings: see the module's "Transaction encoding" section.
  *
  * @since 0.1.0
  * @category models
  */
-export interface SolanaTransactionInfo {
+export type SolanaTransactionEncoding = "base64" | "json"
+
+/**
+ * A compiled instruction of a `json` transaction: `programIdIndex` and `accounts` index the message's account keys,
+ * followed by the addresses loaded from the lookup tables (writable then readonly), and `data` is base58.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaCompiledInstruction {
+  readonly programIdIndex: number
+  readonly accounts: ReadonlyArray<number>
+  readonly data: string
+}
+
+/**
+ * A `json` transaction. `addressTableLookups` is absent from legacy transactions.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaJsonTransaction {
+  readonly signatures: ReadonlyArray<SolanaTransactionHash>
+  readonly message: {
+    readonly accountKeys: ReadonlyArray<SolanaAddress>
+    readonly header: {
+      readonly numRequiredSignatures: number
+      readonly numReadonlySignedAccounts: number
+      readonly numReadonlyUnsignedAccounts: number
+    }
+    readonly recentBlockhash: string
+    readonly instructions: ReadonlyArray<SolanaCompiledInstruction>
+    readonly addressTableLookups?: ReadonlyArray<{
+      readonly accountKey: SolanaAddress
+      readonly writableIndexes: ReadonlyArray<number>
+      readonly readonlyIndexes: ReadonlyArray<number>
+    }>
+  }
+}
+
+/**
+ * The `transaction` of a `getTransaction` result, by encoding: the base64 wire transaction or a
+ * {@link SolanaJsonTransaction}.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaEncodedTransaction {
+  readonly base64: string
+  readonly json: SolanaJsonTransaction
+}
+
+/**
+ * A `getTransaction` result. `transaction` follows the requested encoding (see {@link SolanaEncodedTransaction}).
+ * `meta` is the raw status meta (fee, balances, logs, inner instructions...) as JSON with every integer as a decimal
+ * string, so u64 values are exact and the value can be stored as is. It is `null` when the node does not have it.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaTransactionInfo<Encoding extends SolanaTransactionEncoding = "base64"> {
   readonly slot: bigint
   readonly blockTime: bigint | null
-  readonly transaction: string
+  readonly transaction: SolanaEncodedTransaction[Encoding]
   readonly meta: Schema.Json
+}
+
+/**
+ * The `getTransaction` options.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface SolanaTransactionQuery {
+  readonly signature: SolanaTransactionHash
+  readonly commitment: SolanaCommitment
 }
 
 /**
@@ -173,11 +252,18 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly getSignaturesForAddress: (
     query: SolanaSignaturesQuery
   ) => Effect.Effect<ReadonlyArray<SolanaSignatureInfo>, SolanaRpcError>
-  /** `getTransaction` in base64, versioned transactions included. A transaction the endpoint lacks fails `Pruned`. */
-  readonly getTransaction: (options: {
-    readonly signature: SolanaTransactionHash
-    readonly commitment: SolanaCommitment
-  }) => Effect.Effect<SolanaTransactionInfo, SolanaRpcError>
+  /**
+   * `getTransaction` in `encoding`, `base64` by default, versioned transactions included. A transaction the endpoint
+   * lacks fails `Pruned`.
+   */
+  readonly getTransaction: {
+    (
+      options: SolanaTransactionQuery & { readonly encoding?: "base64" | undefined }
+    ): Effect.Effect<SolanaTransactionInfo, SolanaRpcError>
+    <Encoding extends SolanaTransactionEncoding>(
+      options: SolanaTransactionQuery & { readonly encoding: Encoding }
+    ): Effect.Effect<SolanaTransactionInfo<Encoding>, SolanaRpcError>
+  }
 }>()("@effect-blockchain/solana/SolanaRpc") {}
 
 // JSON-RPC codes from @solana/errors, any other code is `Rejected`
@@ -252,11 +338,11 @@ export const layer = (options: {
 
       const getTransactionOn = (
         endpoint: Endpoint,
-        { commitment, signature }: { readonly signature: SolanaTransactionHash; readonly commitment: SolanaCommitment }
+        { commitment, encoding, signature }: SolanaTransactionQuery & { readonly encoding: SolanaTransactionEncoding }
       ) =>
-        rpc.call(endpoint, RpcMethods.getTransaction, [signature, {
+        rpc.call(endpoint, RpcMethods.getTransaction(encoding), [signature, {
           commitment,
-          encoding: "base64",
+          encoding,
           maxSupportedTransactionVersion: 0
         }]).pipe(
           Effect.flatMap((tx) =>
@@ -269,14 +355,22 @@ export const layer = (options: {
                   new Error(`transaction ${signature} not found`)
                 )
               )
-              : Effect.succeed({
-                slot: tx.slot,
-                blockTime: tx.blockTime,
-                transaction: tx.transaction[0],
-                meta: tx.meta
-              })
+              : Effect.succeed(tx)
           )
         )
+      function getTransaction(
+        options: SolanaTransactionQuery & { readonly encoding?: "base64" | undefined }
+      ): Effect.Effect<SolanaTransactionInfo, SolanaRpcError>
+      function getTransaction<Encoding extends SolanaTransactionEncoding>(
+        options: SolanaTransactionQuery & { readonly encoding: Encoding }
+      ): Effect.Effect<SolanaTransactionInfo<Encoding>, SolanaRpcError>
+      function getTransaction(
+        { encoding = "base64", ...options }: SolanaTransactionQuery & {
+          readonly encoding?: SolanaTransactionEncoding | undefined
+        }
+      ): Effect.Effect<SolanaTransactionInfo<SolanaTransactionEncoding>, SolanaRpcError> {
+        return rpc.withFallback((endpoint) => getTransactionOn(endpoint, { ...options, encoding }))
+      }
 
       return SolanaRpc.of({
         network,
@@ -285,7 +379,7 @@ export const layer = (options: {
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSlot, [{ commitment }])),
         getSignaturesForAddress: ({ address, ...config }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSignaturesForAddress, [address, config])),
-        getTransaction: (options) => rpc.withFallback((endpoint) => getTransactionOn(endpoint, options))
+        getTransaction
       })
     })
   )
