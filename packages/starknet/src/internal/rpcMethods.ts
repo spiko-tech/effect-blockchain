@@ -51,6 +51,20 @@ export const getBlockWithTxHashes = make({
 })
 
 /** @internal */
+export const call = make({
+  name: "starknet_call",
+  params: Schema.Struct({
+    request: Schema.Struct({
+      contract_address: StarknetAddress,
+      entry_point_selector: Felt,
+      calldata: Schema.Array(Felt)
+    }),
+    block_id: BlockId
+  }),
+  result: Schema.Array(PaddedFelt)
+})
+
+/** @internal */
 export const getEvents = make({
   name: "starknet_getEvents",
   params: Schema.Struct({
