@@ -25,15 +25,18 @@
  * catch-up saves progress batch by batch and holds only the signature list in memory. The batches tile the range: the
  * first starts at `next`, each ends at its last slot and the next starts right after, the last ends at the confirmed
  * head. A range without signatures is one empty batch, so the caller's cursor moves on a quiet address. Caught up, the
- * stream sleeps `pollInterval` and checks again; with a `toBlock` it ends after the batch reaching it. With `retry`, a
- * step (the signature paging or one group's transactions) failing with a transient reason (`Unavailable`,
- * `InvalidResponse`, `Lagging`) is retried at the same position; any other failure, or an exhausted schedule, fails the
- * stream. Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart from the slot after it.
- * Run one stream per (network, filter) at a time: the indexer does not coordinate processes, so a service with several
- * replicas provides the exclusivity itself, for example with a Postgres advisory lock.
+ * stream reads the head again on the `poll` schedule until it reaches the next slot, the schedule starting afresh after
+ * each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after
+ * the batch reaching it. With `retry`, a step (the signature paging or one group's transactions) failing with a
+ * transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same position; any other failure, or
+ * an exhausted schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock` after handling a batch and
+ * restart from the slot after it. Run one stream per (network, filter) at a time: the indexer does not coordinate
+ * processes, so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory
+ * lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"
+ * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
  * import { SolanaIndexer } from "@effect-blockchain/solana/SolanaIndexer"
  * import type { SolanaIndexerFilter } from "@effect-blockchain/solana/SolanaIndexer"
@@ -44,7 +47,9 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* SolanaIndexer
- *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1) }).pipe(
+ *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
+ *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
@@ -61,7 +66,7 @@ import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
-import type * as Schedule from "effect/Schedule"
+import * as Schedule from "effect/Schedule"
 import type * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
 import type { SolanaAddress } from "./SolanaAddress.ts"
@@ -129,7 +134,8 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
    * section.
    *
    * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
-   * - `pollInterval`: the wait once caught up, defaults to {@link DEFAULT_POLL_INTERVAL}.
+   * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
+   *   bounded schedule ends the stream when it is exhausted while still caught up.
    * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same position. Off by
    *   default: the first failure fails the stream.
    */
@@ -137,7 +143,8 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
     readonly filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
     readonly fromBlock: bigint
     readonly toBlock?: bigint | undefined
-    readonly pollInterval?: Duration.Input | undefined
+    // the schedule's output is ignored
+    readonly poll?: Schedule.Schedule<unknown> | undefined
     // the schedule's output is ignored
     readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
   }) => Stream.Stream<SolanaIndexerBatch, SolanaRpcError>
@@ -157,8 +164,8 @@ const COMMITMENT = "finalized"
 export const DEFAULT_MAX_BATCH_SIZE = 100
 
 /**
- * The default `pollInterval` of {@link SolanaIndexer.Service.streamTransactions}: the wait before reading the head
- * again once caught up.
+ * The default spacing of the `poll` schedule of {@link SolanaIndexer.Service.streamTransactions}: the head is
+ * read again every 10 seconds once caught up.
  *
  * @since 0.1.0
  * @category constants
@@ -260,13 +267,13 @@ export const layer = (options: {
           if (filter.fromBlock > filter.toBlock) return []
           return yield* fetchEach(yield* fetchSignatures(filter))
         }),
-        streamTransactions: ({ filter, fromBlock, pollInterval = DEFAULT_POLL_INTERVAL, retry, toBlock }) => {
+        streamTransactions: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
           // ends after the batch reaching `toBlock`
           const after = (end: bigint, cap: bigint, groups: Position["groups"]): Option.Option<Position> =>
             end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), cap, groups })
-          // one step: the transactions of the next pending group, or the signatures up to the confirmed head, or a
-          // sleep once caught up
+          // one step: the transactions of the next pending group, or the signatures up to the confirmed head once it
+          // reaches `next`, polled on `poll` (an exhausted `poll` ends the stream)
           const step = (position: Position): Effect.Effect<Step, SolanaRpcError> => {
             const { cap, groups, next } = position
             if (Arr.isReadonlyArrayNonEmpty(groups)) {
@@ -279,18 +286,21 @@ export const layer = (options: {
                 Effect.withSpan("SolanaIndexer.streamTransactions.fetchGroup")
               )
             }
-            return lastConfirmedBlock.pipe(Effect.flatMap((confirmed) => {
-              const end = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-              if (next > end) return Effect.as(Effect.sleep(pollInterval), [[], Option.some(position)] as const)
-              return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }).pipe(
-                Effect.map((signatures): Step =>
-                  Arr.isReadonlyArrayNonEmpty(signatures)
-                    ? [[], Option.some({ next, cap: end, groups: groupBySlot(signatures, maxBatchSize) })]
-                    : [[{ fromBlock: next, toBlock: end, transactions: [] }], after(end, end, [])]
-                ),
-                Effect.withSpan("SolanaIndexer.streamTransactions.fetchSignatures")
-              )
-            }))
+            return lastConfirmedBlock.pipe(
+              Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }),
+              Effect.flatMap((confirmed) => {
+                const end = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
+                if (next > end) return Effect.succeed([[], Option.none()] as const)
+                return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }).pipe(
+                  Effect.map((signatures): Step =>
+                    Arr.isReadonlyArrayNonEmpty(signatures)
+                      ? [[], Option.some({ next, cap: end, groups: groupBySlot(signatures, maxBatchSize) })]
+                      : [[{ fromBlock: next, toBlock: end, transactions: [] }], after(end, end, [])]
+                  ),
+                  Effect.withSpan("SolanaIndexer.streamTransactions.fetchSignatures")
+                )
+              })
+            )
           }
           return Stream.paginate(
             { next: fromBlock, cap: fromBlock, groups: [] } satisfies Position,

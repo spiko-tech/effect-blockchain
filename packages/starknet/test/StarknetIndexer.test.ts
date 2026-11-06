@@ -363,13 +363,13 @@ describe("StarknetIndexer.streamEvents", () => {
     )
   })
 
-  for (const pollInterval of [undefined, "1 minute"] as const) {
-    it.effect(`polls the head every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+  for (const poll of [undefined, Schedule.spaced("1 minute")]) {
+    it.effect(`polls the head every ${poll === undefined ? "10 seconds (default)" : "1 minute"} once caught up`, () =>
       Effect.gen(function*() {
-        const wait = pollInterval === undefined ? StarknetIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const wait = poll === undefined ? StarknetIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
         const { layer, state } = fakeRpc(FROM + BigInt(2))
         const batches = new Array<StarknetIndexer.StarknetIndexerBatch>()
-        const options = { filter: streamOptions.filter, fromBlock: FROM, pollInterval }
+        const options = { filter: streamOptions.filter, fromBlock: FROM, poll }
         const run = Effect.gen(function*() {
           yield* (yield* StarknetIndexer.StarknetIndexer).streamEvents(options).pipe(
             Stream.runForEach((batch) => Effect.sync(() => batches.push(batch)))
@@ -388,6 +388,70 @@ describe("StarknetIndexer.streamEvents", () => {
         expect(state.ranges).toHaveLength(4)
       }))
   }
+
+  it.effect("backs off on an exponential poll while idle and starts it afresh after a batch", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(2))
+      const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.exponential("1 second") }
+      yield* provideFake(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      expect(state.heads).toBe(2)
+      yield* TestClock.adjust("1 second")
+      expect(state.heads).toBe(3)
+      yield* TestClock.adjust("2 seconds")
+      expect(state.heads).toBe(4)
+      state.head = FROM + BigInt(5)
+      yield* TestClock.adjust("3999 millis")
+      expect(state.heads).toBe(4)
+      yield* TestClock.adjust("1 milli")
+      // the batch, then the next step's read: caught up again, the poll waits 1 second
+      expect(state.ranges).toHaveLength(2)
+      expect(state.heads).toBe(6)
+      yield* TestClock.adjust("1 second")
+      expect(state.heads).toBe(7)
+    }))
+
+  it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
+    const { layer, state } = fakeRpc(FROM + BigInt(5))
+    const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.recurs(0) }
+    return provideFake(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        expect(Exit.isSuccess(exit)).toBe(true)
+        expect(bounds(batches)).toStrictEqual(pinnedBatches.slice(0, 2))
+        expect(state.heads).toBe(3)
+      })
+    )
+  })
+
+  it.effect("retries a head failing with a transient reason while polling, with retry", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(2), new Map(), new Map([[3, new JsonRpc.Unavailable()]]))
+      const options = { ...streamOptions, toBlock: FROM + BigInt(5), retry: Schedule.recurs(1) }
+      const fiber = yield* provideFake(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+        Effect.forkChild
+      )
+      yield* TestClock.adjust(0)
+      state.head = FROM + BigInt(5)
+      yield* TestClock.adjust(StarknetIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(bounds(batches)).toStrictEqual(pinnedBatches.slice(0, 2))
+      expect(state.heads).toBe(4)
+    }))
+
+  it.effect("fails on a head failing while polling, without retry", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(FROM + BigInt(2), new Map(), new Map([[3, new JsonRpc.Unavailable()]]))
+      const fiber = yield* provideFake(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+        Effect.forkChild
+      )
+      yield* TestClock.adjust(0)
+      yield* TestClock.adjust(StarknetIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(batches).toHaveLength(1)
+      expect(state.heads).toBe(3)
+    }))
 
   it.effect("waits for toBlock to be confirmed", () =>
     Effect.gen(function*() {

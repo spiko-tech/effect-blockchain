@@ -311,6 +311,8 @@ const collect = (options: Parameters<SolanaIndexer.SolanaIndexer["Service"]["str
     return { batches, exit }
   })
 
+const slots = (state: { readonly calls: ReadonlyArray<string> }) => state.calls.filter((c) => c === "getSlot").length
+
 const allCalls = [
   "getSlot",
   "getSignaturesForAddress",
@@ -380,17 +382,17 @@ describe("SolanaIndexer.streamTransactions", () => {
       }
     }))
 
-  for (const pollInterval of [undefined, "1 minute"] as const) {
-    it.effect(`polls the head every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+  for (const poll of [undefined, Schedule.spaced("1 minute")]) {
+    it.effect(`polls the head every ${poll === undefined ? "10 seconds (default)" : "1 minute"} once caught up`, () =>
       Effect.gen(function*() {
-        const wait = pollInterval === undefined ? SolanaIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const wait = poll === undefined ? SolanaIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
         const { layer, state } = fakeRpc(BigInt(11))
         const batches = new Array<SolanaIndexer.SolanaIndexerBatch>()
         const run = Effect.gen(function*() {
           yield* (yield* SolanaIndexer.SolanaIndexer).streamTransactions({
             filter: streamOptions.filter,
             fromBlock: FROM,
-            pollInterval
+            poll
           }).pipe(Stream.runForEach((batch) => Effect.sync(() => batches.push(batch))))
         })
         yield* provide(run, layer).pipe(Effect.forkChild)
@@ -403,9 +405,68 @@ describe("SolanaIndexer.streamTransactions", () => {
         expect(bounds(batches)).toStrictEqual(pinnedBatches)
         yield* TestClock.adjust(Duration.times(wait, 3))
         expect(batches).toHaveLength(3)
-        expect(state.calls.filter((c) => c === "getSlot")).toHaveLength(7)
+        expect(slots(state)).toBe(7)
       }))
   }
+
+  it.effect("backs off on an exponential poll while idle and starts it afresh after a batch", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(BigInt(11))
+      const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.exponential("1 second") }
+      yield* provide(collect(options), layer).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      expect(slots(state)).toBe(2)
+      yield* TestClock.adjust("1 second")
+      expect(slots(state)).toBe(3)
+      yield* TestClock.adjust("2 seconds")
+      expect(slots(state)).toBe(4)
+      state.head = BigInt(15)
+      yield* TestClock.adjust("3999 millis")
+      expect(slots(state)).toBe(4)
+      yield* TestClock.adjust("1 milli")
+      // the batch, then the next step's read: caught up again, the poll waits 1 second
+      expect(state.calls.filter((c) => c === "getSignaturesForAddress")).toHaveLength(2)
+      expect(slots(state)).toBe(6)
+      yield* TestClock.adjust("1 second")
+      expect(slots(state)).toBe(7)
+    }))
+
+  it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
+    const { layer, state } = fakeRpc(BigInt(15))
+    const options = { filter: streamOptions.filter, fromBlock: FROM, poll: Schedule.recurs(0) }
+    return provide(collect(options), layer).pipe(Effect.map(({ batches, exit }) => {
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(bounds(batches)).toStrictEqual([[FROM, BigInt(11), 4], [BigInt(12), BigInt(15), 2]])
+      expect(slots(state)).toBe(2)
+    }))
+  })
+
+  it.effect("retries a head failing with a transient reason while polling, with retry", () =>
+    Effect.gen(function*() {
+      // call 8 is the second poll of the head, after the first batch's 6 calls and a first poll
+      const { layer, state } = fakeRpc(BigInt(11), new Map([[8, new JsonRpc.Unavailable()]]))
+      const options = { ...streamOptions, toBlock: BigInt(15), retry: Schedule.recurs(1) }
+      const fiber = yield* provide(collect(options), layer).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      state.head = BigInt(15)
+      yield* TestClock.adjust(SolanaIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(bounds(batches)).toStrictEqual([[FROM, BigInt(11), 4], [BigInt(12), BigInt(15), 2]])
+      expect(slots(state)).toBe(4)
+    }))
+
+  it.effect("fails on a head failing while polling, without retry", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(BigInt(11), new Map([[8, new JsonRpc.Unavailable()]]))
+      const fiber = yield* provide(collect(streamOptions), layer).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      yield* TestClock.adjust(SolanaIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(batches).toHaveLength(1)
+      expect(slots(state)).toBe(3)
+    }))
 
   it.effect("waits for toBlock to be confirmed", () =>
     Effect.gen(function*() {
