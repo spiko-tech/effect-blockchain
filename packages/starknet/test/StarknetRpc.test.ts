@@ -306,6 +306,72 @@ describe("StarknetRpc", () => {
       }
     }))
 
+  describe("getBlockWithTxHashes", () => {
+    const block = {
+      block_number: 10,
+      block_hash: baseEvent.block_hash,
+      parent_hash: "0x1",
+      timestamp: 1746611705,
+      status: "ACCEPTED_ON_L2",
+      transactions: [TX],
+      sequencer_address: "0x2"
+    }
+
+    it.effect("decodes a confirmed block and sends the block number by name", () => {
+      let params: Schema.Json = null
+      const { run } = setup({
+        a: {
+          starknet_blockNumber: head(20),
+          starknet_getBlockWithTxHashes: (p) => {
+            params = p
+            return { result: block }
+          }
+        }
+      })
+      return run((rpc) => rpc.getBlockWithTxHashes({ blockNumber: BigInt(10) })).pipe(Effect.map((decoded) => {
+        expect(params).toStrictEqual({ block_id: { block_number: 10 } })
+        expect(decoded).toStrictEqual({
+          blockNumber: BigInt(10),
+          blockHash: baseEvent.block_hash,
+          parentHash: "0x" + "0".repeat(63) + "1",
+          timestamp: BigInt(1746611705),
+          status: "ACCEPTED_ON_L2",
+          transactions: [TX]
+        })
+      }))
+    })
+
+    it.effect("returns Lagging on BLOCK_NOT_FOUND and below the head, without asking for the block", () =>
+      Effect.gen(function*() {
+        const notFound = setup({
+          a: {
+            starknet_blockNumber: head(20),
+            starknet_getBlockWithTxHashes: () => ({ error: { code: 24, message: "Block not found" } })
+          }
+        })
+        expect(yield* notFound.run((rpc) => Effect.flip(rpc.getBlockWithTxHashes({ blockNumber: BigInt(10) }))))
+          .toMatchObject({ reason: { _tag: "Lagging" }, code: 24, method: "starknet_getBlockWithTxHashes" })
+
+        const behind = setup({ a: { starknet_blockNumber: head(5) } })
+        expect(yield* behind.run((rpc) => Effect.flip(rpc.getBlockWithTxHashes({ blockNumber: BigInt(10) }))))
+          .toMatchObject({ reason: { _tag: "Lagging" }, method: "starknet_getBlockWithTxHashes" })
+        expect(behind.calls).not.toContain("a:starknet_getBlockWithTxHashes")
+      }))
+
+    it.effect("rejects a pre-confirmed block", () =>
+      Effect.gen(function*() {
+        // the v0.9 pre-confirmed shape: no block hash, parent hash or status
+        const { block_hash: _hash, parent_hash: _parent, status: _status, ...preConfirmed } = block
+        for (const bad of [preConfirmed, { ...block, status: "PRE_CONFIRMED" }]) {
+          const { run } = setup({
+            a: { starknet_blockNumber: head(20), starknet_getBlockWithTxHashes: () => ({ result: bad }) }
+          })
+          expect((yield* run((rpc) => Effect.flip(rpc.getBlockWithTxHashes({ blockNumber: BigInt(10) })))).reason._tag)
+            .toBe("InvalidResponse")
+        }
+      }))
+  })
+
   it.effect("makes no call for an empty range", () => {
     const { calls, run } = setup({ a: {} })
     return run((rpc) => rpc.getEvents({ ...filter, fromBlock: BigInt(21) })).pipe(Effect.map((page) => {

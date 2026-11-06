@@ -2,6 +2,7 @@ import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { StarknetAddress } from "../StarknetAddress.ts"
+import { StarknetBlock } from "../StarknetBlock.ts"
 import { StarknetEvent } from "../StarknetEvent.ts"
 import { StarknetTransactionHash } from "../StarknetTransactionHash.ts"
 import { BigIntFromInt } from "./BigIntFromInt.ts"
@@ -41,6 +42,14 @@ export const chainId = make({ name: "starknet_chainId", params: NoParams, result
 
 /** @internal */
 export const blockNumber = make({ name: "starknet_blockNumber", params: NoParams, result: BigIntFromInt })
+
+/** @internal */
+export const getBlockWithTxHashes = make({
+  name: "starknet_getBlockWithTxHashes",
+  params: Schema.Struct({ block_id: BlockId }),
+  // a pre-confirmed block has no block hash and does not decode
+  result: StarknetBlock
+})
 
 /** @internal */
 export const getEvents = make({

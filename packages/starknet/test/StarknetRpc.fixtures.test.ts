@@ -81,6 +81,21 @@ describe("StarknetRpc fixtures", () => {
         expect(receipt.events[0]).toMatchObject({ fromAddress: EUTBL, data: [felt("0x5dcf7644f"), felt("0x0")] })
       })))
 
+    it.effect(`fixture: ${provider} getBlockWithTxHashes`, () =>
+      replay([{ name: provider, cases: [...network, "getBlockWithTxHashes"] }])((rpc) =>
+        rpc.getBlockWithTxHashes({ blockNumber: BigInt(1380308) })
+      ).pipe(Effect.map((block) => {
+        expect(block).toMatchObject({
+          blockNumber: BigInt(1380308),
+          blockHash: felt("0x67e8337f3fdbb26df8129ba3e3d6e47e790c3687b9a81ab4aed8b6e9711b584"),
+          parentHash: felt("0x119939dd0bfabe7f8e15020dc780da3a930fd2bf628ce67c7bb0aa4686d95bf"),
+          timestamp: BigInt(1746611705),
+          status: "ACCEPTED_ON_L1"
+        })
+        expect(block.transactions).toHaveLength(90)
+        expect(block.transactions).toContain(RECEIPT_TX)
+      })))
+
     // the provider answers a `to_block` beyond its head with events, no BLOCK_NOT_FOUND (see the recorded
     // `getEvents-beyond-head`): the head guard fails Lagging from the real head before sending it
     it.effect(`fixture: ${provider} getEvents beyond head`, () =>
