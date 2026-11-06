@@ -354,6 +354,8 @@ const fakeRpc = (
     StellarRpc.StellarRpc.of({
       network: "Stellar",
       getNetwork: Effect.die("unused"),
+      getLedgers: () => Effect.die("unused"),
+      getAccount: () => Effect.die("unused"),
       getLatestLedger: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
         return reason === undefined

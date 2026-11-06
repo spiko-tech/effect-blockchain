@@ -52,3 +52,31 @@ export const getEvents = make({
   }),
   result: Schema.Struct({ events: Schema.Array(StellarContractEvent), cursor: Cursor, latestLedger: LedgerFromNumber })
 })
+
+/** @internal */
+export const getLedgers = make({
+  name: "getLedgers",
+  params: Schema.Struct({
+    startLedger: LedgerFromNumber,
+    pagination: Schema.Struct({ limit: Schema.optionalKey(Schema.Int) })
+  }),
+  result: Schema.Struct({
+    ledgers: Schema.Array(
+      Schema.Struct({ sequence: LedgerFromNumber, closeTime: Schema.FiniteFromString, metadataXdr: Schema.String })
+        .pipe(
+          Schema.encodeKeys({ closeTime: "ledgerCloseTime" })
+        )
+    ),
+    latestLedger: LedgerFromNumber
+  })
+})
+
+/** @internal */
+export const getLedgerEntries = make({
+  name: "getLedgerEntries",
+  params: Schema.Struct({ keys: Schema.Array(Schema.String) }),
+  result: Schema.Struct({
+    entries: Schema.Array(Schema.Struct({ xdr: Schema.String, lastModifiedLedgerSeq: LedgerFromNumber })),
+    latestLedger: LedgerFromNumber
+  })
+})

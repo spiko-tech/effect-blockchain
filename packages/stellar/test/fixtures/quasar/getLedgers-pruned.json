@@ -1,0 +1,16 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-06",
+  "request": {
+    "method": "getLedgers",
+    "params": {
+      "startLedger": 55000004,
+      "pagination": {
+        "limit": 1
+      }
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"start ledger (55000004) must be between the oldest ledger: 65217956 and the latest ledger: 65338915 for this rpc instance\"}}"
+}

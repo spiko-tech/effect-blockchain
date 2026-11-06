@@ -1,6 +1,8 @@
 /**
  * Soroban contract event indexing on top of {@link StellarRpc}: the last confirmed ledger, the events of a set of
- * contracts over a ledger range, and a stream of them following the confirmed head.
+ * contracts over a ledger range, and a stream of them following the confirmed head. Also the native (XLM) balance of
+ * an account at a ledger and sampled every `step` ledgers, from the account entry at the head and the ledger metas of
+ * `getLedgers` (Stellar RPC keeps no past balances).
  *
  * A range is split into ranges of at most `maxBlockRange` ledgers, each paged with `getEvents` until its cursor is
  * `undefined`. `contractIds` is split into groups of 5, the RPC limit per filter (`MaxContractIDsLimit` in
@@ -30,6 +32,25 @@
  * })
  * ```
  *
+ * @example
+ * ```ts
+ * import type { StellarAccountAddress } from "@effect-blockchain/stellar/StellarAddress"
+ * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
+ * import * as Effect from "effect/Effect"
+ * import * as Stream from "effect/Stream"
+ *
+ * declare const address: StellarAccountAddress
+ * declare const save: (ledger: bigint, stroops: bigint) => Effect.Effect<void>
+ *
+ * // the balance of `address` every 720 ledgers (about an hour) from ledger 65000000 on
+ * const balances = Effect.gen(function*() {
+ *   const indexer = yield* StellarIndexer
+ *   yield* indexer.streamNativeBalance({ address, fromBlock: BigInt(65000000), step: 720 }).pipe(
+ *     Stream.runForEach(({ balance, block }) => save(block, balance))
+ *   )
+ * })
+ * ```
+ *
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
@@ -44,6 +65,8 @@ import * as Option from "effect/Option"
 import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
+import { accountChange } from "./internal/accountChange.ts"
+import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
 import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
@@ -105,6 +128,36 @@ export interface StellarIndexerStreamOptions {
 }
 
 /**
+ * The native balance of an account at the end of a ledger, in stroops, emitted by
+ * {@link StellarIndexer.Service.streamNativeBalance}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarNativeBalance {
+  readonly block: bigint
+  readonly balance: bigint
+}
+
+/**
+ * The {@link StellarIndexer.Service.streamNativeBalance} options: a sample at `fromBlock`, `fromBlock + step`,
+ * `fromBlock + 2 * step`... up to `toBlock`. `poll` and `retry` work as in {@link StellarIndexerStreamOptions}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarIndexerNativeBalanceOptions {
+  readonly address: StellarAccountAddress
+  readonly fromBlock: bigint
+  /** The stream ends after the last sample not above it, and is empty when `fromBlock > toBlock`. */
+  readonly toBlock?: bigint | undefined
+  /** Ledgers between two samples, a positive safe integer. */
+  readonly step: number
+  readonly poll?: Schedule.Schedule<unknown> | undefined
+  readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -123,6 +176,23 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
    * following the confirmed head.
    */
   readonly streamEvents: (options: StellarIndexerStreamOptions) => Stream.Stream<StellarIndexerBatch, StellarRpcError>
+  /**
+   * The native balance of `address` at the end of `block`, in stroops: the account entry at the head when it has not
+   * changed since `block`, else the balance before its first change after `block`, read ledger by ledger with
+   * `getLedgers`. An account missing at the head reads `0`, even if it was merged after `block`.
+   */
+  readonly fetchNativeBalance: (
+    options: { readonly address: StellarAccountAddress; readonly block: bigint }
+  ) => Effect.Effect<bigint, StellarRpcError>
+  /**
+   * The native balance of `address` at every `step` ledgers from `fromBlock` on, following the confirmed head. Each
+   * sample reads the account entry at the head, unless an earlier read already covers it. When the account changed
+   * since the sample, every ledger since the previous sample is read with `getLedgers` (1 to 3 MB each on mainnet):
+   * `step` does not reduce these history reads.
+   */
+  readonly streamNativeBalance: (
+    options: StellarIndexerNativeBalanceOptions
+  ) => Stream.Stream<StellarNativeBalance, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarIndexer") {}
 
 /**
@@ -136,6 +206,22 @@ export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 const MAX_CONTRACT_IDS = 5
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
+
+// ledgers per `getLedgers` page: each ledger meta is 1 to 3 MB on mainnet
+const LEDGERS_PAGE = 10
+
+// a balance that holds from the ledger it was read at until `until`
+interface KnownBalance {
+  readonly balance: bigint
+  readonly until: bigint
+}
+
+// the next sample, the confirmed head last read, and the balance read at the previous sample
+interface BalancePosition {
+  readonly block: bigint
+  readonly head: bigint
+  readonly known: Option.Option<KnownBalance>
+}
 
 // the confirmed ledgers [next, head] not indexed yet, empty once the stream reaches the head it last read
 interface StreamPosition {
@@ -203,9 +289,103 @@ export const layer = (options: {
           }).pipe(Effect.map((found) => groups.length > 1 ? Arr.sort(Arr.flatten(found), byId) : Arr.flatten(found)))
         }).pipe(Effect.map((ranges) => Arr.flatten(ranges).filter((event) => event.inSuccessfulContractCall)))
       })
+
+      // the changes of `address` in the ledgers [from, to], in chain order
+      const changes = (address: StellarAccountAddress, from: bigint, to: bigint) =>
+        Stream.paginate(from, (start) =>
+          rpc.getLedgers({
+            startLedger: start,
+            limit: Number(BigInt_.min(BigInt(LEDGERS_PAGE), to - start + BigInt(1)))
+          }).pipe(Effect.map((ledgers) => {
+            const next = start + BigInt(ledgers.length)
+            return [
+              ledgers.flatMap((ledger) =>
+                Option.toArray(Option.map(accountChange(ledger.metadataXdr, address), (change) => ({
+                  ...change,
+                  ledger: ledger.sequence
+                })))
+              ),
+              next <= to ? Option.some(next) : Option.none()
+            ] as const
+          })))
+
+      const balanceAt = (address: StellarAccountAddress, block: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
+        Effect.flatMap(rpc.getAccount({ address, minBlock: block }), ({ account, latestLedger }) => {
+          if (account === undefined) return Effect.succeed({ balance: BigInt(0), until: latestLedger })
+          if (account.lastModifiedLedger <= block) {
+            return Effect.succeed({ balance: account.balance, until: latestLedger })
+          }
+          return Stream.runHead(changes(address, block + BigInt(1), account.lastModifiedLedger)).pipe(
+            Effect.map(Option.match({
+              onNone: () => ({ balance: account.balance, until: latestLedger }),
+              onSome: (first) => ({ balance: first.before, until: first.ledger - BigInt(1) })
+            }))
+          )
+        })
+
+      // the balance at `block` from the one known at an earlier sample
+      const advance = (
+        address: StellarAccountAddress,
+        block: bigint,
+        known: KnownBalance
+      ): Effect.Effect<KnownBalance, StellarRpcError> =>
+        block <= known.until ? Effect.succeed(known) : Effect.flatMap(
+          rpc.getAccount({ address, minBlock: block }),
+          ({ account, latestLedger }) =>
+            account !== undefined && account.lastModifiedLedger <= block
+              ? Effect.succeed({ balance: account.balance, until: latestLedger })
+              : Stream.runLast(changes(address, known.until + BigInt(1), block)).pipe(Effect.map((last) => ({
+                balance: Option.match(last, { onNone: () => known.balance, onSome: (change) => change.after }),
+                until: block
+              })))
+        )
+
       return StellarIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
+        fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")(({ address, block }) =>
+          Effect.map(balanceAt(address, block), (known) => known.balance)
+        ),
+        streamNativeBalance: (
+          { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
+        ) => {
+          if (!Number.isSafeInteger(step) || step < 1) {
+            return Stream.die(new RangeError(`step must be a positive integer, got ${step}`))
+          }
+          if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
+          const stride = BigInt(step)
+          const sample = (
+            { block, head, known }: BalancePosition
+          ): Effect.Effect<
+            readonly [ReadonlyArray<StellarNativeBalance>, Option.Option<BalancePosition>],
+            StellarRpcError
+          > =>
+            (block <= head
+              ? Effect.succeed(head)
+              : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= block })))
+              .pipe(Effect.flatMap((confirmed) =>
+                Option.match(known, {
+                  onNone: () => balanceAt(address, block),
+                  onSome: (known) => advance(address, block, known)
+                }).pipe(Effect.map((next) => [
+                  [{ block, balance: next.balance }],
+                  toBlock !== undefined && block + stride > toBlock
+                    ? Option.none()
+                    : Option.some({ block: block + stride, head: confirmed, known: Option.some(next) })
+                ]))
+              ))
+          return Stream.paginate(
+            // a head below `fromBlock`: the first sample reads it
+            { block: fromBlock, head: fromBlock - BigInt(1), known: Option.none() },
+            retry === undefined
+              ? sample
+              : (position) =>
+                Effect.retry(sample(position), {
+                  schedule: retry,
+                  while: (error) => JsonRpc.isTransient(error.reason)
+                })
+          )
+        },
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
           // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
