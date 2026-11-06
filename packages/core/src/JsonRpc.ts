@@ -292,19 +292,19 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
  * @since 0.1.0
  * @category metrics
  */
-export const requests = Metric.counter("effect_blockchain_rpc_requests_total", {
+export const requestsMetric = Metric.counter("effect_blockchain_rpc_requests_total", {
   description: "JSON-RPC requests per endpoint attempt, by network, endpoint, method and outcome",
   incremental: true
 })
 
 /**
- * `effect_blockchain_rpc_request_duration`: the duration of each request counted by `requests`, in milliseconds,
+ * `effect_blockchain_rpc_request_duration`: the duration of each request counted by `requestsMetric`, in milliseconds,
  * HTTP retries included, with the same attributes.
  *
  * @since 0.1.0
  * @category metrics
  */
-export const requestDuration = Metric.timer("effect_blockchain_rpc_request_duration", {
+export const requestDurationMetric = Metric.timer("effect_blockchain_rpc_request_duration", {
   description: "JSON-RPC request duration in milliseconds, by network, endpoint, method and outcome"
 })
 
@@ -315,7 +315,7 @@ export const requestDuration = Metric.timer("effect_blockchain_rpc_request_durat
  * @since 0.1.0
  * @category metrics
  */
-export const fallbacks = Metric.counter("effect_blockchain_rpc_fallbacks_total", {
+export const fallbacksMetric = Metric.counter("effect_blockchain_rpc_fallbacks_total", {
   description: "JSON-RPC fallbacks to the next endpoint, by network, failed endpoint, method and reason",
   incremental: true
 })
@@ -424,19 +424,22 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   const fail = (endpoint: Endpoint, method: string, reason: Reason, cause: Error) =>
     makeError({ reason, method, endpoint: endpoint.name, cause })
 
-  // records `requests` and `requestDuration` when `request` succeeds or fails
-  const observe = <A>(endpoint: Endpoint, method: string, request: Effect.Effect<A, E>) =>
+  // records `requestsMetric` and `requestDurationMetric` when `request` succeeds or fails
+  const recordRequestMetrics = <A>(endpoint: Endpoint, method: string, request: Effect.Effect<A, E>) =>
     Effect.flatMap(Clock.currentTimeMillis, (start) => {
-      const record = (outcome: string) =>
+      const recordOutcome = (outcome: string) =>
         Effect.flatMap(Clock.currentTimeMillis, (end) => {
           const attributes = { network, endpoint: endpoint.name, method, outcome }
-          return Metric.update(Metric.withAttributes(requests, attributes), 1).pipe(
+          return Metric.update(Metric.withAttributes(requestsMetric, attributes), 1).pipe(
             Effect.andThen(
-              Metric.update(Metric.withAttributes(requestDuration, attributes), Duration.millis(end - start))
+              Metric.update(Metric.withAttributes(requestDurationMetric, attributes), Duration.millis(end - start))
             )
           )
         })
-      return request.pipe(Effect.tap(() => record("success")), Effect.tapError((error) => record(error.reason._tag)))
+      return request.pipe(
+        Effect.tap(() => recordOutcome("success")),
+        Effect.tapError((error) => recordOutcome(error.reason._tag))
+      )
     })
 
   const send = <Params, A>(endpoint: Endpoint, method: Method<Params, A, J>, params: Params) =>
@@ -465,7 +468,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
           )
         ),
         Effect.map((reply) => reply.result),
-        (request) => observe(endpoint, method.name, request)
+        (request) => recordRequestMetrics(endpoint, method.name, request)
       )
     }).pipe(
       Effect.withSpan(`${options.spanPrefix}.${method.name}`, {
@@ -496,7 +499,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
         const tried = [...errors, last]
         if (last.reason._tag !== "WrongNetwork" && index + 1 < endpoints.length) {
           const attributes = { network, endpoint: last.endpoint, method: last.method, outcome: last.reason._tag }
-          return Metric.update(Metric.withAttributes(fallbacks, attributes), 1).pipe(
+          return Metric.update(Metric.withAttributes(fallbacksMetric, attributes), 1).pipe(
             Effect.andThen(from(index + 1, tried))
           )
         }
