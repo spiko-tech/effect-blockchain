@@ -76,9 +76,16 @@ describe("EvmRpc fixtures", () => {
         Effect.flip(rpc.getLogs({ ...filter, topics: [[EvmHexData.make("0xab")]] }))
       ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602 }))))
 
+    // HTTP 401: Alchemy's JSON-RPC -32600 body is Rejected, Infura's text body is Unavailable
     it.effect(`fixture: ${provider} invalid-key`, () =>
       setup([{ name: provider, cases: ["invalid-key"] }]).run((rpc) => Effect.flip(rpc.chainId)).pipe(
-        Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401 }))
+        Effect.map((error) =>
+          expect(error).toMatchObject(
+            provider === "alchemy"
+              ? { reason: { _tag: "Rejected" }, code: -32600 }
+              : { reason: { _tag: "Unavailable", status: 401 }, code: 401 }
+          )
+        )
       ))
 
     // the provider's own reply (Alchemy -32602 "block range extends beyond current head block", Infura an empty `[]`)
@@ -96,11 +103,11 @@ describe("EvmRpc fixtures", () => {
   }
 
   // Alchemy answers HTTP 400 (-32600 "Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block
-  // range..."): the status makes it Unavailable and the call falls back
+  // range..."): Rejected by its code, a limit another endpoint may not have, so the call falls back without retries
   it.effect("fixture: alchemy getLogs-range-too-large", () =>
     setup([{ name: "alchemy", cases: ["chainId", "blockNumber", "getLogs-range-too-large"] }]).run((rpc) =>
       Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))
-    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 400 }))))
+    ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32600 }))))
 
   // Infura answers HTTP 200 -32602 "range 10009 exceeds limit of 10000", a plan limit another endpoint may not have:
   // Rejected falls back. The replay matches on params and only the wide range has recorded refusals, so Alchemy's
@@ -112,7 +119,7 @@ describe("EvmRpc fixtures", () => {
     ])
     return run((rpc) => Effect.flip(rpc.getLogs({ ...filter, fromBlock: TO - BigInt(10009) }))).pipe(
       Effect.map((error) => {
-        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 400, endpoint: "alchemy" })
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32600, endpoint: "alchemy" })
         expect(error.cause).toMatchObject({
           errors: [{ reason: { _tag: "Rejected" }, code: -32602, endpoint: "infura" }, {}]
         })

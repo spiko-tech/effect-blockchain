@@ -7,6 +7,9 @@
  * Before its first call, each endpoint is checked to serve the configured network, once: a mismatch is kept, a failed
  * check is not.
  *
+ * A JSON-RPC error reply is classified by its code through the chain's code table, whatever the HTTP status (some
+ * providers answer HTTP 400 with one); any other non-2xx reply is `Unavailable` with its status.
+ *
  * Each chain keeps its own error class, code table, network check, methods and their checks; the engine only builds
  * errors through `makeError`.
  *
@@ -40,8 +43,8 @@ import * as Schema from "effect/Schema"
 import * as SynchronizedRef from "effect/SynchronizedRef"
 
 /**
- * The endpoint could not answer: transport, attempt timeout, HTTP error status or an `Unavailable` JSON-RPC code,
- * after the retries. `status` is the HTTP status when there is one.
+ * The endpoint could not answer: transport, attempt timeout, HTTP error status without a JSON-RPC error reply or an
+ * `Unavailable` JSON-RPC code, after the retries. `status` is the HTTP status when it is not 2xx.
  *
  * @since 0.1.0
  * @category reasons
@@ -103,11 +106,11 @@ export class WrongNetwork extends Schema.TaggedError<WrongNetwork>()("WrongNetwo
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
- * | `Unavailable` | transport, attempt timeout, HTTP error status or an `Unavailable` JSON-RPC code, after the retries | yes |
+ * | `Unavailable` | transport, attempt timeout, HTTP error status without a JSON-RPC error reply or an `Unavailable` JSON-RPC code, after the retries | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
  * | `Lagging` | the endpoint is behind the requested block | yes |
  * | `Pruned` | the endpoint lacks the requested history | yes |
- * | `Rejected` | any other JSON-RPC error, or params that do not encode. Not retried, as the same endpoint would answer the same, but providers disagree on limits (e.g. a block range): another may answer | yes |
+ * | `Rejected` | any other JSON-RPC error, whatever the HTTP status, or params that do not encode. Not retried, as the same endpoint would answer the same, but providers disagree on limits (e.g. a block range): another may answer | yes |
  * | `WrongNetwork` | the endpoint does not serve the configured network | no |
  *
  * Each reason is a tagged error, matched with `Effect.catchReason` or `Effect.catchReasons`:
@@ -227,8 +230,10 @@ export type Send<E, J = Schema.Json> = <Params, A>(method: Method<Params, A, J>,
  *   endpoint at once.
  * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
  *   408/429/500/502/503/504 and the `Unavailable` codes are retried with an exponential backoff from `retryDelay`
- *   (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status is not retried.
- * - `codes` maps JSON-RPC error codes to a reason tag, any other code is `Rejected`.
+ *   (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status is not retried, unless its body is
+ *   a JSON-RPC error with an `Unavailable` code.
+ * - `codes` maps JSON-RPC error codes to a reason tag, any other code is `Rejected`, whatever the HTTP status of the
+ *   reply. The code is the error's `code`, else the HTTP status of a non-2xx reply.
  * - `parseBody` parses a reply body, default `JSON.parse` (an empty body is `null`).
  * - `checkNetwork` asks `endpoint` for its network and fails `WrongNetwork` on a mismatch.
  * - `makeError` builds the chain's error. `E` is inferred from it alone, so annotate its parameter:
@@ -338,10 +343,13 @@ class AttemptTimeout extends Data.TaggedError("AttemptTimeout")<{ readonly timeo
 
 type SendError = HttpClientError.HttpClientError | AttemptTimeout | JsonRpcError
 
-// HttpClientError messages and causes can carry the request URL: keep the reason and status only
+// HttpClientError messages and causes can carry the request URL: keep the reason, status and JSON-RPC error only
 const withoutUrl = (error: SendError): Error =>
   HttpClientError.isHttpClientError(error)
-    ? new Error(`${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`)
+    ? new Error(
+      `${error.reason._tag}${error.response === undefined ? "" : ` ${error.response.status}`}`,
+      error.reason.cause instanceof JsonRpcError ? { cause: error.reason.cause } : undefined
+    )
     : error
 
 /**
@@ -368,6 +376,12 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
           })
       }))
 
+  const jsonRpcErrorOf = (json: J) =>
+    Option.map(
+      Schema.decodeUnknownOption(ErrorReply)(json),
+      ({ error }) => new JsonRpcError({ code: Number(error.code), message: error.message })
+    )
+
   const classify = (error: SendError): { readonly reason: Reason; readonly code?: number | undefined } => {
     if (error instanceof JsonRpcError) {
       return { reason: new fromCode[codes.get(error.code) ?? "Rejected"](), code: error.code }
@@ -376,6 +390,14 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
       switch (error.reason._tag) {
         case "StatusCodeError": {
           const status = error.reason.response.status
+          const cause = error.reason.cause
+          if (cause instanceof JsonRpcError) {
+            const tag = codes.get(cause.code) ?? "Rejected"
+            return {
+              reason: tag === "Unavailable" ? new Unavailable({ status }) : new fromCode[tag](),
+              code: cause.code
+            }
+          }
           return { reason: new Unavailable({ status }), code: status }
         }
         case "DecodeError":
@@ -387,16 +409,28 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   }
 
   const client = (yield* HttpClient.HttpClient).pipe(
-    HttpClient.filterStatusOk,
-    // a JSON-RPC error comes with HTTP 200: lift it into the error channel so that it can be retried
     HttpClient.transformResponse((response) =>
       response.pipe(
         Effect.tap((response) =>
-          Effect.flatMap(bodyOf(response), (json) =>
-            Option.match(Schema.decodeUnknownOption(ErrorReply)(json), {
-              onNone: () => Effect.void,
-              onSome: ({ error }) => Effect.fail(new JsonRpcError({ code: Number(error.code), message: error.message }))
-            }))
+          response.status >= 200 && response.status < 300
+            // a JSON-RPC error in a 2xx reply: lift it into the error channel so that it can be retried
+            ? Effect.flatMap(
+              bodyOf(response),
+              (json) => Option.match(jsonRpcErrorOf(json), { onNone: () => Effect.void, onSome: Effect.fail })
+            )
+            // any other status: a status error, which `retryTransient` reads (transient statuses, `Retry-After`),
+            // with the JSON-RPC error of its body, if any, as its cause
+            : Effect.flatMap(Effect.option(bodyOf(response)), (json) =>
+              Effect.fail(
+                new HttpClientError.HttpClientError({
+                  reason: new HttpClientError.StatusCodeError({
+                    request: response.request,
+                    response,
+                    cause: Option.getOrUndefined(Option.flatMap(json, jsonRpcErrorOf)),
+                    description: "non 2xx status code"
+                  })
+                })
+              ))
         ),
         Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(new AttemptTimeout({ timeout })) })
       )
@@ -404,7 +438,12 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     HttpClient.retryTransient({
       retryOn: "errors-only",
       // the `Unavailable` codes: the endpoint is struggling, retry then fall back
-      while: (error) => error instanceof JsonRpcError && codes.get(error.code) === "Unavailable",
+      while: (error) => {
+        const cause = HttpClientError.isHttpClientError(error) && error.reason._tag === "StatusCodeError"
+          ? error.reason.cause
+          : error
+        return cause instanceof JsonRpcError && codes.get(cause.code) === "Unavailable"
+      },
       schedule: Schedule.exponential(options.retryDelay ?? Duration.millis(500)).pipe(Schedule.jittered),
       times: options.retries ?? 3
     })
