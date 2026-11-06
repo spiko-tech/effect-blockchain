@@ -3,8 +3,8 @@
  *
  * @since 0.1.0
  */
-import * as Schema from "effect/Schema"
 import { BigIntFromInt } from "@effect-blockchain/core/JsonRpc"
+import * as Schema from "effect/Schema"
 import { PaddedFelt } from "./internal/PaddedFelt.ts"
 import { StarknetAddress } from "./StarknetAddress.ts"
 import { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
