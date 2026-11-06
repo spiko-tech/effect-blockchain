@@ -117,7 +117,9 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
    * The events matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed blocks, following
    * the confirmed head.
    */
-  readonly streamEvents: (options: StarknetIndexerStreamOptions) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
+  readonly streamEvents: (
+    options: StarknetIndexerStreamOptions
+  ) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetIndexer") {}
 
 /**
