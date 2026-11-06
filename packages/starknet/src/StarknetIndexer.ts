@@ -29,6 +29,29 @@
  * })
  * ```
  *
+ * The STRK balance of an address, in fri, is read at one block or sampled every `step` blocks:
+ *
+ * @example
+ * ```ts
+ * import type { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
+ * import { StarknetIndexer } from "@effect-blockchain/starknet/StarknetIndexer"
+ * import * as Effect from "effect/Effect"
+ * import * as Stream from "effect/Stream"
+ *
+ * declare const address: StarknetAddress
+ *
+ * // the balance every 1000 blocks from block 1000000 to 1010000
+ * const balances = Effect.gen(function*() {
+ *   const indexer = yield* StarknetIndexer
+ *   return yield* indexer.streamNativeBalance({
+ *     address,
+ *     fromBlock: BigInt(1_000_000),
+ *     toBlock: BigInt(1_010_000),
+ *     step: 1000
+ *   }).pipe(Stream.runCollect)
+ * })
+ * ```
+ *
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
@@ -42,6 +65,7 @@ import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
+import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
 import type { StarknetEventsCursor, StarknetEventsFilter, StarknetRpcError } from "./StarknetRpc.ts"
@@ -102,6 +126,35 @@ export interface StarknetIndexerStreamOptions {
 }
 
 /**
+ * The STRK balance of an address in fri at the end of `block`, emitted by
+ * {@link StarknetIndexer.Service.streamNativeBalance}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StarknetNativeBalance {
+  readonly block: bigint
+  readonly balance: bigint
+}
+
+/**
+ * The {@link StarknetIndexer.Service.streamNativeBalance} options: one sample every `step` blocks from `fromBlock`.
+ * `step` is a positive integer, `poll` and `retry` behave as in {@link StarknetIndexerStreamOptions}.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StarknetIndexerNativeBalanceOptions {
+  readonly address: StarknetAddress
+  readonly fromBlock: bigint
+  /** The stream ends after the last sample at or below it, and is empty when `fromBlock > toBlock`. */
+  readonly toBlock?: bigint | undefined
+  readonly step: number
+  readonly poll?: Schedule.Schedule<unknown> | undefined
+  readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -120,6 +173,17 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
   readonly streamEvents: (
     options: StarknetIndexerStreamOptions
   ) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
+  /** The STRK balance of `address` in fri at the end of `block`. A `block` above `lastConfirmedBlock` is accepted. */
+  readonly fetchNativeBalance: (
+    options: { readonly address: StarknetAddress; readonly block: bigint }
+  ) => Effect.Effect<bigint, StarknetRpcError>
+  /**
+   * The STRK balance of `address` at `fromBlock`, `fromBlock + step`, `fromBlock + 2 * step`... one sample per step
+   * even when unchanged, following the confirmed head.
+   */
+  readonly streamNativeBalance: (
+    options: StarknetIndexerNativeBalanceOptions
+  ) => Stream.Stream<StarknetNativeBalance, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetIndexer") {}
 
 /**
@@ -191,38 +255,71 @@ export const layer = (options: {
           }
         ).pipe(Effect.map(Arr.flatten))
       )
+      // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
+      const confirmedFor = (next: bigint, head: bigint, poll: Schedule.Schedule<unknown>) =>
+        next <= head
+          ? Effect.succeed(head)
+          : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }))
+      const retrying = <A, S>(
+        step: (state: S) => Effect.Effect<A, StarknetRpcError>,
+        retry: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+      ) =>
+        retry === undefined
+          ? step
+          : (state: S) =>
+            Effect.retry(step(state), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+      const fetchNativeBalance = Effect.fn("StarknetIndexer.fetchNativeBalance")(
+        ({ address, block }: { readonly address: StarknetAddress; readonly block: bigint }) =>
+          rpc.getBalance({ address, blockNumber: block })
+      )
       return StarknetIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
+        fetchNativeBalance,
+        streamNativeBalance: (
+          { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
+        ) => {
+          if (!Number.isSafeInteger(step) || step < 1) {
+            return Stream.die(new RangeError(`step must be a positive integer, got ${step}`))
+          }
+          if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
+          const size = BigInt(step)
+          const sample = (
+            { head, next }: StreamPosition
+          ): Effect.Effect<
+            readonly [ReadonlyArray<StarknetNativeBalance>, Option.Option<StreamPosition>],
+            StarknetRpcError
+          > =>
+            confirmedFor(next, head, poll).pipe(Effect.flatMap((confirmed) => {
+              if (next > confirmed) return Effect.succeed([[], Option.none()])
+              return fetchNativeBalance({ address, block: next }).pipe(Effect.map((balance) => [
+                [{ block: next, balance }],
+                toBlock !== undefined && next + size > toBlock
+                  ? Option.none()
+                  : Option.some({ next: next + size, head: confirmed })
+              ]))
+            }))
+          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, retrying(sample, retry))
+        },
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
           const step = (
             { head, next }: StreamPosition
           ): Effect.Effect<
             readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<StreamPosition>],
             StarknetRpcError
           > =>
-            (next <= head
-              ? Effect.succeed(head)
-              : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
-              .pipe(Effect.flatMap((confirmed) => {
-                const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-                if (next > cap) return Effect.succeed([[], Option.none()])
-                const end = BigInt_.min(next + size - BigInt(1), cap)
-                return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
-                  [{ fromBlock: next, toBlock: end, events }],
-                  end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), head: confirmed })
-                ]))
-              }))
-          return Stream.paginate(
-            // a head below `fromBlock`: the first step reads it
-            { next: fromBlock, head: fromBlock - BigInt(1) },
-            retry === undefined
-              ? step
-              : (remaining) =>
-                Effect.retry(step(remaining), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
-          )
+            confirmedFor(next, head, poll).pipe(Effect.flatMap((confirmed) => {
+              const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
+              if (next > cap) return Effect.succeed([[], Option.none()])
+              const end = BigInt_.min(next + size - BigInt(1), cap)
+              return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
+                [{ fromBlock: next, toBlock: end, events }],
+                end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), head: confirmed })
+              ]))
+            }))
+          // a head below `fromBlock`: the first step reads it
+          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, retrying(step, retry))
         }
       })
     })

@@ -173,6 +173,23 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
    * out-of-filter event fails with `InvalidResponse`, and an empty range returns no events.
    */
   readonly getEvents: (filter: StarknetEventsFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
+  /**
+   * `starknet_call`, the raw felts a view function returns at the end of `blockNumber`, only answered by an endpoint
+   * whose head has reached `blockNumber`.
+   */
+  readonly call: (options: {
+    readonly contractAddress: StarknetAddress
+    readonly entryPointSelector: string
+    readonly calldata: ReadonlyArray<string>
+    readonly blockNumber: bigint
+  }) => Effect.Effect<ReadonlyArray<string>, StarknetRpcError>
+  /**
+   * The STRK balance of `address` in fri at the end of `blockNumber`: `balanceOf` on
+   * {@link StarknetNetwork.strkToken}. A reply that is not one u256 fails with `InvalidResponse`.
+   */
+  readonly getBalance: (
+    options: { readonly address: StarknetAddress; readonly blockNumber: bigint }
+  ) => Effect.Effect<bigint, StarknetRpcError>
   /** `starknet_getTransactionReceipt`. A pre-confirmed receipt fails with `InvalidResponse`. */
   readonly getTransactionReceipt: (
     options: { readonly transactionHash: StarknetTransactionHash }
@@ -190,6 +207,9 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [24, "Lagging"],
   [29, "Lagging"]
 ])
+
+// sn_keccak("balanceOf"), the ERC-20 entry point selector
+const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
 
 /**
  * Builds a {@link StarknetRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
@@ -279,6 +299,20 @@ export const layer = (options: {
           }
         })
 
+      const callOn = (endpoint: Endpoint, options: Parameters<StarknetRpc["Service"]["call"]>[0]) =>
+        rpc.requireHead(endpoint, RpcMethods.call.name, options.blockNumber, blockNumberOn(endpoint)).pipe(
+          Effect.andThen(rpc.call(endpoint, RpcMethods.call, {
+            request: {
+              contract_address: options.contractAddress,
+              entry_point_selector: options.entryPointSelector,
+              calldata: options.calldata
+            },
+            block_id: { block_number: options.blockNumber }
+          }))
+        )
+
+      const strk = StarknetNetwork.strkToken(network)
+
       const getEvents = (filter: StarknetEventsFilter): Effect.Effect<StarknetEventsPage, StarknetRpcError> => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
         if (filter.cursor === undefined) return rpc.withFallback((endpoint) => getEventsOn(endpoint, filter))
@@ -301,6 +335,26 @@ export const layer = (options: {
             )
           ),
         getEvents,
+        call: (options) => rpc.withFallback((endpoint) => callOn(endpoint, options)),
+        getBalance: ({ address, blockNumber }) =>
+          rpc.withFallback((endpoint) =>
+            callOn(endpoint, {
+              contractAddress: strk,
+              entryPointSelector: BALANCE_OF,
+              calldata: [address],
+              blockNumber
+            })
+              .pipe(Effect.flatMap((felts) =>
+                felts.length === 2
+                  ? Effect.succeed(BigInt(felts[0]) + (BigInt(felts[1]) << BigInt(128)))
+                  : Effect.fail(rpc.fail(
+                    endpoint,
+                    RpcMethods.call.name,
+                    new JsonRpc.InvalidResponse(),
+                    new Error(`balanceOf returned ${felts.length} felts, expected a u256 (low, high)`)
+                  ))
+              ))
+          ),
         getTransactionReceipt: ({ transactionHash }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getTransactionReceipt, { transaction_hash: transactionHash })
