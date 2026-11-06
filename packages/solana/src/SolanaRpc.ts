@@ -27,6 +27,9 @@
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import {
+  getBase64Encoder,
+  getCompiledTransactionMessageDecoder,
+  getTransactionDecoder,
   SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_CLEANED_UP,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_NOT_AVAILABLE,
@@ -46,6 +49,7 @@ import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import type * as HttpClient from "effect/http/HttpClient"
 import * as Layer from "effect/Layer"
+import * as Option from "effect/Option"
 import type * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 import * as BigIntJson from "./internal/bigIntJson.ts"
@@ -197,9 +201,27 @@ export interface SolanaEncodedTransaction {
 }
 
 /**
+ * The status meta of a transaction, reduced to its outcome and lamport balances. `err` is the raw transaction error as
+ * JSON (integers as decimal strings), `null` when it succeeded. `preBalances` and `postBalances` follow the account
+ * keys, then `loadedAddresses` (absent from transactions older than versioned transactions).
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaTransactionMeta {
+  readonly err: Schema.Json
+  readonly fee: bigint
+  readonly preBalances: ReadonlyArray<bigint>
+  readonly postBalances: ReadonlyArray<bigint>
+  readonly loadedAddresses?: {
+    readonly writable: ReadonlyArray<SolanaAddress>
+    readonly readonly: ReadonlyArray<SolanaAddress>
+  }
+}
+
+/**
  * A `getTransaction` result. `transaction` follows the requested encoding (see {@link SolanaEncodedTransaction}).
- * `meta` is the raw status meta (fee, balances, logs, inner instructions...) as JSON with every integer as a decimal
- * string, so u64 values are exact and the value can be stored as is. It is `null` when the node does not have it.
+ * `meta` is `null` when the node does not have it.
  *
  * @since 0.1.0
  * @category models
@@ -208,7 +230,18 @@ export interface SolanaTransactionInfo<Encoding extends SolanaTransactionEncodin
   readonly slot: bigint
   readonly blockTime: bigint | null
   readonly transaction: SolanaEncodedTransaction[Encoding]
-  readonly meta: Schema.Json
+  readonly meta: SolanaTransactionMeta | null
+}
+
+/**
+ * A `getBalance` result: the lamports of the account (`value`) at the context `slot`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaBalance {
+  readonly slot: bigint
+  readonly value: bigint
 }
 
 /**
@@ -234,6 +267,10 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly getSlot: (options: {
     readonly commitment: SolanaCommitment
   }) => Effect.Effect<bigint, SolanaRpcError>
+  /** `getBalance` at `finalized` commitment. */
+  readonly getBalance: (options: {
+    readonly address: SolanaAddress
+  }) => Effect.Effect<SolanaBalance, SolanaRpcError>
   /** `getSignaturesForAddress`, one page. */
   readonly getSignaturesForAddress: (
     query: SolanaSignaturesQuery
@@ -357,12 +394,45 @@ export const layer = (options: {
         getGenesisHash: rpc.withFallback(rpc.checkNetwork),
         getSlot: ({ commitment }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSlot, [{ commitment }])),
+        getBalance: ({ address }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getBalance, [address, { commitment: "finalized" }]).pipe(
+              Effect.map(({ context, value }) => ({ slot: context.slot, value }))
+            )
+          ),
         getSignaturesForAddress: ({ address, ...config }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSignaturesForAddress, [address, config])),
         getTransaction
       })
     })
   )
+
+/**
+ * The lamports of `address` before and after `transaction`, `Option.none()` when the address is not one of its accounts
+ * or the node has no meta. An account's index runs over the static account keys, then the addresses loaded from lookup
+ * tables, writable then readonly (see https://solana.com/docs/advanced/versions).
+ *
+ * @since 0.2.0
+ * @category balances
+ */
+export const balanceChange = <Encoding extends SolanaTransactionEncoding>(
+  transaction: SolanaTransactionInfo<Encoding>,
+  address: SolanaAddress
+): Option.Option<{ readonly pre: bigint; readonly post: bigint }> => {
+  const { meta } = transaction
+  if (meta === null) return Option.none()
+  const encoded: SolanaEncodedTransaction[SolanaTransactionEncoding] = transaction.transaction
+  const staticKeys = typeof encoded === "string"
+    ? getCompiledTransactionMessageDecoder().decode(
+      getTransactionDecoder().decode(getBase64Encoder().encode(encoded)).messageBytes
+    ).staticAccounts
+    : encoded.message.accountKeys
+  const keys = [...staticKeys, ...meta.loadedAddresses?.writable ?? [], ...meta.loadedAddresses?.readonly ?? []]
+  const index = keys.indexOf(address)
+  const pre = meta.preBalances[index]
+  const post = meta.postBalances[index]
+  return pre === undefined || post === undefined ? Option.none() : Option.some({ pre, post })
+}
 
 /**
  * Builds an {@link SolanaRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.

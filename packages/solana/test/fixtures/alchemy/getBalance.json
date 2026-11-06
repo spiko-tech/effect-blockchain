@@ -1,0 +1,16 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-06",
+  "request": {
+    "method": "getBalance",
+    "params": [
+      "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+      {
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":466165821},\"value\":65632932404},\"id\":1}\n"
+}

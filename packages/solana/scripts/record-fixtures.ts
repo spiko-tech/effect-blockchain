@@ -10,6 +10,10 @@ const UNTIL = "4HUA4Hbnr6hrEckfA9rzgfibnndv4v9tTvrKQWFtCKjcv8WZ1Co5HRHQCzZrsmfSU
 const PAGE_1_LAST = "4xocP3Kt2QwqgiZdBrTseXvmTZsRVPh2v94NsM8Uwb5HiSUDWgrkUUZxSPpA3Mfy7sLCdMiKZ4nJcnT6EJsLU372"
 const TX_1 = "2ijR446DGZ3zFMDdp5JrbonSpRwrvN4bGK7oGiLpn5DpR9eCFHZjMPh89feRiuygcVhhY6HxP64y5xtnVfKJutz1"
 const TX_2 = "2X2K6U3mUT7PFkcuh3N3u5T7ZaVdYKZh9eEHjfD4U92sYLqduHddwbCDDbZhyQbZZjMPdeKCzLEiNLR2LDWZzake"
+// a v0 swap loading 7 writable and 13 readonly addresses from lookup tables
+const TX_V0 = "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRGfurA7J4yk1cZY4Ybs4J59NF"
+// a Binance hot wallet: its balance moves on every recording
+const BINANCE = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
 // well-formed, never sent on chain
 const UNKNOWN_TX = "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDaGbNkYPhGMaFKaLwUMcnMnEHG77v"
 // far above the head for years
@@ -37,6 +41,9 @@ const cases: ReadonlyArray<Case> = [
   { name: "getTransaction-eutbl-2", method: "getTransaction", params: [TX_2, base64] },
   { name: "getTransaction-eutbl-1-json", method: "getTransaction", params: [TX_1, json] },
   { name: "getTransaction-eutbl-2-json", method: "getTransaction", params: [TX_2, json] },
+  { name: "getTransaction-v0", method: "getTransaction", params: [TX_V0, base64] },
+  { name: "getTransaction-v0-json", method: "getTransaction", params: [TX_V0, json] },
+  { name: "getBalance", method: "getBalance", params: [BINANCE, finalized] },
   { name: "getTransaction-unknown", method: "getTransaction", params: [UNKNOWN_TX, base64] },
   {
     name: "getSignaturesForAddress-min-context-slot",

@@ -85,6 +85,21 @@ const transactions = {
   })
 }
 
+const Lamports = Schema.Array(Schema.BigInt)
+
+// the fields the balance helpers read, any other field of the status meta dropped
+const Meta = Schema.Struct({
+  err: JsonFromRpc,
+  fee: Schema.BigInt,
+  preBalances: Lamports,
+  postBalances: Lamports,
+  // absent from transactions older than versioned transactions
+  loadedAddresses: Schema.optionalKey(Schema.Struct({
+    writable: Schema.Array(SolanaAddress),
+    readonly: Schema.Array(SolanaAddress)
+  }))
+})
+
 const NoParams = Schema.Tuple([])
 
 const Commitment = Schema.Literals(["confirmed", "finalized"])
@@ -97,6 +112,13 @@ export const getSlot = make({
   name: "getSlot",
   params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
   result: Schema.BigInt
+})
+
+/** @internal */
+export const getBalance = make({
+  name: "getBalance",
+  params: Schema.Tuple([SolanaAddress, Schema.Struct({ commitment: Commitment })]),
+  result: Schema.Struct({ context: Schema.Struct({ slot: Schema.BigInt }), value: Schema.BigInt })
 })
 
 /** @internal */
@@ -138,6 +160,6 @@ export const getTransaction = (encoding: keyof typeof transactions) =>
       slot: Schema.BigInt,
       blockTime: Schema.NullOr(Schema.BigInt),
       transaction: transactions[encoding],
-      meta: JsonFromRpc
+      meta: Schema.NullOr(Meta)
     }))
   })
