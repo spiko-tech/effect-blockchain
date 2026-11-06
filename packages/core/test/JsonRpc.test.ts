@@ -5,6 +5,7 @@ import * as Clock from "effect/Clock"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
+import * as Metric from "effect/Metric"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 import * as Tracer from "effect/Tracer"
@@ -450,6 +451,70 @@ describe("JsonRpc", () => {
       })
     )
   })
+})
+
+// the engine's metrics as sorted `name attribute=value... count` lines, from a fresh registry around `effect`
+const metricsOf = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.gen(function*() {
+    yield* Effect.exit(effect)
+    const snapshots = (yield* Metric.snapshot).filter((snapshot) => snapshot.id.startsWith("effect_blockchain_rpc_"))
+    // no attribute holds the URL
+    expect(JSON.stringify(snapshots.map((snapshot) => snapshot.attributes))).not.toMatch(/rpc\.test|secret-key/)
+    return snapshots.flatMap((snapshot) =>
+      snapshot.type === "Counter" || snapshot.type === "Histogram"
+        ? [
+          [
+            snapshot.id.replace("effect_blockchain_rpc_", ""),
+            ...Object.entries(snapshot.attributes ?? {}).map(([key, value]) => `${key}=${value}`).sort(),
+            snapshot.state.count
+          ].join(" ")
+        ]
+        : []
+    ).sort()
+  }).pipe(Effect.provideService(Metric.MetricRegistry, new Map()))
+
+describe("JsonRpc metrics", () => {
+  const request = (endpoint: string, method: string, outcome: string) =>
+    `endpoint=${endpoint} method=${method} network=Fakenet outcome=${outcome}`
+  const durationOf = (endpoint: string, method: string, outcome: string) =>
+    `request_duration ${request(endpoint, method, outcome)} time_unit=milliseconds 1`
+
+  it.effect("counts and times each request by outcome success", () =>
+    metricsOf(setup({ a: { blockNumber: head(1) } }).run((rpc) => rpc.blockNumber)).pipe(Effect.map((lines) => {
+      expect(lines).toStrictEqual([
+        durationOf("a", "blockNumber", "success"),
+        durationOf("a", "chainId", "success"),
+        `requests_total ${request("a", "blockNumber", "success")} 1`,
+        `requests_total ${request("a", "chainId", "success")} 1`
+      ])
+    })))
+
+  it.effect("records a failure's reason tag as the outcome", () =>
+    metricsOf(failure(() => ({ error: { code: -32001, message: "pruned" } }))).pipe(Effect.map((lines) => {
+      expect(lines).toStrictEqual([
+        durationOf("a", "blockNumber", "Pruned"),
+        durationOf("a", "chainId", "success"),
+        `requests_total ${request("a", "blockNumber", "Pruned")} 1`,
+        `requests_total ${request("a", "chainId", "success")} 1`
+      ])
+    })))
+
+  it.effect("counts a fallback from the failed endpoint with its reason", () =>
+    metricsOf(setup({ a: { blockNumber: down }, b: { blockNumber: head(7) } }).run((rpc) => rpc.blockNumber)).pipe(
+      Effect.map((lines) => {
+        expect(lines).toStrictEqual([
+          `fallbacks_total ${request("a", "blockNumber", "Unavailable")} 1`,
+          durationOf("a", "blockNumber", "Unavailable"),
+          durationOf("a", "chainId", "success"),
+          durationOf("b", "blockNumber", "success"),
+          durationOf("b", "chainId", "success"),
+          `requests_total ${request("a", "blockNumber", "Unavailable")} 1`,
+          `requests_total ${request("a", "chainId", "success")} 1`,
+          `requests_total ${request("b", "blockNumber", "success")} 1`,
+          `requests_total ${request("b", "chainId", "success")} 1`
+        ])
+      })
+    ))
 })
 
 describe("JsonRpc reasons", () => {

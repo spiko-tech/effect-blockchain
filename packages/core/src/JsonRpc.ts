@@ -10,10 +10,18 @@
  * Each chain keeps its own error class, code table, network check, methods and their checks; the engine only builds
  * errors through `makeError`.
  *
+ * Metrics, recorded with `effect/Metric` (free when nobody reads them), attributes never hold the URL:
+ * - `effect_blockchain_rpc_requests_total` (counter): requests per endpoint attempt, its HTTP retries included, by
+ *   `network`, `endpoint` (its name), `method` and `outcome` (`success` or the reason tag).
+ * - `effect_blockchain_rpc_request_duration` (timer, milliseconds): the duration of the same requests, same attributes.
+ * - `effect_blockchain_rpc_fallbacks_total` (counter): moves to the next endpoint, by `network`, `endpoint` (the one
+ *   that failed), `method` and `outcome` (the reason tag that caused it).
+ *
  * @since 0.1.0
  */
 import type * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Clock from "effect/Clock"
 import * as Data from "effect/Data"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -22,6 +30,7 @@ import * as HttpClient from "effect/http/HttpClient"
 import * as HttpClientError from "effect/http/HttpClientError"
 import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import type * as HttpClientResponse from "effect/http/HttpClientResponse"
+import * as Metric from "effect/Metric"
 import * as Option from "effect/Option"
 import * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
@@ -275,6 +284,42 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
   ) => Effect.Effect<void, E>
 }
 
+/**
+ * `effect_blockchain_rpc_requests_total`: one per request to an endpoint, its HTTP retries included, by `network`,
+ * `endpoint` (its name), `method` and `outcome` (`success` or the reason tag). A request interrupted or ended by a
+ * defect is not counted, and params that do not encode send none.
+ *
+ * @since 0.1.0
+ * @category metrics
+ */
+export const requests = Metric.counter("effect_blockchain_rpc_requests_total", {
+  description: "JSON-RPC requests per endpoint attempt, by network, endpoint, method and outcome",
+  incremental: true
+})
+
+/**
+ * `effect_blockchain_rpc_request_duration`: the duration of each request counted by `requests`, in milliseconds,
+ * HTTP retries included, with the same attributes.
+ *
+ * @since 0.1.0
+ * @category metrics
+ */
+export const requestDuration = Metric.timer("effect_blockchain_rpc_request_duration", {
+  description: "JSON-RPC request duration in milliseconds, by network, endpoint, method and outcome"
+})
+
+/**
+ * `effect_blockchain_rpc_fallbacks_total`: one each time a call moves to the next endpoint, by `network`, `endpoint`
+ * (the one that failed), `method` and `outcome` (the reason tag that caused it).
+ *
+ * @since 0.1.0
+ * @category metrics
+ */
+export const fallbacks = Metric.counter("effect_blockchain_rpc_fallbacks_total", {
+  description: "JSON-RPC fallbacks to the next endpoint, by network, failed endpoint, method and reason",
+  incremental: true
+})
+
 const fromCode = { Unavailable, InvalidResponse, Lagging, Pruned, Rejected }
 
 // `bigint` codes for a `parseBody` that reads integers as `bigint`
@@ -379,13 +424,28 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   const fail = (endpoint: Endpoint, method: string, reason: Reason, cause: Error) =>
     makeError({ reason, method, endpoint: endpoint.name, cause })
 
+  // records `requests` and `requestDuration` when `request` succeeds or fails
+  const observe = <A>(endpoint: Endpoint, method: string, request: Effect.Effect<A, E>) =>
+    Effect.flatMap(Clock.currentTimeMillis, (start) => {
+      const record = (outcome: string) =>
+        Effect.flatMap(Clock.currentTimeMillis, (end) => {
+          const attributes = { network, endpoint: endpoint.name, method, outcome }
+          return Metric.update(Metric.withAttributes(requests, attributes), 1).pipe(
+            Effect.andThen(
+              Metric.update(Metric.withAttributes(requestDuration, attributes), Duration.millis(end - start))
+            )
+          )
+        })
+      return request.pipe(Effect.tap(() => record("success")), Effect.tapError((error) => record(error.reason._tag)))
+    })
+
   const send = <Params, A>(endpoint: Endpoint, method: Method<Params, A, J>, params: Params) =>
     Effect.gen(function*() {
       const encoded = yield* Schema.encodeEffect(method.params)(params).pipe(
         Effect.mapError((cause) => fail(endpoint, method.name, new Rejected(), cause))
       )
       // one request per HTTP call: the id is never matched
-      const json = yield* HttpClientRequest.post(Redacted.value(endpoint.url)).pipe(
+      return yield* HttpClientRequest.post(Redacted.value(endpoint.url)).pipe(
         HttpClientRequest.bodyJsonUnsafe({
           jsonrpc: "2.0",
           id: 1,
@@ -398,12 +458,15 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
           makeError({ ...classify(error), method: method.name, endpoint: endpoint.name, cause: withoutUrl(error) })
         ),
         // the client span would record the URL: this module's span replaces it
-        Effect.provideService(HttpClient.TracerDisabledWhen, constTrue)
+        Effect.provideService(HttpClient.TracerDisabledWhen, constTrue),
+        Effect.flatMap((json) =>
+          Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
+            Effect.mapError((cause) => fail(endpoint, method.name, new InvalidResponse(), cause))
+          )
+        ),
+        Effect.map((reply) => reply.result),
+        (request) => observe(endpoint, method.name, request)
       )
-      const reply = yield* Schema.decodeUnknownEffect(Schema.Struct({ result: method.result }))(json).pipe(
-        Effect.mapError((cause) => fail(endpoint, method.name, new InvalidResponse(), cause))
-      )
-      return reply.result
     }).pipe(
       Effect.withSpan(`${options.spanPrefix}.${method.name}`, {
         attributes: { network, endpoint: endpoint.name, method: method.name }
@@ -431,7 +494,12 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     const from = (index: number, errors: ReadonlyArray<E>): Effect.Effect<A, E> =>
       Effect.catch(Effect.suspend(() => f(endpoints[index])), (last) => {
         const tried = [...errors, last]
-        if (last.reason._tag !== "WrongNetwork" && index + 1 < endpoints.length) return from(index + 1, tried)
+        if (last.reason._tag !== "WrongNetwork" && index + 1 < endpoints.length) {
+          const attributes = { network, endpoint: last.endpoint, method: last.method, outcome: last.reason._tag }
+          return Metric.update(Metric.withAttributes(fallbacks, attributes), 1).pipe(
+            Effect.andThen(from(index + 1, tried))
+          )
+        }
         return Effect.fail(
           tried.length === 1 ? last : makeError({
             reason: last.reason,
