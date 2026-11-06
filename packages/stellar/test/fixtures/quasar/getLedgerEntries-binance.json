@@ -1,0 +1,15 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-06",
+  "request": {
+    "method": "getLedgerEntries",
+    "params": {
+      "keys": [
+        "AAAAAAAAAAACWCFe3HTSTSz8/f2QDMt5FK1mftxaETTss1ma1FUXlA=="
+      ]
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"entries\":[{\"key\":\"AAAAAAAAAAACWCFe3HTSTSz8/f2QDMt5FK1mftxaETTss1ma1FUXlA==\",\"xdr\":\"AAAAAAAAAAACWCFe3HTSTSz8/f2QDMt5FK1mftxaETTss1ma1FUXlAABV+OyeF7YAptArgAHxQgAAAACAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAADAAAAAAPi8ygAAAAAauPA4A==\",\"lastModifiedLedgerSeq\":65338911,\"extXdr\":\"AAAAAA==\"}],\"latestLedger\":65338914}}"
+}

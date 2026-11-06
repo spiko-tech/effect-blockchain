@@ -1,0 +1,15 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-06",
+  "request": {
+    "method": "getLedgerEntries",
+    "params": {
+      "keys": [
+        "AAAAAAAAAAD//////////////////////////////////////////w=="
+      ]
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"entries\":[],\"latestLedger\":65338914}}"
+}

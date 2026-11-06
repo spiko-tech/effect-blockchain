@@ -25,6 +25,7 @@
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
@@ -38,7 +39,7 @@ import type * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
 import * as Schema from "effect/Schema"
 import * as RpcMethods from "./internal/rpcMethods.ts"
-import type { StellarContractAddress } from "./StellarAddress.ts"
+import type { StellarAccountAddress, StellarContractAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
 
@@ -60,7 +61,8 @@ export interface StellarRpcEndpoint {
  * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
  * On Stellar, `Unavailable` includes the code -32603, `InvalidResponse` an event outside the `getEvents` filter,
- * `Lagging` a latest ledger below `toBlock`, and `Pruned` an oldest retained ledger above `fromBlock` (or the cursor).
+ * `Lagging` a latest ledger below `toBlock` (or `startLedger`, `minBlock`), and `Pruned` an oldest retained ledger
+ * above `fromBlock` (or the cursor, `startLedger`).
  *
  * @since 0.1.0
  * @category errors
@@ -153,6 +155,30 @@ export interface StellarLatestLedger {
 }
 
 /**
+ * A closed ledger from `getLedgers`: its close time in unix seconds and its `LedgerCloseMeta`, base64 XDR left
+ * undecoded (1 to 3 MB per mainnet ledger).
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarLedger {
+  readonly sequence: bigint
+  readonly closeTime: number
+  readonly metadataXdr: string
+}
+
+/**
+ * An account entry from `getLedgerEntries`: its native balance in stroops and the last ledger that changed the entry.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarAccount {
+  readonly balance: bigint
+  readonly lastModifiedLedger: bigint
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -174,14 +200,35 @@ export class StellarRpc extends Context.Service<StellarRpc, {
    * scans at most 10000 ledgers per request. A short page stopping at a latest ledger below `toBlock` fails `Lagging`.
    */
   readonly getEvents: (filter: StellarEventsFilter) => Effect.Effect<StellarEventsPage, StellarRpcError>
+  /**
+   * `getLedgers`: up to `limit` ledgers from `startLedger` on, in order. Fails `Pruned` on an endpoint that no longer
+   * retains `startLedger` and `Lagging` on one that has not closed it yet, then falls back: an archive endpoint later
+   * in the list serves the whole history.
+   */
+  readonly getLedgers: (options: {
+    readonly startLedger: bigint
+    readonly limit?: number | undefined
+  }) => Effect.Effect<ReadonlyArray<StellarLedger>, StellarRpcError>
+  /**
+   * `getLedgerEntries` for the account entry of `address` at the endpoint's latest ledger, `undefined` when the account
+   * does not exist. Fails `Lagging` on an endpoint whose latest ledger is below `minBlock`, then falls back.
+   */
+  readonly getAccount: (options: {
+    readonly address: StellarAccountAddress
+    readonly minBlock?: bigint | undefined
+  }) => Effect.Effect<
+    { readonly account: StellarAccount | undefined; readonly latestLedger: bigint },
+    StellarRpcError
+  >
 }>()("@effect-blockchain/stellar/StellarRpc") {}
 
 // JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures, retry then fall back
 const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([[-32603, "Unavailable"]])
 
 // stellar-rpc's out-of-range start, current ("startLedger must be within the ledger range: X - Y") and older
-// ("startLedger must be between the oldest ledger: X and the latest ledger: Y ...")
-const ledgerRangeError = /startLedger must be \D*(\d+)\D+(\d+)/u
+// ("startLedger must be between the oldest ledger: X and the latest ledger: Y ..."), and on getLedgers ("start ledger
+// (N) must be between the oldest ledger: X and the latest ledger: Y ...")
+const ledgerRangeError = /(?:startLedger|start ledger \(\d+\)) must be \D*(\d+)\D+(\d+)/u
 
 // the ledger of a TOID cursor: ledger << 32 | transaction << 12 | operation
 const cursorLedger = (cursor: string) => BigInt(cursor.slice(0, 19)) >> BigInt(32)
@@ -335,6 +382,59 @@ export const layer = (options: {
             Effect.tap((ledger) => Ref.update(endpoint.head, BigInt_.max(ledger.sequence)))
           )
         ),
+        getLedgers: ({ limit, startLedger }) =>
+          withFallback((endpoint) =>
+            call(endpoint, RpcMethods.getLedgers, {
+              startLedger,
+              pagination: limit === undefined ? {} : { limit }
+            }).pipe(
+              Effect.mapError((error) => outOfRange(error, () => startLedger)),
+              Effect.tap((page) => Ref.update(endpoint.head, BigInt_.max(page.latestLedger))),
+              Effect.flatMap((page) =>
+                page.ledgers[0]?.sequence === startLedger ? Effect.succeed(page.ledgers) : Effect.fail(fail(
+                  endpoint,
+                  RpcMethods.getLedgers.name,
+                  new JsonRpc.InvalidResponse(),
+                  new Error(`the page does not start at ledger ${startLedger}`)
+                ))
+              )
+            )
+          ),
+        getAccount: ({ address, minBlock }) => {
+          const method = RpcMethods.getLedgerEntries.name
+          const key = xdr.LedgerKey.account(
+            new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() })
+          ).toXDR("base64")
+          return withFallback((endpoint) =>
+            call(endpoint, RpcMethods.getLedgerEntries, { keys: [key] }).pipe(
+              Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger))),
+              Effect.flatMap(({ entries, latestLedger }) => {
+                if (minBlock !== undefined && latestLedger < minBlock) {
+                  return Effect.fail(fail(
+                    endpoint,
+                    method,
+                    new JsonRpc.Lagging({ head: latestLedger, toBlock: minBlock }),
+                    new Error(`latest ledger ${latestLedger} is below ${minBlock}`)
+                  ))
+                }
+                const entry = entries[0]
+                return Effect.try({
+                  try: () => {
+                    if (entry === undefined) return { account: undefined, latestLedger }
+                    const account = xdr.LedgerEntryData.fromXDR(entry.xdr, "base64").account()
+                    if (StrKey.encodeEd25519PublicKey(account.accountId().ed25519()) !== address) {
+                      throw new Error("the entry is another account's")
+                    }
+                    const balance = BigInt(account.balance().toString())
+                    return { account: { balance, lastModifiedLedger: entry.lastModifiedLedgerSeq }, latestLedger }
+                  },
+                  catch: (cause) =>
+                    fail(endpoint, method, new JsonRpc.InvalidResponse(), new Error("invalid account entry", { cause }))
+                })
+              })
+            )
+          )
+        },
         getEvents: (filter) => {
           const { cursor } = filter
           if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
