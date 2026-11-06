@@ -1,32 +1,17 @@
 /**
- * A raw EVM log indexer on top of {@link EvmRpc.EvmRpc}: the last confirmed block and the logs of a set of contracts
- * over any block range.
+ * EVM log indexing on top of {@link EvmRpc.EvmRpc}: the last confirmed block, the logs of a set of contracts over a
+ * block range, and a stream of them following the confirmed head.
  *
- * `fetchLogs` splits `[fromBlock, toBlock]` into consecutive chunks of at most `maxBlockRange` blocks and sends one
- * `eth_getLogs` per chunk, one after another. Each chunk comes back in chain order, so the concatenation is too.
- * The first failing chunk fails the whole call with its {@link EvmRpc.EvmRpcError}, after `EvmRpc`'s own retries and
- * fallback, and the logs of the chunks before it are dropped: the caller restarts from `fromBlock`.
+ * Ranges are read in chunks of at most `maxBlockRange` blocks, one `eth_getLogs` after another. A failing chunk fails
+ * the whole call and drops the logs already read: the caller retries the same range.
  *
- * **Streaming**
- *
- * `streamLogs` follows the confirmed head from `fromBlock`: each step fetches the next `maxBlockRange` blocks at most,
- * up to the confirmed head, as one {@link EvmIndexerBatch}. The head is read once per catch-up segment:
- * `lastConfirmedBlock` is read again only once the stream reaches the head it last read. A batch is emitted even when
- * it has no logs, so the caller's cursor moves on a quiet contract. Caught up, the stream reads the head again on the
- * `poll` schedule until it reaches the next block, the schedule starting afresh after each batch; a bounded `poll`,
- * e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after the batch reaching it. With
- * `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same
- * block; any other failure, or an exhausted schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock`
- * after handling a batch and restart from the block after it. Run one stream per (network, filter) at a time: the
- * indexer does not coordinate processes, so a service with several replicas provides the exclusivity itself, for
- * example with a Postgres advisory lock.
- *
+ * @example
  * ```ts
+ * import { EvmIndexer } from "@effect-blockchain/evm/EvmIndexer"
+ * import type { EvmLogsFilter } from "@effect-blockchain/evm/EvmRpc"
  * import * as Effect from "effect/Effect"
  * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
- * import { EvmIndexer } from "@effect-blockchain/evm/EvmIndexer"
- * import type { EvmLogsFilter } from "@effect-blockchain/evm/EvmRpc"
  *
  * declare const filter: Omit<EvmLogsFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
@@ -34,7 +19,7 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* EvmIndexer
- *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
  *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
  *   yield* indexer.streamLogs({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
@@ -61,7 +46,10 @@ import * as EvmRpc from "./EvmRpc.ts"
 
 /**
  * The logs of `[fromBlock, toBlock]` (both inclusive), in chain order, emitted by
- * {@link EvmIndexer.Service.streamLogs}. `logs` can be empty.
+ * {@link EvmIndexer.Service.streamLogs}.
+ *
+ * A batch is emitted for every range, even without logs. Delivery is at-least-once: save `batch.toBlock` once the
+ * batch is handled and resume from `toBlock + 1`.
  *
  * @since 0.1.0
  * @category models
@@ -85,22 +73,20 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
    */
   readonly fetchLogs: (filter: EvmRpc.EvmLogsFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpc.EvmRpcError>
   /**
-   * The logs matching `filter` from `fromBlock` on, one batch of at most `maxBlockRange` confirmed blocks at a time,
-   * following the head: see the module's "Streaming" section.
-   *
-   * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
-   * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
-   *   bounded schedule ends the stream when it is exhausted while still caught up.
-   * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same block. Off by
-   *   default: the first failure fails the stream.
+   * The logs matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed blocks, following
+   * the confirmed head.
    */
   readonly streamLogs: (options: {
     readonly filter: Omit<EvmRpc.EvmLogsFilter, "fromBlock" | "toBlock">
     readonly fromBlock: bigint
+    /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
     readonly toBlock?: bigint | undefined
-    // the schedule's output is ignored
+    /**
+     * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts
+     * after each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
+     */
     readonly poll?: Schedule.Schedule<unknown> | undefined
-    // the schedule's output is ignored
+    /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same block. Off by default. */
     readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
   }) => Stream.Stream<EvmIndexerBatch, EvmRpc.EvmRpcError>
 }>()("@effect-blockchain/evm/EvmIndexer") {}
@@ -114,8 +100,7 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
 export const DEFAULT_MAX_BLOCK_RANGE = 1000
 
 /**
- * The default spacing of the `poll` schedule of {@link EvmIndexer.Service.streamLogs}: the head is read again
- * every 10 seconds once caught up.
+ * The default `poll` spacing of {@link EvmIndexer.Service.streamLogs}: 10 seconds.
  *
  * @since 0.1.0
  * @category constants
@@ -169,9 +154,7 @@ export const layer = (options: {
         fetchLogs,
         streamLogs: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next block to read: the head last read when it reaches `next` (the confirmed head
-          // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
-          // stream), then a batch up to it
+          // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
           const step = (
             { head, next }: IndexerConfirmedRange
           ): Effect.Effect<

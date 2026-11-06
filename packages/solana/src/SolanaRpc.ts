@@ -1,34 +1,27 @@
 /**
- * Typed, read-only standard Solana JSON-RPC methods, served by an ordered list of endpoints with fallback.
+ * Typed, read-only Solana JSON-RPC methods over an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure (see {@link SolanaRpcError}) moves to the next
- * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
- * endpoint is checked to serve the configured network (`getGenesisHash`), once.
+ * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
+ * is checked once to serve the configured network (`getGenesisHash`). Every method is a read, so retries and fallback
+ * are safe. Methods are named after the JSON-RPC method. Every JSON integer in a reply is read as an exact `bigint`,
+ * so lamport amounts above 2^53 are never rounded.
  *
- * Requests go through the provided `HttpClient`. Every JSON integer in a reply is read as an exact `bigint`: lamport
- * amounts above 2^53 are never rounded.
+ * @example
+ * ```ts
+ * import type { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
+ * import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
+ * import * as Effect from "effect/Effect"
  *
- * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future write
- * method (e.g. `sendTransaction`) must take a transaction signed outside this module, resend the same signed bytes on
- * fallback, never retry blindly after an unclear failure and confirm the outcome by signature.
+ * declare const address: SolanaAddress
  *
- * Adding a method takes three steps:
- * 1. define it once in `internal/rpcMethods.ts`: its JSON-RPC name, a params codec and a result codec,
- * 2. add one line to the {@link SolanaRpc} service and its layer, calling it through the shared `call`, which does the
- *    network check, the request, the retries, the error classification, the decoding and the span,
- * 3. add one test decoding a fake response.
- *
- * Methods are named after the JSON-RPC method.
- *
- * **Transaction encoding**
- *
- * `getTransaction` takes an `encoding`, `base64` by default:
- * - `base64`: the signed wire transaction as one base64 string, for the `@solana/kit` decoders (e.g.
- *   `getTransactionDecoder`) and for storing the exact bytes,
- * - `json`: the transaction already split into signatures, account keys and compiled instructions (program and account
- *   indexes, base58 `data`), for decoders working instruction by instruction with `meta.innerInstructions`.
- *
- * `meta` is the same in both. `jsonParsed` is not offered: its shape depends on the programs the node knows.
+ * // the 10 latest finalized transactions touching `address`
+ * const latest = Effect.gen(function*() {
+ *   const rpc = yield* SolanaRpc.SolanaRpc
+ *   const signatures = yield* rpc.getSignaturesForAddress({ address, limit: 10, commitment: "finalized" })
+ *   return yield* Effect.forEach(signatures, ({ signature }) =>
+ *     rpc.getTransaction({ signature, commitment: "finalized" }))
+ * })
+ * ```
  *
  * @since 0.1.0
  */
@@ -73,20 +66,12 @@ export interface SolanaRpcEndpoint {
 }
 
 /**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
+ * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
+ * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
+ * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
- * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
- *
- * | reason | meaning | falls back to the next endpoint |
- * |---|---|---|
- * | `Unavailable` | transport error, any HTTP error status, node unhealthy or internal error after retries, or a timeout | yes |
- * | `InvalidResponse` | the reply is not JSON or fails its schema | yes |
- * | `Lagging` | the endpoint has not reached `minContextSlot` (only from providers that honour it), or the block is not available yet | yes |
- * | `Pruned` | the endpoint lacks the requested history, e.g. `getTransaction` returns `null` | yes |
- * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
- * | `WrongNetwork` | the endpoint's genesis hash is not the configured network's | no |
+ * On Solana, `Unavailable` includes the codes 429, -32603, -32005 and -32019, `Lagging` a `minContextSlot` not reached
+ * or a block not available yet, and `Pruned` a cleaned-up or skipped slot or a `getTransaction` returning `null`.
  *
  * @since 0.1.0
  * @category errors
@@ -130,9 +115,8 @@ export interface SolanaSignaturesQuery {
   readonly limit?: number | undefined
   readonly commitment: SolanaCommitment
   /**
-   * An endpoint that honours it answers `Lagging` until it has reached this slot. Some providers ignore it (Alchemy, as
-   * recorded on 2026-11-03) and answer from wherever they are, so a caller that needs the guarantee must check the head
-   * itself, e.g. by comparing `getSlot` across endpoints.
+   * An endpoint that honours it answers `Lagging` until it has reached this slot. Some providers ignore it and answer
+   * from wherever they are, so a caller that needs the guarantee checks the head itself, e.g. with `getSlot`.
    */
   readonly minContextSlot?: bigint | undefined
 }
@@ -153,7 +137,9 @@ export interface SolanaSignatureInfo {
 }
 
 /**
- * The `getTransaction` encodings: see the module's "Transaction encoding" section.
+ * The `getTransaction` encodings. `base64` is the signed wire transaction, for the `@solana/kit` decoders (e.g.
+ * `getTransactionDecoder`) and for storing the exact bytes. `json` splits it into signatures, account keys and compiled
+ * instructions; `jsonParsed` is not offered, as its shape depends on the programs the node knows.
  *
  * @since 0.1.0
  * @category models
@@ -284,14 +270,8 @@ const codeReasons: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
 
 /**
  * Builds a {@link SolanaRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
- * (e.g. `FetchHttpClient.layer`).
- *
- * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
- *   endpoint at once.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (429, -32603, -32005, -32019) are retried with an
- *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
- *   status (e.g. 403) is not retried and falls back at once.
+ * (e.g. `FetchHttpClient.layer`). `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and
+ * `retryDelay` (default 500 millis) set the backoff before falling back: see {@link JsonRpc.Unavailable}.
  *
  * @since 0.1.0
  * @category layers

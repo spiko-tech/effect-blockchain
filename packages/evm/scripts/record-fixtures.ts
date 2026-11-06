@@ -4,8 +4,8 @@
 // Inputs are pinned, so a re-run records the same replies (except `blockNumber`, the moving head). Never edit a reply.
 import { type Case, type Json, record, secret } from "../../core/scripts/recordFixtures.ts"
 
-// Spiko EUTBL and USTBL (docs.spiko.io/documentation/tokenization/addresses), lowercased as `EvmAddress` encodes them
-const SPIKO_TOKENS = ["0xa0769f7a8fc65e47de93797b4e21c073c117fc80", "0xe4880249745eac5f1ed9d8f7df844792d560e750"]
+// two tokenized fund tokens, lowercased as `EvmAddress` encodes them
+const TOKENS = ["0xa0769f7a8fc65e47de93797b4e21c073c117fc80", "0xe4880249745eac5f1ed9d8f7df844792d560e750"]
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 // blocks 26083549..26083558: 4 USTBL and 1 EUTBL Transfer logs, within Alchemy's free-tier 10-block range
 const FROM = 26083549
@@ -13,7 +13,7 @@ const TO = 26083558
 
 const hex = (n: number) => `0x${n.toString(16)}`
 const logsFilter = (fromBlock: string, toBlock: string, topics: Json = [TRANSFER]) => [
-  { address: SPIKO_TOKENS, fromBlock, toBlock, topics }
+  { address: TOKENS, fromBlock, toBlock, topics }
 ]
 
 const cases: ReadonlyArray<Case> = [

@@ -1,41 +1,20 @@
 /**
- * Raw Soroban contract event indexer over {@link StellarRpc}: every event of a `getEvents` filter over any ledger
- * range, in chain order.
+ * Soroban contract event indexing on top of {@link StellarRpc}: the last confirmed ledger, the events of a set of
+ * contracts over a ledger range, and a stream of them following the confirmed head.
  *
- * Range logic, sequential:
- * - the range is cut into chunks of at most `maxBlockRange` ledgers,
- * - `contractIds` is cut into groups of at most 5, the RPC limit per filter (`MaxContractIDsLimit` in
- *   https://github.com/stellar/go-stellar-sdk/blob/main/protocols/rpc/get_events.go). Each group is fetched over the
- *   chunk and the chunk's events are merged in event id order, which is chain order,
- * - inside a chunk, `getEvents` is paged with its cursor until the cursor is `undefined`.
+ * Ranges are read in chunks of at most `maxBlockRange` ledgers, each paged with `getEvents` until its cursor is
+ * `undefined`. `contractIds` is split into groups of 5, the RPC limit per filter (`MaxContractIDsLimit` in
+ * https://github.com/stellar/go-stellar-sdk/blob/main/protocols/rpc/get_events.go), merged back in event id order. A
+ * cursor page is pinned to the endpoint that issued it, so when it fails the group restarts once from its first page.
+ * Any other failure fails the whole call and drops the events already read: the caller retries the same range.
  *
- * Failures: the first page of a chunk goes through the RPC fallback, so its error is final. A later page is pinned to
- * the endpoint that issued the cursor and has no fallback: when it fails, the group's partial events in the chunk are
- * dropped and the group restarts once from its first page (on any endpoint). A second cursor page failure fails the call with
- * that error. Every error is a {@link StellarRpcError}, e.g. `Pruned` when no endpoint retains `fromBlock`.
- *
- * **Streaming**
- *
- * `streamEvents` follows the confirmed latest ledger from `fromBlock`: each step fetches the next `maxBlockRange`
- * ledgers at most, up to the confirmed head, through `fetchEvents`, as one {@link StellarIndexerBatch}. The head is
- * read once per catch-up segment: `lastConfirmedBlock` is read again only once the stream reaches the head it last
- * read. A batch is emitted even when it has no events, so the caller's cursor moves on a quiet contract. Caught up, the
- * stream reads the head again on the `poll` schedule until it reaches the next ledger, the schedule starting afresh
- * after each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends
- * after the batch reaching it. With `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`,
- * `Lagging`) is retried at the same ledger; any other failure, or an exhausted schedule, fails the stream. `Pruned` is
- * one of them: RPC nodes keep about 7 days of ledgers, so a `fromBlock` older than that fails the stream at once and
- * the caller picks a newer `fromBlock`. Delivery is at-least-once: save `batch.toBlock` after handling a batch and
- * restart from the ledger after it. Run one stream per (network, filter) at a time: the indexer does not coordinate
- * processes, so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory
- * lock.
- *
+ * @example
  * ```ts
+ * import type { StellarIndexerFilter } from "@effect-blockchain/stellar/StellarIndexer"
+ * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
  * import * as Effect from "effect/Effect"
  * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
- * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
- * import type { StellarIndexerFilter } from "@effect-blockchain/stellar/StellarIndexer"
  *
  * declare const filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
@@ -43,7 +22,7 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* StellarIndexer
- *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
  *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
  *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
@@ -71,9 +50,8 @@ import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "
 import { StellarRpc } from "./StellarRpc.ts"
 
 /**
- * Default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
- * https://github.com/stellar/stellar-rpc/blob/main/cmd/stellar-rpc/internal/methods/get_events.go), so a chunk with
- * fewer events than the page size is done in one request.
+ * The default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
+ * https://github.com/stellar/stellar-rpc/blob/main/cmd/stellar-rpc/internal/methods/get_events.go).
  *
  * @since 0.1.0
  * @category constants
@@ -91,7 +69,11 @@ export type StellarIndexerFilter = Omit<StellarEventsFilter, "limit" | "cursor">
 
 /**
  * The events of the ledgers `[fromBlock, toBlock]` (both inclusive), in chain order, emitted by
- * {@link StellarIndexer.Service.streamEvents}. `events` can be empty.
+ * {@link StellarIndexer.Service.streamEvents}.
+ *
+ * A batch is emitted for every range, even without events. Delivery is at-least-once: save `batch.toBlock` once the
+ * batch is handled and resume from `toBlock + 1`. RPC nodes keep about 7 days of ledgers: an older `fromBlock` fails
+ * the stream with `Pruned`.
  *
  * @since 0.1.0
  * @category models
@@ -117,29 +99,26 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
     filter: StellarIndexerFilter
   ) => Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError>
   /**
-   * The events matching `filter` from `fromBlock` on, one batch of at most `maxBlockRange` confirmed ledgers at a
-   * time, following the latest ledger: see the module's "Streaming" section.
-   *
-   * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
-   * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
-   *   bounded schedule ends the stream when it is exhausted while still caught up.
-   * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same ledger. Off by
-   *   default: the first failure fails the stream. `Pruned` is never retried.
+   * The events matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed ledgers,
+   * following the confirmed head.
    */
   readonly streamEvents: (options: {
     readonly filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
     readonly fromBlock: bigint
+    /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
     readonly toBlock?: bigint | undefined
-    // the schedule's output is ignored
+    /**
+     * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts
+     * after each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
+     */
     readonly poll?: Schedule.Schedule<unknown> | undefined
-    // the schedule's output is ignored
+    /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same ledger. Off by default. */
     readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
   }) => Stream.Stream<StellarIndexerBatch, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarIndexer") {}
 
 /**
- * The default spacing of the `poll` schedule of {@link StellarIndexer.Service.streamEvents}: the head is read again
- * every 10 seconds once caught up.
+ * The default `poll` spacing of {@link StellarIndexer.Service.streamEvents}: 10 seconds.
  *
  * @since 0.1.0
  * @category constants
@@ -162,7 +141,7 @@ interface IndexerConfirmedRange {
  * - `confirmations`: ledgers kept behind the latest one, default {@link StellarNetwork.defaultConfirmations} of the
  *   RPC's network.
  * - `maxBlockRange`: ledgers per chunk, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
- * - `limit`: `getEvents` page size, default the RPC's (1000), at most 10000.
+ * - `limit`: `getEvents` page size, default 1000, at most 10000.
  *
  * @since 0.1.0
  * @category layers
@@ -199,8 +178,7 @@ export const layer = (options: {
           const toBlock = BigInt_.min(fromBlock + range - BigInt(1), filter.toBlock)
           return Effect.forEach(groups, (contractIds) => {
             const group = { ...filter, contractIds, fromBlock, toBlock, limit }
-            // pages until the cursor is undefined. The first page (no cursor) has the fallback chain, a cursor page
-            // has not: a failed cursor page drops the group's events and restarts it once from its first page
+            // a cursor page has no fallback: when it fails, the group restarts once from its first page
             return Stream.paginate(
               Option.none<StellarEventsCursor>(),
               (cursor) =>
@@ -222,9 +200,7 @@ export const layer = (options: {
         fetchEvents,
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next ledger to read: the head last read when it reaches `next` (the confirmed head
-          // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
-          // stream), then a batch up to it
+          // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
           const step = (
             { head, next }: IndexerConfirmedRange
           ): Effect.Effect<

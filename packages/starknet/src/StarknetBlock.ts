@@ -9,12 +9,9 @@ import { PaddedFelt } from "./internal/felt.ts"
 import { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
 
 /**
- * A confirmed block header with its transaction hashes, decoded from the raw JSON-RPC block: keys are snake case on
- * the encoded side (`block_hash`) and camel case on the decoded side, `block_number` and `timestamp` (unix seconds)
- * are JSON integers decoded to `bigint`s.
- *
- * `blockHash` and `parentHash` are felts as `0x` + 64 lowercase hex digits, `transactions` are in block order. A
- * pre-confirmed block (no block hash, no `ACCEPTED_ON_L2` or `ACCEPTED_ON_L1` status) does not decode.
+ * A confirmed block header with its transaction hashes in block order, decoded from the raw JSON-RPC block (snake case
+ * keys, integers as `bigint`). `timestamp` is in Unix seconds. A pre-confirmed block (no block hash, no
+ * `ACCEPTED_ON_L2` or `ACCEPTED_ON_L1` status) does not decode.
  *
  * @example
  * ```ts

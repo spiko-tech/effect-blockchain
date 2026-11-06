@@ -1,5 +1,5 @@
 // Records real provider replies into `test/fixtures/<provider>/<case>.json`, replayed by `SolanaRpc.fixtures.test.ts`.
-// Run: `node --env-file=$HOME/spiko/loop-crypto/.env scripts/record-fixtures.ts` (needs the network).
+// Run: `node --env-file=<path to .env> scripts/record-fixtures.ts` (needs the network).
 // Inputs are pinned so that a re-run records the same data, except the head (`slot`) which moves by nature.
 import { type Case, record, secret } from "../../core/scripts/recordFixtures.ts"
 

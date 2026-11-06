@@ -7,7 +7,7 @@
 // `startLedger` (a ledger with EUTBL and USTBL events) to move it, then update the values the tests assert.
 import { type Case, record, secret } from "../../core/scripts/recordFixtures.ts"
 
-// Spiko tokens, docs.spiko.io/documentation/tokenization/addresses
+// tokenized fund tokens
 const EUTBL = "CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH6TW7EALKVHCXTMWDDOF"
 const USTBL = "CARUUX2FZNPH6DGJOEUFSIUQWYHNL5AVDV7PMVSHWL7OBYIBFC76F4TO"
 
