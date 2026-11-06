@@ -17,6 +17,27 @@
  *
  * Methods are named after the JSON-RPC method without its namespace (`eth_getLogs` is `getLogs`).
  *
+ * @example
+ * ```ts
+ * import type { EvmLog } from "@effect-blockchain/evm/EvmLog"
+ * import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
+ * import * as Effect from "effect/Effect"
+ *
+ * // dates a batch of logs with one `eth_getBlockByNumber` per distinct block
+ * const withTimestamps = (logs: ReadonlyArray<EvmLog>) =>
+ *   Effect.gen(function*() {
+ *     const rpc = yield* EvmRpc.EvmRpc
+ *     const blocks = yield* Effect.forEach(
+ *       new Set(logs.map((log) => log.blockNumber)),
+ *       (blockNumber) => rpc.getBlockByNumber({ blockNumber }),
+ *       { concurrency: 4 }
+ *     )
+ *     // Unix seconds, by block number
+ *     const timestamps = new Map(blocks.map((block) => [block.number, block.timestamp]))
+ *     return logs.map((log) => ({ ...log, timestamp: timestamps.get(log.blockNumber) }))
+ *   })
+ * ```
+ *
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
@@ -33,6 +54,7 @@ import type * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
 import * as Schema from "effect/Schema"
 import type { EvmAddress } from "./EvmAddress.ts"
+import type { EvmBlock } from "./EvmBlock.ts"
 import type { EvmHexData } from "./EvmHexData.ts"
 import type { EvmLog } from "./EvmLog.ts"
 import * as EvmNetwork from "./EvmNetwork.ts"
@@ -60,7 +82,7 @@ export interface EvmRpcEndpoint {
  * |---|---|---|
  * | `Unavailable` | transport, attempt timeout, HTTP error status, rate-limit or internal error codes, after the retries | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or a log fails the `getLogs` checks | yes |
- * | `Lagging` | the endpoint's head is below the requested `toBlock` | yes |
+ * | `Lagging` | the endpoint's head is below the requested `toBlock` or block, or it does not know a block below its head | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
  * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
  * | `WrongNetwork` | the endpoint's `eth_chainId` is not the configured network's | no |
@@ -109,6 +131,13 @@ export class EvmRpc extends Context.Service<EvmRpc, {
   readonly chainId: Effect.Effect<EvmNetwork.EvmChainId, EvmRpcError>
   /** `eth_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, EvmRpcError>
+  /**
+   * `eth_getBlockByNumber` without the transactions, only answered by an endpoint whose head has reached
+   * `blockNumber`. A block unknown to an endpoint past it (`null`) fails with `Lagging`: every node keeps the headers
+   * of its chain, so the reply came from a backend node behind the provider's head. A block whose `number` is not the
+   * requested one fails with `InvalidResponse`.
+   */
+  readonly getBlockByNumber: (options: { readonly blockNumber: bigint }) => Effect.Effect<EvmBlock, EvmRpcError>
   /**
    * `eth_getLogs`, only answered by an endpoint whose head has reached `toBlock`. Logs are returned in chain order:
    * sorted by block then log index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty
@@ -186,6 +215,31 @@ export const layer = (options: {
           Effect.tap((head) => Ref.update(endpoint.head, BigInt_.max(head)))
         )
 
+      const getBlockByNumberOn = (endpoint: Endpoint, blockNumber: bigint) =>
+        Effect.gen(function*() {
+          const method = RpcMethods.getBlockByNumber.name
+          yield* rpc.guard(endpoint, method, blockNumber, blockNumberOn(endpoint))
+          const block = yield* rpc.call(endpoint, RpcMethods.getBlockByNumber, [blockNumber, false])
+          if (block === null) {
+            const head = yield* Ref.get(endpoint.head)
+            return yield* rpc.fail(
+              endpoint,
+              method,
+              new JsonRpc.Lagging({ head, toBlock: blockNumber }),
+              new Error(`block ${blockNumber} is unknown below head ${head}`)
+            )
+          }
+          if (block.number !== blockNumber) {
+            return yield* rpc.fail(
+              endpoint,
+              method,
+              new JsonRpc.InvalidResponse(),
+              new Error(`block ${block.number} answered for block ${blockNumber}`)
+            )
+          }
+          return block
+        })
+
       const getLogsOn = (endpoint: Endpoint, filter: EvmLogsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getLogs.name
@@ -212,6 +266,8 @@ export const layer = (options: {
         network,
         chainId: rpc.withFallback(rpc.checkNetwork),
         blockNumber: rpc.withFallback(blockNumberOn),
+        getBlockByNumber: ({ blockNumber }) =>
+          rpc.withFallback((endpoint) => getBlockByNumberOn(endpoint, blockNumber)),
         getLogs: (filter) =>
           filter.fromBlock > filter.toBlock
             ? Effect.succeed([])
