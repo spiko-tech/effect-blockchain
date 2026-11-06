@@ -1,13 +1,13 @@
 // Records real Starknet mainnet provider replies into `test/fixtures/<provider>/<case>.json`, replayed by
 // `test/StarknetRpc.fixtures.test.ts`. Needs the network and the keys, never written to the fixtures:
 //
-//   node --env-file=$HOME/spiko/loop-crypto/.env scripts/record-fixtures.ts
+//   node --env-file=<path to .env> scripts/record-fixtures.ts
 //
 // Inputs are pinned (past block range, transaction hash) so a re-run records the same replies, except the head.
 // Bodies are the same as the ones `src/internal/rpcMethods.ts` encodes.
 import { type Case, type Json, record, secret } from "../../core/scripts/recordFixtures.ts"
 
-// Spiko EUTBL on Starknet, blocks 1380300..1380400 hold 12 Transfer events in 3 transactions
+// a tokenized fund token on Starknet, blocks 1380300..1380400 hold 12 Transfer events in 3 transactions
 const EUTBL = "0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2"
 const RECEIPT_TX = "0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab"
 

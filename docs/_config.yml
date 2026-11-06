@@ -2,4 +2,4 @@ remote_theme: mikearnaldi/just-the-docs
 search_enabled: true
 aux_links:
   "GitHub":
-    - "//github.com/spiko-tech/effect-messaging"
+    - "//github.com/spiko-tech/effect-blockchain"

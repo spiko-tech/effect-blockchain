@@ -1,22 +1,26 @@
 /**
- * Typed, read-only standard Stellar RPC methods, served by an ordered list of endpoints with fallback.
+ * Typed, read-only Stellar RPC methods over an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure (see {@link StellarRpcError}) moves to the next
- * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
- * endpoint is checked to serve the configured network (`getNetwork` passphrase), once. A `getEvents` call with a
- * cursor only goes to the endpoint that issued the cursor, with no fallback.
+ * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
+ * is checked once to serve the configured network (`getNetwork` passphrase). Every method is a read, so retries and
+ * fallback are safe. Methods are named after the RPC method. A `getEvents` page cursor is only sent to the endpoint
+ * that issued it, with no fallback.
  *
- * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future
- * write method (e.g. `sendTransaction`) must take a transaction signed outside this module, resend the same signed
- * bytes on fallback, never retry blindly after an unclear failure and confirm the outcome by transaction hash.
+ * @example
+ * ```ts
+ * import type { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
+ * import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
+ * import * as Effect from "effect/Effect"
  *
- * Adding a method takes three steps:
- * 1. define it once in `internal/rpcMethods.ts`: its RPC name, a params codec and a result codec,
- * 2. add one line to the {@link StellarRpc} service and its layer, calling it through the shared `call`, which does
- *    the network check, the request, the error classification, the decoding and the span,
- * 3. add one test decoding a fake response.
+ * declare const contract: StellarContractAddress
  *
- * Methods are named after the RPC method.
+ * // the first page of events of `contract` over the last 100 ledgers
+ * const recent = Effect.gen(function*() {
+ *   const rpc = yield* StellarRpc.StellarRpc
+ *   const { sequence } = yield* rpc.getLatestLedger
+ *   return yield* rpc.getEvents({ contractIds: [contract], fromBlock: sequence - BigInt(100), toBlock: sequence })
+ * })
+ * ```
  *
  * @since 0.1.0
  */
@@ -51,22 +55,12 @@ export interface StellarRpcEndpoint {
 }
 
 /**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
+ * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
+ * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
+ * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
- * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
- *
- * | reason | meaning | falls back to the next endpoint |
- * |---|---|---|
- * | `Unavailable` | transport, HTTP error status, JSON-RPC internal error `-32603`, after the retries, or a timeout (not retried) | yes |
- * | `InvalidResponse` | the body is not a JSON-RPC reply, the result fails its schema, or an event fails the `getEvents` checks | yes |
- * | `Lagging` | the endpoint's latest ledger is below the requested `toBlock` | yes |
- * | `Pruned` | the endpoint's oldest retained ledger is above the requested `fromBlock` (or cursor) | yes |
- * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
- * | `WrongNetwork` | the endpoint's `getNetwork` passphrase is not the configured network's | no |
- *
- * A call with a cursor never falls back, whatever the reason.
+ * On Stellar, `Unavailable` includes the code -32603, `InvalidResponse` an event outside the `getEvents` filter,
+ * `Lagging` a latest ledger below `toBlock`, and `Pruned` an oldest retained ledger above `fromBlock` (or the cursor).
  *
  * @since 0.1.0
  * @category errors
@@ -172,17 +166,12 @@ export class StellarRpc extends Context.Service<StellarRpc, {
   /** `getLatestLedger` */
   readonly getLatestLedger: Effect.Effect<StellarLatestLedger, StellarRpcError>
   /**
-   * `getEvents` for contract events, one page. Without a cursor, only answered by an endpoint whose latest ledger has
-   * reached `toBlock` and that still retains `fromBlock`. Events are returned in chain order: sorted by event id, which
-   * orders them by ledger, transaction, operation and event index. Events above `toBlock` are dropped. An event of
-   * another type, of another contract or below `fromBlock` fails with `InvalidResponse`. An empty range returns no
-   * events and no cursor.
+   * `getEvents` for contract events, one page in chain order (by event id), only answered by an endpoint whose latest
+   * ledger has reached `toBlock` and that still retains `fromBlock`. Events above `toBlock` are dropped, and an event of
+   * another type, of another contract or below `fromBlock` fails with `InvalidResponse`.
    *
-   * The range is done (`cursor: undefined`) when the RPC cursor is past `toBlock`. The RPC cursor is the last event's
-   * id when the page is full, otherwise the end of the scanned ledgers (the RPC scans at most 10000 ledgers per
-   * request), so a short page is not enough: the range is done when the cursor's ledger is above `toBlock`, or equals
-   * it on a page that is not full. A short page ending at the endpoint's latest ledger below `toBlock` fails with
-   * `Lagging`.
+   * `cursor` is `undefined` once the RPC cursor passes `toBlock`. A short page is not the end of the range: the RPC
+   * scans at most 10000 ledgers per request. A short page stopping at a latest ledger below `toBlock` fails `Lagging`.
    */
   readonly getEvents: (filter: StellarEventsFilter) => Effect.Effect<StellarEventsPage, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarRpc") {}
@@ -202,14 +191,9 @@ const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event
 type Endpoint = JsonRpc.Endpoint<StellarNetworkInfo, StellarRpcError>
 
 /**
- * Builds a {@link StellarRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`.
- *
- * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
- *   endpoint at once.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (`-32603`) are retried with an exponential backoff
- *   from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status (e.g. 403) is not
- *   retried and falls back at once.
+ * Builds a {@link StellarRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
+ * (e.g. `FetchHttpClient.layer`). `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and
+ * `retryDelay` (default 500 millis) set the backoff before falling back: see {@link JsonRpc.Unavailable}.
  *
  * @since 0.1.0
  * @category layers
@@ -251,9 +235,8 @@ export const layer = (options: {
       })
       const { call, fail, withFallback } = rpc
 
-      // every answer that tells a latest ledger raises the endpoint's known head, the guard only asks when it is behind
-      // retention is not cached (the oldest ledger moves): getHealth checks it when the head is checked, the RPC
-      // checks it on every getEvents call and its out-of-range error is mapped back to Pruned or Lagging
+      // retention is not cached (the oldest ledger moves): getHealth checks it with the head, and the RPC's own
+      // out-of-range error on getEvents is mapped back to Pruned or Lagging
       const guard = Effect.fnUntraced(function*(endpoint: Endpoint, fromBlock: bigint, toBlock: bigint) {
         if ((yield* Ref.get(endpoint.head)) >= toBlock) return
         const health = yield* call(endpoint, RpcMethods.getHealth, undefined)

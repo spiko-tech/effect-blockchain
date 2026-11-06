@@ -8,11 +8,8 @@ import { EvmHexData } from "./EvmHexData.ts"
 import { QuantityFromHex } from "./internal/QuantityFromHex.ts"
 
 /**
- * The fields of a mined block that a caller needs to date its logs, decoded from the raw JSON-RPC block: quantities
- * are hex strings on the encoded side (`"0x10"`) and `bigint` on the decoded side. Every other field of the reply
- * (transactions, gas, bloom...) is ignored.
- *
- * `timestamp` is the block's Unix time in seconds, as the node returns it (multiply by 1000 for a JavaScript `Date`).
+ * The header fields of a mined block, decoded from the raw JSON-RPC block with hex quantities (`"0x10"`) as `bigint`.
+ * Every other field is ignored. `timestamp` is in Unix seconds.
  *
  * @since 0.1.0
  * @category schemas

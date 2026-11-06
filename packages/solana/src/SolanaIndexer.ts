@@ -1,49 +1,19 @@
 /**
- * Raw indexing of the transactions touching one Solana address, on top of {@link SolanaRpc}. Blocks are slots.
+ * Solana transaction indexing on top of {@link SolanaRpc}: the last confirmed slot, the transactions touching an
+ * address over a slot range, and a stream of them following the confirmed head. Blocks are slots.
  *
- * Everything is read at `finalized` commitment. `fetchTransactions` pages `getSignaturesForAddress` from the head
- * backwards (newest first, 1000 per page, `before` = the last signature of the previous page) until a page is short or
- * reaches below `fromBlock`, keeps the signatures with `fromBlock <= slot <= toBlock`, then calls `getTransaction` for
- * each, one after another. The node API has no slot range: the cost grows with the address's history between the head
- * and `fromBlock`, not with the size of the range.
+ * Everything is read at `finalized` commitment. `getSignaturesForAddress` has no slot range, so a range is paged from
+ * the head backwards until it passes `fromBlock`: the cost grows with the address's history since `fromBlock`, then
+ * each transaction costs one `getTransaction`. Each page sends `minContextSlot: toBlock`, so a lagging endpoint that
+ * honours it falls back. Any failure fails the whole call and nothing is returned: the caller retries the same range.
  *
- * Every page carries `minContextSlot: toBlock`, so an endpoint that honours it and has not reached `toBlock` answers
- * `Lagging` and the call falls back to the next endpoint. Some providers ignore it (Alchemy, see
- * {@link SolanaRpc.SolanaSignaturesQuery}): reading at `finalized` limits the risk of a lagging node silently missing
- * recent signatures without removing it.
- *
- * `encoding` picks the `getTransaction` encoding of every transaction, `base64` by default: see
- * {@link SolanaRpc.SolanaTransactionEncoding}. It is a per-call option, like the filter, so one indexer serves both.
- *
- * Any failure fails the whole call with the {@link SolanaRpc.SolanaRpcError} of the last endpoint tried, e.g. `Pruned`
- * when no endpoint returns a transaction it has just listed. Nothing is returned partially: the caller retries the
- * same range.
- *
- * **Streaming**
- *
- * `streamTransactions` follows the confirmed head from `fromBlock`. A step reads `lastConfirmedBlock` and pages the
- * signatures of `[next, lastConfirmedBlock]` as `fetchTransactions` does, in chain order, then cuts them into groups of
- * at most `maxBatchSize` signatures without splitting a slot: a slot with more signatures stays whole in one group.
- * Each following step calls `getTransaction` for one group and emits it as one {@link SolanaIndexerBatch}, so a long
- * catch-up saves progress batch by batch and holds only the signature list in memory. The batches tile the range: the
- * first starts at `next`, each ends at its last slot and the next starts right after, the last ends at the confirmed
- * head. A range without signatures is one empty batch, so the caller's cursor moves on a quiet address. The head is
- * read once per catch-up segment: `lastConfirmedBlock` is read again only once the stream reaches the head it last
- * read. Caught up, the stream reads the head again on the `poll` schedule until it reaches the next slot, the schedule
- * starting afresh after each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a
- * `toBlock` it ends after the batch reaching it. With `retry`, a step (the signature paging or one group's
- * transactions) failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same
- * position; any other failure, or an exhausted schedule, fails the stream. Delivery is at-least-once: save
- * `batch.toBlock` after handling a batch and restart from the slot after it. Run one stream per (network, filter) at a
- * time: the indexer does not coordinate processes, so a service with several replicas provides the exclusivity itself,
- * for example with a Postgres advisory lock.
- *
+ * @example
  * ```ts
+ * import type { SolanaIndexerFilter } from "@effect-blockchain/solana/SolanaIndexer"
+ * import { SolanaIndexer } from "@effect-blockchain/solana/SolanaIndexer"
  * import * as Effect from "effect/Effect"
  * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
- * import { SolanaIndexer } from "@effect-blockchain/solana/SolanaIndexer"
- * import type { SolanaIndexerFilter } from "@effect-blockchain/solana/SolanaIndexer"
  *
  * declare const filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
@@ -51,7 +21,7 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* SolanaIndexer
- *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
  *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
  *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
@@ -114,7 +84,11 @@ export interface SolanaIndexerFilter {
 
 /**
  * The transactions of slots `[fromBlock, toBlock]` (both inclusive), in chain order, emitted by
- * {@link SolanaIndexer.Service.streamTransactions}. `transactions` can be empty.
+ * {@link SolanaIndexer.Service.streamTransactions}.
+ *
+ * A batch is emitted for every range, even without transactions. Delivery is at-least-once: save `batch.toBlock` once
+ * the batch is handled and resume from `toBlock + 1`. A batch holds at most `maxBatchSize` transactions, more when a
+ * single slot has more, as a slot is never split.
  *
  * @since 0.1.0
  * @category models
@@ -128,22 +102,23 @@ export interface SolanaIndexerBatch<Encoding extends SolanaTransactionEncoding =
 /**
  * The {@link SolanaIndexer.Service.streamTransactions} options, `encoding` aside.
  *
- * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
- * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
- *   bounded schedule ends the stream when it is exhausted while still caught up.
- * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same position. Off by
- *   default: the first failure fails the stream.
- *
  * @since 0.1.0
  * @category models
  */
 export interface SolanaStreamOptions {
   readonly filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
   readonly fromBlock: bigint
+  /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
-  // the schedule's output is ignored
+  /**
+   * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts after
+   * each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
+   */
   readonly poll?: Schedule.Schedule<unknown> | undefined
-  // the schedule's output is ignored
+  /**
+   * Retries a step (the signature paging or one batch's transactions) failing with a transient reason
+   * ({@link JsonRpc.isTransient}) at the same position. Off by default.
+   */
   readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
 }
 
@@ -169,9 +144,8 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
     ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<Encoding>>, SolanaRpcError>
   }
   /**
-   * The transactions touching `filter.address` from slot `fromBlock` on, one batch of at most `maxBatchSize`
-   * transactions at a time (more when a single slot has more), following the head: see the module's "Streaming"
-   * section and {@link SolanaStreamOptions}. `encoding` defaults to `base64`.
+   * The transactions touching `filter.address` from slot `fromBlock` on, in batches of at most `maxBatchSize`
+   * signatures, following the confirmed head. `encoding` defaults to `base64`.
    */
   readonly streamTransactions: {
     (
@@ -197,8 +171,7 @@ const COMMITMENT = "finalized"
 export const DEFAULT_MAX_BATCH_SIZE = 100
 
 /**
- * The default spacing of the `poll` schedule of {@link SolanaIndexer.Service.streamTransactions}: the head is
- * read again every 10 seconds once caught up.
+ * The default `poll` spacing of {@link SolanaIndexer.Service.streamTransactions}: 10 seconds.
  *
  * @since 0.1.0
  * @category constants
@@ -231,12 +204,11 @@ type Step = readonly [ReadonlyArray<SolanaIndexerBatch<SolanaTransactionEncoding
 /**
  * Builds a {@link SolanaIndexer} on the provided {@link SolanaRpc}.
  *
- * - `confirmations` defaults to {@link SolanaNetwork.defaultConfirmations} of the rpc's network.
+ * - `confirmations` defaults to {@link SolanaNetwork.defaultConfirmations} for the RPC's network.
  * - `maxBatchSize`, a positive integer, the signatures per `streamTransactions` batch, defaults to
  *   {@link DEFAULT_MAX_BATCH_SIZE}.
  *
- * There is no `maxBlockRange`: `getSignaturesForAddress` takes no slot range, only a page size, so a range cannot be
- * split into chunks.
+ * There is no `maxBlockRange`: `getSignaturesForAddress` takes no slot range to split.
  *
  * @since 0.1.0
  * @category layers
@@ -281,9 +253,8 @@ export const layer = (options: {
             }))
         ).pipe(
           Stream.runCollect,
-          // The node lists newest first, so reversed, slots ascend. Within a slot the node's order is not documented:
-          // reversing it is a best guess at execution order, not a guarantee. `transactionIndex`, which some
-          // providers add, is not in the rpc model.
+          // newest first, so reversed slots ascend. The order within a slot is undocumented: reversing it is a best
+          // guess at execution order (`transactionIndex`, which some providers add, is not in the RPC model)
           Effect.map((signatures) =>
             Arr.reverse(Arr.filter(signatures, ({ slot }) => slot >= filter.fromBlock && slot <= filter.toBlock))
           )
@@ -331,11 +302,9 @@ export const layer = (options: {
         if (toBlock !== undefined && fromBlock > toBlock) {
           return Stream.empty
         }
-        // ends after the batch reaching `toBlock`
         const after = (end: bigint, cap: bigint, groups: Position["groups"]): Option.Option<Position> =>
           end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), cap, groups })
-        // one step: the transactions of the next pending group, or the signatures up to the confirmed head once it
-        // reaches `next`, polled on `poll` (an exhausted `poll` ends the stream)
+        // one step: the transactions of the next pending group, else the signatures up to the polled confirmed head
         const step = (position: Position): Effect.Effect<Step, SolanaRpcError> => {
           const { cap, groups, next } = position
           if (Arr.isReadonlyArrayNonEmpty(groups)) {

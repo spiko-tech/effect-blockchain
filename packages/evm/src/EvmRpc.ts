@@ -1,21 +1,9 @@
 /**
- * Typed, read-only standard EVM JSON-RPC methods, served by an ordered list of endpoints with fallback.
+ * Typed, read-only EVM JSON-RPC methods over an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure (see {@link EvmRpcError}) moves to the next
- * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
- * endpoint is checked to serve the configured network (`eth_chainId`), once.
- *
- * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future
- * write method (e.g. `eth_sendRawTransaction`) must take a transaction signed outside this module, resend the same
- * signed bytes on fallback, never retry blindly after an unclear failure and confirm the outcome by transaction hash.
- *
- * Adding a method takes three steps:
- * 1. define it once in `internal/rpcMethods.ts`: its JSON-RPC name, a params codec and a result codec,
- * 2. add one line to the {@link EvmRpc} service and its layer, calling it through the engine's `call`, which does the
- *    network check, the request, the error classification, the decoding and the span,
- * 3. add one test decoding a fake response.
- *
- * Methods are named after the JSON-RPC method without its namespace (`eth_getLogs` is `getLogs`).
+ * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
+ * is checked once to serve the configured network (`eth_chainId`). Every method is a read, so retries and fallback
+ * are safe. Methods are named after the JSON-RPC method without its namespace (`eth_getLogs` is `getLogs`).
  *
  * @example
  * ```ts
@@ -23,7 +11,7 @@
  * import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
  * import * as Effect from "effect/Effect"
  *
- * // dates a batch of logs with one `eth_getBlockByNumber` per distinct block
+ * // dates logs with one `eth_getBlockByNumber` per distinct block
  * const withTimestamps = (logs: ReadonlyArray<EvmLog>) =>
  *   Effect.gen(function*() {
  *     const rpc = yield* EvmRpc.EvmRpc
@@ -32,7 +20,6 @@
  *       (blockNumber) => rpc.getBlockByNumber({ blockNumber }),
  *       { concurrency: 4 }
  *     )
- *     // Unix seconds, by block number
  *     const timestamps = new Map(blocks.map((block) => [block.number, block.timestamp]))
  *     return logs.map((log) => ({ ...log, timestamp: timestamps.get(log.blockNumber) }))
  *   })
@@ -72,20 +59,12 @@ export interface EvmRpcEndpoint {
 }
 
 /**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
+ * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
+ * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
+ * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
- * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
- *
- * | reason | meaning | falls back to the next endpoint |
- * |---|---|---|
- * | `Unavailable` | transport, attempt timeout, HTTP error status, rate-limit or internal error codes, after the retries | yes |
- * | `InvalidResponse` | the reply is not JSON or fails its schema, or a log fails the `getLogs` checks | yes |
- * | `Lagging` | the endpoint's head is below the requested `toBlock` or block, or it does not know a block below its head | yes |
- * | `Pruned` | the endpoint lacks the requested history (unused on EVM for now) | yes |
- * | `Rejected` | any other JSON-RPC error: not retried, but another provider may answer (e.g. a lower block range limit) | yes |
- * | `WrongNetwork` | the endpoint's `eth_chainId` is not the configured network's | no |
+ * On EVM, `Unavailable` includes the codes -32005, -32603, -32007, -1 and 429, `InvalidResponse` a log outside the
+ * `getLogs` filter, and `Lagging` a head below the requested block.
  *
  * @since 0.1.0
  * @category errors
@@ -159,14 +138,8 @@ const byBlockThenIndex = Order.combine(
 
 /**
  * Builds an {@link EvmRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
- * (e.g. `FetchHttpClient.layer`).
- *
- * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
- *   endpoint at once.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (-32005, -32603, -32007, -1, 429) are retried with an
- *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
- *   status (e.g. 403) is not retried and falls back at once.
+ * (e.g. `FetchHttpClient.layer`). `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and
+ * `retryDelay` (default 500 millis) set the backoff before falling back: see {@link JsonRpc.Unavailable}.
  *
  * @since 0.1.0
  * @category layers

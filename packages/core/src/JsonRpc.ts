@@ -1,24 +1,25 @@
 /**
- * The JSON-RPC engine shared by the chain RPC modules: an ordered list of endpoints with fallback, sending one request
- * per HTTP call through the provided `HttpClient`.
+ * The shared JSON-RPC engine of the `@effect-blockchain` chain packages. Import it for the reasons a chain error
+ * carries and for the RPC metrics.
  *
- * Every call starts at the first endpoint. A failure moves to the next endpoint, except `WrongNetwork`, which stops at
- * once.
- * Before its first call, each endpoint is checked to serve the configured network, once: a mismatch is kept, a failed
- * check is not.
+ * Every chain error (`EvmRpcError`, `SolanaRpcError`, `StarknetRpcError`, `StellarRpcError`) has a `reason`, matched
+ * with `Effect.catchReason`. The metrics are recorded with `effect/Metric`, free when nobody reads them, and their
+ * attributes hold the endpoint name, never its URL.
  *
- * A JSON-RPC error reply is classified by its code through the chain's code table, whatever the HTTP status (some
- * providers answer HTTP 400 with one); any other non-2xx reply is `Unavailable` with its status.
+ * @example
+ * ```ts
+ * import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+ * import * as Effect from "effect/Effect"
+ * import * as Schema from "effect/Schema"
  *
- * Each chain keeps its own error class, code table, network check, methods and their checks; the engine only builds
- * errors through `makeError`.
+ * // shaped like the chain errors
+ * class ChainRpcError extends Schema.TaggedError<ChainRpcError>()("ChainRpcError", { reason: JsonRpc.Reason }) {}
  *
- * Metrics, recorded with `effect/Metric` (free when nobody reads them), attributes never hold the URL:
- * - `effect_blockchain_rpc_requests_total` (counter): requests per endpoint attempt, its HTTP retries included, by
- *   `network`, `endpoint` (its name), `method` and `outcome` (`success` or the reason tag).
- * - `effect_blockchain_rpc_request_duration` (timer, milliseconds): the duration of the same requests, same attributes.
- * - `effect_blockchain_rpc_fallbacks_total` (counter): moves to the next endpoint, by `network`, `endpoint` (the one
- *   that failed), `method` and `outcome` (the reason tag that caused it).
+ * declare const getLogs: Effect.Effect<ReadonlyArray<string>, ChainRpcError>
+ *
+ * // no endpoint keeps this range: read nothing, any other reason stays a ChainRpcError
+ * const logs = getLogs.pipe(Effect.catchReason("ChainRpcError", "Pruned", () => Effect.succeed([])))
+ * ```
  *
  * @since 0.1.0
  */
@@ -43,8 +44,10 @@ import * as Schema from "effect/Schema"
 import * as SynchronizedRef from "effect/SynchronizedRef"
 
 /**
- * The endpoint could not answer: transport, attempt timeout, HTTP error status without a JSON-RPC error reply or an
- * `Unavailable` JSON-RPC code, after the retries. `status` is the HTTP status when it is not 2xx.
+ * The endpoint could not answer: transport error, attempt timeout, HTTP error status without a JSON-RPC error, or a
+ * JSON-RPC code the chain maps to `Unavailable`. Transport errors, HTTP 408/429/500/502/503/504 and those codes are
+ * retried on the same endpoint with a jittered exponential backoff honoring `Retry-After`, a timed-out attempt is not.
+ * `status` is the HTTP status when it is not 2xx.
  *
  * @since 0.1.0
  * @category reasons
@@ -102,7 +105,7 @@ export class WrongNetwork extends Schema.TaggedError<WrongNetwork>()("WrongNetwo
 }) {}
 
 /**
- * Why a call failed, the `reason` of every chain error:
+ * Why a call failed, the `reason` of every chain error, matched with `Effect.catchReason` or `Effect.catchReasons`:
  *
  * | reason | meaning | falls back to the next endpoint |
  * |---|---|---|
@@ -112,22 +115,6 @@ export class WrongNetwork extends Schema.TaggedError<WrongNetwork>()("WrongNetwo
  * | `Pruned` | the endpoint lacks the requested history | yes |
  * | `Rejected` | any other JSON-RPC error, whatever the HTTP status, or params that do not encode. Not retried, as the same endpoint would answer the same, but providers disagree on limits (e.g. a block range): another may answer | yes |
  * | `WrongNetwork` | the endpoint does not serve the configured network | no |
- *
- * Each reason is a tagged error, matched with `Effect.catchReason` or `Effect.catchReasons`:
- *
- * ```ts
- * import * as Effect from "effect/Effect"
- * import * as Schema from "effect/Schema"
- * import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
- *
- * // shaped like `EvmRpcError`, `SolanaRpcError`, `StarknetRpcError` and `StellarRpcError`
- * class ChainRpcError extends Schema.TaggedError<ChainRpcError>()("ChainRpcError", { reason: JsonRpc.Reason }) {}
- *
- * declare const getLogs: Effect.Effect<ReadonlyArray<string>, ChainRpcError>
- *
- * // a pruned range has no logs left to read here, any other reason stays a ChainRpcError
- * const logs = getLogs.pipe(Effect.catchReason("ChainRpcError", "Pruned", () => Effect.succeed([])))
- * ```
  *
  * @since 0.1.0
  * @category reasons
@@ -145,6 +132,7 @@ export type Reason = typeof Reason.Type
  *
  * @since 0.1.0
  * @category reasons
+ * @internal
  */
 export type CodeReason = Exclude<Reason["_tag"], "WrongNetwork">
 
@@ -163,6 +151,7 @@ export const isTransient = (reason: Reason): boolean =>
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export interface ErrorFields {
   readonly reason: Reason
@@ -177,6 +166,7 @@ export interface ErrorFields {
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export type ErrorShape = Omit<ErrorFields, "cause">
 
@@ -197,6 +187,7 @@ export interface EndpointConfig {
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export interface Endpoint<Info, E> extends EndpointConfig {
   readonly head: Ref.Ref<bigint>
@@ -209,6 +200,7 @@ export interface Endpoint<Info, E> extends EndpointConfig {
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export interface Method<Params, A, J = Schema.Json> {
   readonly name: string
@@ -221,17 +213,15 @@ export interface Method<Params, A, J = Schema.Json> {
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export type Send<E, J = Schema.Json> = <Params, A>(method: Method<Params, A, J>, params: Params) => Effect.Effect<A, E>
 
 /**
  * - `spanPrefix` names the spans: `${spanPrefix}.${method}`.
- * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
- *   endpoint at once.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` codes are retried with an exponential backoff from `retryDelay`
- *   (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP status is not retried, unless its body is
- *   a JSON-RPC error with an `Unavailable` code.
+ * - `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and `retryDelay` (default 500 millis)
+ *   set the backoff: see {@link Unavailable}. HTTP 408/429/500/502/503/504 are retried, any other status only when its
+ *   body is a JSON-RPC error with an `Unavailable` code.
  * - `codes` maps JSON-RPC error codes to a reason tag, any other code is `Rejected`, whatever the HTTP status of the
  *   reply. The code is the error's `code`, else the HTTP status of a non-2xx reply.
  * - `parseBody` parses a reply body, default `JSON.parse` (an empty body is `null`).
@@ -241,6 +231,7 @@ export type Send<E, J = Schema.Json> = <Params, A>(method: Method<Params, A, J>,
  *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export interface Options<Info, E, J = Schema.Json> {
   readonly spanPrefix: string
@@ -256,8 +247,11 @@ export interface Options<Info, E, J = Schema.Json> {
 }
 
 /**
+ * The engine built by {@link make}, used by each chain's RPC layer.
+ *
  * @since 0.1.0
  * @category models
+ * @internal
  */
 export interface JsonRpc<Info, E, J = Schema.Json> {
   /** Builds the chain's error for `endpoint`. */
@@ -353,10 +347,12 @@ const withoutUrl = (error: SendError): Error =>
     : error
 
 /**
- * Builds the engine over `options.endpoints`, tried in order.
+ * Builds the engine over `options.endpoints`, tried in order. Each endpoint's network is checked once before its first
+ * call: a mismatch is kept, a failed check is retried on the next call.
  *
  * @since 0.1.0
  * @category constructors
+ * @internal
  */
 export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = Schema.Json>(
   options: Options<Info, E, J>

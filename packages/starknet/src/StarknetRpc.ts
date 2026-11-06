@@ -1,23 +1,33 @@
 /**
- * Typed, read-only standard Starknet JSON-RPC methods, served by an ordered list of endpoints with fallback.
+ * Typed, read-only Starknet JSON-RPC methods over an ordered list of endpoints with fallback.
  *
- * Every call starts at the first endpoint. An endpoint failure (see {@link StarknetRpcError}) moves to the next
- * endpoint, except `WrongNetwork`, which stops at once. Before its first call, each
- * endpoint is checked to serve the configured network (`starknet_chainId`), once. A call that continues a
- * `starknet_getEvents` page goes to the endpoint that returned the cursor only.
+ * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
+ * is checked once to serve the configured network (`starknet_chainId`). Every method is a read, so retries and
+ * fallback are safe. Methods are named after the JSON-RPC method without its namespace (`starknet_getEvents` is
+ * `getEvents`). A `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
  *
- * Every method is a read and safe to repeat, which is what makes the fallback and the HTTP retries sound. A future
- * write method (e.g. `starknet_addInvokeTransaction`) must take a transaction signed outside this module, resend the
- * same signed transaction on fallback, never retry blindly after an unclear failure and confirm the outcome by
- * transaction hash.
+ * @example
+ * ```ts
+ * import type { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
+ * import type { StarknetEvent } from "@effect-blockchain/starknet/StarknetEvent"
+ * import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
+ * import * as Effect from "effect/Effect"
  *
- * Adding a method takes three steps:
- * 1. define it once in `internal/rpcMethods.ts`: its JSON-RPC name, a by-name params codec and a result codec,
- * 2. add one line to the {@link StarknetRpc} service and its layer, calling it through the shared `call`, which does
- *    the network check, the request, the error classification, the decoding and the span,
- * 3. add one test decoding a fake response.
+ * declare const address: StarknetAddress
  *
- * Methods are named after the JSON-RPC method without its namespace (`starknet_getEvents` is `getEvents`).
+ * // every event of `address` in blocks 100 to 200, page by page
+ * const events = Effect.gen(function*() {
+ *   const rpc = yield* StarknetRpc.StarknetRpc
+ *   const all: Array<StarknetEvent> = []
+ *   let cursor: StarknetRpc.StarknetEventsCursor | undefined
+ *   do {
+ *     const page = yield* rpc.getEvents({ address, fromBlock: BigInt(100), toBlock: BigInt(200), cursor })
+ *     all.push(...page.events)
+ *     cursor = page.cursor
+ *   } while (cursor !== undefined)
+ *   return all
+ * })
+ * ```
  *
  * @since 0.1.0
  */
@@ -51,20 +61,13 @@ export interface StarknetRpcEndpoint {
 }
 
 /**
- * A failed call. `code` is the JSON-RPC error code or the HTTP status when there is one, and `cause` never contains
- * the endpoint URL. When several endpoints were tried, the error is the last one and its `cause` is an
- * `AggregateError` of every endpoint's error, in order.
+ * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
+ * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
+ * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
- * `reason` is a {@link JsonRpc.Reason}, matched with `Effect.catchReason`:
- *
- * | reason | meaning | falls back to the next endpoint |
- * |---|---|---|
- * | `Unavailable` | transport, HTTP error status, `UNEXPECTED_ERROR` (63), internal or rate-limit error codes, after the retries, or a timeout (not retried) | yes |
- * | `InvalidResponse` | the reply is not JSON or fails its schema, or an event fails the `getEvents` checks | yes |
- * | `Lagging` | the endpoint's head is below the requested `toBlock` or `blockNumber`, or it answers `BLOCK_NOT_FOUND` (24) or `TXN_HASH_NOT_FOUND` (29) | yes |
- * | `Pruned` | the endpoint lacks the requested history (unused on Starknet for now) | yes |
- * | `Rejected` | any other JSON-RPC error, e.g. `PAGE_SIZE_TOO_BIG` (31), `INVALID_CONTINUATION_TOKEN` (33), `TOO_MANY_KEYS_IN_FILTER` (34) | yes |
- * | `WrongNetwork` | the endpoint's `starknet_chainId` is not the configured network's | no |
+ * On Starknet, `Unavailable` includes the codes 63 (`UNEXPECTED_ERROR`), -32603, -32005 and 429, `InvalidResponse` an
+ * event outside the `getEvents` filter, and `Lagging` a head below the requested block, `BLOCK_NOT_FOUND` (24) and
+ * `TXN_HASH_NOT_FOUND` (29).
  *
  * @since 0.1.0
  * @category errors
@@ -165,10 +168,9 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
     params: { readonly blockNumber: bigint }
   ) => Effect.Effect<StarknetBlock, StarknetRpcError>
   /**
-   * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events are in chain
-   * order: the provider's order, which is chain order (they are not sorted, as `event_index` is not always returned).
-   * A pre-confirmed or out-of-filter event fails with `InvalidResponse`. An empty range returns no events. With a
-   * `cursor`, only the endpoint that returned it is asked.
+   * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events keep the
+   * provider's order, which is chain order (`event_index` is not always returned to sort them). A pre-confirmed or
+   * out-of-filter event fails with `InvalidResponse`, and an empty range returns no events.
    */
   readonly getEvents: (filter: StarknetEventsFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
   /** `starknet_getTransactionReceipt`. A pre-confirmed receipt fails with `InvalidResponse`. */
@@ -191,14 +193,8 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
 
 /**
  * Builds a {@link StarknetRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
- * (e.g. `FetchHttpClient.layer`).
- *
- * - `timeout` bounds each attempt, default 30 seconds. A timed-out attempt is not retried: the call moves to the next
- *   endpoint at once.
- * - `retries` is the number of retries per endpoint before falling back, default 3. Transport errors, HTTP
- *   408/429/500/502/503/504 and the `Unavailable` JSON-RPC codes (63, -32603, -32005, 429) are retried with an
- *   exponential backoff from `retryDelay` (default 500 millis) with jitter, honoring `Retry-After`. Any other HTTP
- *   status (e.g. 403) is not retried and falls back at once.
+ * (e.g. `FetchHttpClient.layer`). `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and
+ * `retryDelay` (default 500 millis) set the backoff before falling back: see {@link JsonRpc.Unavailable}.
  *
  * @since 0.1.0
  * @category layers

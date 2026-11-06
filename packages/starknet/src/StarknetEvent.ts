@@ -10,12 +10,9 @@ import { StarknetAddress } from "./StarknetAddress.ts"
 import { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
 
 /**
- * An event emitted by a contract in a block, decoded from the raw JSON-RPC event: keys are snake case on the encoded
- * side (`from_address`) and camel case on the decoded side, `block_number` is a JSON integer decoded to a `bigint`.
- *
- * `keys`, `data` and `blockHash` are felts as `0x` + 64 lowercase hex digits. A pre-confirmed event (no block hash or
- * block number) does not decode. `transactionIndex` and `eventIndex` (the position of the event in its transaction)
- * are only returned by recent RPC versions (0.10 and later).
+ * An event emitted by a contract in a block, decoded from the raw JSON-RPC event (snake case keys, felts as `0x` + 64
+ * lowercase hex digits). A pre-confirmed event (no block hash or block number) does not decode. `transactionIndex` and
+ * `eventIndex` (the event's position in its transaction) are only returned by RPC 0.10 and later.
  *
  * @since 0.1.0
  * @category schemas
