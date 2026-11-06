@@ -104,7 +104,7 @@ const setup = (
         blockNumber: engine.withFallback((endpoint) => engine.call(endpoint, blockNumberMethod, [])),
         getRange: (toBlock) =>
           engine.withFallback((endpoint) =>
-            engine.guard(
+            engine.requireHead(
               endpoint,
               getRangeMethod.name,
               BigInt(toBlock),

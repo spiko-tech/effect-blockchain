@@ -100,6 +100,6 @@ export const isTestnet = (network: SolanaNetwork): boolean =>
  * (https://docs.anza.xyz/consensus/commitments), so the finalized slot needs no further margin.
  *
  * @since 0.1.0
- * @category utils
+ * @category getters
  */
 export const defaultConfirmations = (_network: SolanaNetwork): number => 0

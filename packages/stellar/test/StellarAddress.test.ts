@@ -1,5 +1,5 @@
 import {
-  NULL_STELLAR_ADDRESS,
+  NULL_ADDRESS,
   StellarAccountAddress,
   StellarAddress,
   StellarContractAddress
@@ -62,8 +62,8 @@ describe("StellarAddress", () => {
 
   it("should decode the null Stellar address", () => {
     const nullAddress = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
-    expect(Schema.decodeSync(StellarAddress)(nullAddress)).toStrictEqual(NULL_STELLAR_ADDRESS)
-    expect(NULL_STELLAR_ADDRESS).toBe(contract.NULL_ACCOUNT)
+    expect(Schema.decodeSync(StellarAddress)(nullAddress)).toStrictEqual(NULL_ADDRESS)
+    expect(NULL_ADDRESS).toBe(contract.NULL_ACCOUNT)
   })
 
   it.effect("should generate decodable values", () =>

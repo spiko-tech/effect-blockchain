@@ -1,12 +1,11 @@
-import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { StarknetAddress } from "../StarknetAddress.ts"
 import { StarknetBlock } from "../StarknetBlock.ts"
 import { StarknetEvent } from "../StarknetEvent.ts"
 import { StarknetTransactionHash } from "../StarknetTransactionHash.ts"
-import { BigIntFromInt } from "./BigIntFromInt.ts"
-import { PaddedFelt } from "./felt.ts"
+import { PaddedFelt } from "./PaddedFelt.ts"
 
 // by-name params: every method sends an object, `{}` when it takes none
 const make = <Params, Result>(method: JsonRpc.Method<Params, Result>): JsonRpc.Method<Params, Result> => method
@@ -35,13 +34,13 @@ const ShortStringFromFelt = Schema.String.check(Schema.isPattern(/^0x[0-9a-fA-F]
 // params accept any felt (`0x1`), results are normalized to 64 digits
 const Felt = Schema.toEncoded(PaddedFelt)
 
-const BlockId = Schema.Struct({ block_number: BigIntFromInt })
+const BlockId = Schema.Struct({ block_number: JsonRpc.BigIntFromInt })
 
 /** @internal */
 export const chainId = make({ name: "starknet_chainId", params: NoParams, result: ShortStringFromFelt })
 
 /** @internal */
-export const blockNumber = make({ name: "starknet_blockNumber", params: NoParams, result: BigIntFromInt })
+export const blockNumber = make({ name: "starknet_blockNumber", params: NoParams, result: JsonRpc.BigIntFromInt })
 
 /** @internal */
 export const getBlockWithTxHashes = make({
@@ -77,7 +76,7 @@ export const getTransactionReceipt = make({
   // a pre-confirmed receipt has no block hash and does not decode
   result: Schema.Struct({
     transactionHash: StarknetTransactionHash,
-    blockNumber: BigIntFromInt,
+    blockNumber: JsonRpc.BigIntFromInt,
     blockHash: PaddedFelt,
     events: Schema.Array(
       Schema.Struct({ fromAddress: StarknetAddress, keys: Schema.Array(PaddedFelt), data: Schema.Array(PaddedFelt) })

@@ -33,7 +33,7 @@ export const networks = [...mainnets, ...testnets] as const
  */
 export const StellarNetwork = Schema.Literals(networks).annotate({
   identifier: "StellarNetwork",
-  title: "StellarNetwork",
+  title: "Stellar network",
   description: "a Stellar network name"
 })
 
@@ -70,7 +70,7 @@ const confirmations: Record<StellarNetwork, number> = {
  * ledger is final once closed.
  *
  * @since 0.1.0
- * @category utils
+ * @category getters
  */
 export const defaultConfirmations = (network: StellarNetwork): number => confirmations[network]
 

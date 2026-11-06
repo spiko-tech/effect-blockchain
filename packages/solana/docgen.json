@@ -1,5 +1,6 @@
 {
   "$schema": "../../tools/docgen/node_modules/@effect/docgen/schema.json",
+  "srcLink": "https://github.com/spiko-tech/effect-blockchain/blob/main/packages/solana/src/",
   "exclude": [
     "src/internal/**/*.ts"
   ],

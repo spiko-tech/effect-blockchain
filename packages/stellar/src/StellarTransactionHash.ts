@@ -29,7 +29,7 @@ export const StellarTransactionHash = pipe(
   Schema.brand("StellarTransactionHash"),
   Schema.annotate({
     identifier: "StellarTransactionHash",
-    title: "StellarTransactionHash",
+    title: "Stellar transaction hash",
     description: "a valid Stellar transaction hash, 0x followed by 64 lowercase hexadecimal characters"
   })
 )

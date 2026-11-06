@@ -11,6 +11,7 @@
  * import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
  * import * as Effect from "effect/Effect"
  * import * as Schema from "effect/Schema"
+import * as SchemaTransformation from "effect/SchemaTransformation"
  *
  * // shaped like the chain errors
  * class ChainRpcError extends Schema.TaggedError<ChainRpcError>()("ChainRpcError", { reason: JsonRpc.Reason }) {}
@@ -36,11 +37,13 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest"
 import type * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as Metric from "effect/Metric"
 import * as Option from "effect/Option"
+import * as Predicate from "effect/Predicate"
 import * as Redacted from "effect/Redacted"
 import * as Ref from "effect/Ref"
 import * as Result from "effect/Result"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
+import * as SchemaTransformation from "effect/SchemaTransformation"
 import * as SynchronizedRef from "effect/SynchronizedRef"
 
 /**
@@ -218,6 +221,35 @@ export interface Method<Params, A, J = Schema.Json> {
 export type Send<E, J = Schema.Json> = <Params, A>(method: Method<Params, A, J>, params: Params) => Effect.Effect<A, E>
 
 /**
+ * A JSON integer (`1234`) decoded to a `bigint`, e.g. a block number. Encoding fails beyond the safe integers.
+ *
+ * @since 0.1.0
+ * @category codecs
+ * @internal
+ */
+export const BigIntFromInt = Schema.Int.pipe(
+  Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
+)
+
+/**
+ * An optional params field: `key: undefined` is accepted and omitted on encode, since `undefined` is not JSON.
+ *
+ * @since 0.1.0
+ * @category codecs
+ * @internal
+ */
+export const optionalOmitted = <S extends Schema.Top>(schema: S) =>
+  Schema.optionalKey(Schema.toEncoded(schema)).pipe(
+    Schema.decodeTo(
+      Schema.optional(schema),
+      SchemaTransformation.transformOptional<S["Encoded"] | undefined, S["Encoded"]>({
+        decode: (value) => value,
+        encode: (value) => Option.filter(value, Predicate.isNotUndefined)
+      })
+    )
+  )
+
+/**
  * - `spanPrefix` names the spans: `${spanPrefix}.${method}`.
  * - `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and `retryDelay` (default 500 millis)
  *   set the backoff: see {@link Unavailable}. HTTP 408/429/500/502/503/504 are retried, any other status only when its
@@ -275,7 +307,7 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
     cursor: { readonly endpoint: string }
   ) => Effect.Effect<Endpoint<Info, E>, E>
   /** Fails `Lagging` unless the endpoint's head reached `toBlock`, running `latest` only when the known head is below. */
-  readonly guard: (
+  readonly requireHead: (
     endpoint: Endpoint<Info, E>,
     method: string,
     toBlock: bigint,
@@ -563,7 +595,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
       : Effect.succeed(endpoint)
   }
 
-  const guard = Effect.fnUntraced(function*(
+  const requireHead = Effect.fnUntraced(function*(
     endpoint: Endpoint,
     method: string,
     toBlock: bigint,
@@ -579,5 +611,5 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     }
   })
 
-  return { fail, checkNetwork, call, withFallback, endpointOf, guard }
+  return { fail, checkNetwork, call, withFallback, endpointOf, requireHead }
 })

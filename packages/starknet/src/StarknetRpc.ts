@@ -165,7 +165,7 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
    * block fails with `InvalidResponse`.
    */
   readonly getBlockWithTxHashes: (
-    params: { readonly blockNumber: bigint }
+    options: { readonly blockNumber: bigint }
   ) => Effect.Effect<StarknetBlock, StarknetRpcError>
   /**
    * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events keep the
@@ -175,7 +175,7 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly getEvents: (filter: StarknetEventsFilter) => Effect.Effect<StarknetEventsPage, StarknetRpcError>
   /** `starknet_getTransactionReceipt`. A pre-confirmed receipt fails with `InvalidResponse`. */
   readonly getTransactionReceipt: (
-    params: { readonly transactionHash: StarknetTransactionHash }
+    options: { readonly transactionHash: StarknetTransactionHash }
   ) => Effect.Effect<StarknetTransactionReceipt, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
 
@@ -247,7 +247,7 @@ export const layer = (options: {
       const getEventsOn = (endpoint: Endpoint, filter: StarknetEventsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getEvents.name
-          yield* rpc.guard(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
+          yield* rpc.requireHead(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
           const page = yield* rpc.call(endpoint, RpcMethods.getEvents, {
             filter: {
               address: filter.address,
@@ -294,7 +294,7 @@ export const layer = (options: {
         blockNumber: rpc.withFallback(blockNumberOn),
         getBlockWithTxHashes: ({ blockNumber }) =>
           rpc.withFallback((endpoint) =>
-            rpc.guard(endpoint, RpcMethods.getBlockWithTxHashes.name, blockNumber, blockNumberOn(endpoint)).pipe(
+            rpc.requireHead(endpoint, RpcMethods.getBlockWithTxHashes.name, blockNumber, blockNumberOn(endpoint)).pipe(
               Effect.andThen(
                 rpc.call(endpoint, RpcMethods.getBlockWithTxHashes, { block_id: { block_number: blockNumber } })
               )

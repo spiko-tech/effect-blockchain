@@ -1,6 +1,4 @@
-import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
-import * as Option from "effect/Option"
-import * as Predicate from "effect/Predicate"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { SolanaAddress } from "../SolanaAddress.ts"
@@ -45,23 +43,6 @@ const JsonFromRpc = RpcJson.pipe(
     Schema.Json,
     SchemaTransformation.transform<Schema.Json, RpcJson>({ decode: toJson, encode: (json) => json })
   )
-)
-
-// `key: undefined` is accepted and omitted on encode, since `undefined` is not JSON
-const optionalOmitted = <S extends Schema.Top>(schema: S) =>
-  Schema.optionalKey(Schema.toEncoded(schema)).pipe(
-    Schema.decodeTo(
-      Schema.optional(schema),
-      SchemaTransformation.transformOptional<S["Encoded"] | undefined, S["Encoded"]>({
-        decode: (value) => value,
-        encode: (value) => Option.filter(value, Predicate.isNotUndefined)
-      })
-    )
-  )
-
-// a `bigint` param sent as a JSON integer, e.g. a slot: encoding fails beyond the safe integers
-const BigIntFromInt = Schema.Int.pipe(
-  Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
 )
 
 // a small JSON integer read as a `number`, e.g. an account index
@@ -124,11 +105,11 @@ export const getSignaturesForAddress = make({
   params: Schema.Tuple([
     SolanaAddress,
     Schema.Struct({
-      before: optionalOmitted(SolanaTransactionHash),
-      until: optionalOmitted(SolanaTransactionHash),
-      limit: optionalOmitted(Schema.Int),
+      before: JsonRpc.optionalOmitted(SolanaTransactionHash),
+      until: JsonRpc.optionalOmitted(SolanaTransactionHash),
+      limit: JsonRpc.optionalOmitted(Schema.Int),
       commitment: Commitment,
-      minContextSlot: optionalOmitted(BigIntFromInt)
+      minContextSlot: JsonRpc.optionalOmitted(JsonRpc.BigIntFromInt)
     })
   ]),
   result: Schema.Array(Schema.Struct({
