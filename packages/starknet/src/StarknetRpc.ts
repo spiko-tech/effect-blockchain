@@ -34,6 +34,7 @@ import * as Ref from "effect/Ref"
 import * as Schema from "effect/Schema"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { StarknetAddress } from "./StarknetAddress.ts"
+import type { StarknetBlock } from "./StarknetBlock.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
 import type { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
@@ -60,7 +61,7 @@ export interface StarknetRpcEndpoint {
  * |---|---|---|
  * | `Unavailable` | transport, HTTP error status, `UNEXPECTED_ERROR` (63), internal or rate-limit error codes, after the retries, or a timeout (not retried) | yes |
  * | `InvalidResponse` | the reply is not JSON or fails its schema, or an event fails the `getEvents` checks | yes |
- * | `Lagging` | the endpoint's head is below the requested `toBlock`, or it answers `BLOCK_NOT_FOUND` (24) or `TXN_HASH_NOT_FOUND` (29) | yes |
+ * | `Lagging` | the endpoint's head is below the requested `toBlock` or `blockNumber`, or it answers `BLOCK_NOT_FOUND` (24) or `TXN_HASH_NOT_FOUND` (29) | yes |
  * | `Pruned` | the endpoint lacks the requested history (unused on Starknet for now) | yes |
  * | `Rejected` | any other JSON-RPC error, e.g. `PAGE_SIZE_TOO_BIG` (31), `INVALID_CONTINUATION_TOKEN` (33), `TOO_MANY_KEYS_IN_FILTER` (34) | yes |
  * | `WrongNetwork` | the endpoint's `starknet_chainId` is not the configured network's | no |
@@ -156,6 +157,13 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly chainId: Effect.Effect<StarknetNetwork.StarknetChainId, StarknetRpcError>
   /** `starknet_blockNumber` */
   readonly blockNumber: Effect.Effect<bigint, StarknetRpcError>
+  /**
+   * `starknet_getBlockWithTxHashes`, only answered by an endpoint whose head has reached `blockNumber`. A pre-confirmed
+   * block fails with `InvalidResponse`.
+   */
+  readonly getBlockWithTxHashes: (
+    params: { readonly blockNumber: bigint }
+  ) => Effect.Effect<StarknetBlock, StarknetRpcError>
   /**
    * `starknet_getEvents`, one page, only answered by an endpoint whose head has reached `toBlock`. Events are in chain
    * order: the provider's order, which is chain order (they are not sorted, as `event_index` is not always returned).
@@ -288,6 +296,14 @@ export const layer = (options: {
         network,
         chainId: rpc.withFallback(rpc.checkNetwork),
         blockNumber: rpc.withFallback(blockNumberOn),
+        getBlockWithTxHashes: ({ blockNumber }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.guard(endpoint, RpcMethods.getBlockWithTxHashes.name, blockNumber, blockNumberOn(endpoint)).pipe(
+              Effect.andThen(
+                rpc.call(endpoint, RpcMethods.getBlockWithTxHashes, { block_id: { block_number: blockNumber } })
+              )
+            )
+          ),
         getEvents,
         getTransactionReceipt: ({ transactionHash }) =>
           rpc.withFallback((endpoint) =>

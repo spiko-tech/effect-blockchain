@@ -289,6 +289,7 @@ const fakeRpc = (
     StarknetRpc.StarknetRpc.of({
       network: "Starknet",
       chainId: Effect.die("unused"),
+      getBlockWithTxHashes: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
       blockNumber: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)

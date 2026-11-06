@@ -42,6 +42,11 @@ const cases: ReadonlyArray<Case> = [
     params: { transaction_hash: RECEIPT_TX }
   },
   {
+    name: "getBlockWithTxHashes",
+    method: "starknet_getBlockWithTxHashes",
+    params: { block_id: { block_number: 1380308 } }
+  },
+  {
     name: "getEvents-beyond-head",
     method: "starknet_getEvents",
     params: events({ to_block: { block_number: 99999999 } })
