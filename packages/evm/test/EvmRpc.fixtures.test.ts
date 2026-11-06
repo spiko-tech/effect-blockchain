@@ -71,6 +71,22 @@ describe("EvmRpc fixtures", () => {
         Effect.map(expectPinnedLogs)
       ))
 
+    // the block of the first pinned log, which dates it: 2026-09-29T13:53:47Z
+    it.effect(`fixture: ${provider} getBlockByNumber`, () =>
+      setup([{ name: provider, cases: ["chainId", "blockNumber", "getLogs", "getBlockByNumber"] }]).run((rpc) =>
+        Effect.gen(function*() {
+          const [log] = yield* rpc.getLogs(filter)
+          const block = yield* rpc.getBlockByNumber({ blockNumber: FROM })
+          expect(block).toStrictEqual({
+            number: FROM,
+            hash: log.blockHash,
+            parentHash: "0x9a29e19559b5df89d0d79b7d8f093b8269189727882f27041089f845fafe4625",
+            timestamp: BigInt(1790690027)
+          })
+          expect(new Date(Number(block.timestamp) * 1000).toISOString()).toBe("2026-09-29T13:53:47.000Z")
+        })
+      ))
+
     it.effect(`fixture: ${provider} invalid-params`, () =>
       setup([{ name: provider, cases: ["chainId", "blockNumber", "invalid-params"] }]).run((rpc) =>
         Effect.flip(rpc.getLogs({ ...filter, topics: [[EvmHexData.make("0xab")]] }))

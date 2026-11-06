@@ -259,6 +259,81 @@ describe("EvmRpc", () => {
   })
 })
 
+describe("EvmRpc.getBlockByNumber", () => {
+  const rawBlock = (number: string) => ({
+    number,
+    hash: "0x" + "ab".repeat(32),
+    parentHash: "0x" + "cd".repeat(32),
+    timestamp: "0x6abbc2eb",
+    transactions: ["0x" + "ef".repeat(32)]
+  })
+  const block = (params: ReadonlyArray<Schema.Json>) => ({ result: rawBlock(String(params[0])) })
+
+  it.effect("sends the block as a hex quantity without transactions, and decodes the header", () => {
+    let params: ReadonlyArray<Schema.Json> = []
+    const { run } = setup({
+      a: {
+        eth_blockNumber: head(20),
+        eth_getBlockByNumber: (p) => {
+          params = p
+          return block(p)
+        }
+      }
+    })
+    return run((rpc) => rpc.getBlockByNumber({ blockNumber: BigInt(10) })).pipe(Effect.map((decoded) => {
+      expect(params).toStrictEqual(["0xa", false])
+      expect(decoded).toStrictEqual({
+        number: BigInt(10),
+        hash: "0x" + "ab".repeat(32),
+        parentHash: "0x" + "cd".repeat(32),
+        timestamp: BigInt(1790690027)
+      })
+    }))
+  })
+
+  it.effect("skips an endpoint whose head is below the block", () => {
+    const { calls, run } = setup({
+      a: { eth_blockNumber: head(5), eth_getBlockByNumber: block },
+      b: { eth_blockNumber: head(20), eth_getBlockByNumber: block }
+    })
+    return run((rpc) => rpc.getBlockByNumber({ blockNumber: BigInt(10) })).pipe(Effect.map((decoded) => {
+      expect(decoded.number).toBe(BigInt(10))
+      expect(calls).toStrictEqual([
+        "a:eth_chainId",
+        "a:eth_blockNumber",
+        "b:eth_chainId",
+        "b:eth_blockNumber",
+        "b:eth_getBlockByNumber"
+      ])
+    }))
+  })
+
+  it.effect("fails Lagging on a null block below the head and falls back", () =>
+    Effect.gen(function*() {
+      const unknown = () => ({ result: null })
+      const alone = setup({ a: { eth_blockNumber: head(20), eth_getBlockByNumber: unknown } })
+      expect(yield* alone.run((rpc) => Effect.flip(rpc.getBlockByNumber({ blockNumber: BigInt(10) })))).toMatchObject({
+        reason: { _tag: "Lagging", head: BigInt(20), toBlock: BigInt(10) },
+        method: "eth_getBlockByNumber"
+      })
+      const { calls, run } = setup({
+        a: { eth_blockNumber: head(20), eth_getBlockByNumber: unknown },
+        b: { eth_blockNumber: head(20), eth_getBlockByNumber: block }
+      })
+      expect((yield* run((rpc) => rpc.getBlockByNumber({ blockNumber: BigInt(10) }))).number).toBe(BigInt(10))
+      expect(calls).toContain("b:eth_getBlockByNumber")
+    }))
+
+  it.effect("fails InvalidResponse on another block or a malformed one", () =>
+    Effect.gen(function*() {
+      for (const reply of [rawBlock("0xb"), { ...rawBlock("0xa"), timestamp: null }]) {
+        const { run } = setup({ a: { eth_blockNumber: head(20), eth_getBlockByNumber: () => ({ result: reply }) } })
+        expect((yield* run((rpc) => Effect.flip(rpc.getBlockByNumber({ blockNumber: BigInt(10) })))).reason._tag)
+          .toBe("InvalidResponse")
+      }
+    }))
+})
+
 describe("layerConfig", () => {
   const endpoints = Config.all([Config.all({ name: Config.succeed("a"), url: Config.Redacted("ETHEREUM_RPC_URL") })])
   const run = (env: Record<string, string>) => {

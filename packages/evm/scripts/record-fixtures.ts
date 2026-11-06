@@ -20,6 +20,8 @@ const cases: ReadonlyArray<Case> = [
   { name: "chainId", method: "eth_chainId", params: [] },
   { name: "blockNumber", method: "eth_blockNumber", params: [] },
   { name: "getLogs", method: "eth_getLogs", params: logsFilter(hex(FROM), hex(TO)) },
+  // the block of the first `getLogs` log, transaction hashes only
+  { name: "getBlockByNumber", method: "eth_getBlockByNumber", params: [hex(FROM), false] },
   // 10010 blocks: above Alchemy's free tier (10) and Infura's (10000) limits
   { name: "getLogs-range-too-large", method: "eth_getLogs", params: logsFilter(hex(TO - 10009), hex(TO)) },
   { name: "getLogs-beyond-head", method: "eth_getLogs", params: logsFilter("0xfffffff6", "0xffffffff") },

@@ -12,6 +12,11 @@ export * as EvmAddress from "./EvmAddress.ts"
 /**
  * @since 0.1.0
  */
+export * as EvmBlock from "./EvmBlock.ts"
+
+/**
+ * @since 0.1.0
+ */
 export * as EvmHexData from "./EvmHexData.ts"
 
 /**

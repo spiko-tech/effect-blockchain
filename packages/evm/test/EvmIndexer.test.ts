@@ -235,6 +235,7 @@ const fakeRpc = (
     EvmRpc.EvmRpc.of({
       network: "Ethereum",
       chainId: Effect.die("unused"),
+      getBlockByNumber: () => Effect.die("unused"),
       blockNumber: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
         return reason === undefined
