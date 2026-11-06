@@ -1,5 +1,13 @@
 # @effect-blockchain/evm
 
+## 0.2.0
+
+### Minor Changes
+
+- [#63](https://github.com/spiko-tech/effect-blockchain/pull/63) [`200541c`](https://github.com/spiko-tech/effect-blockchain/commit/200541cc2260b87c4d725a73c2a5cdd4b2393f09) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Add the Anvil local network (chain ID 31337).
+  
+  `EvmNetwork` gains the `"Anvil"` literal, so an exhaustive `Record<EvmNetwork, ...>` in caller code needs an `Anvil` entry.
+
 ## 0.1.0
 
 ### Minor Changes
