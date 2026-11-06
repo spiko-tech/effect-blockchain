@@ -414,6 +414,8 @@ describe("StellarIndexer.streamEvents", () => {
           streamEvents.filter((event) => event.inSuccessfulContractCall)
         )
         assert.deepStrictEqual(state.ranges, pinnedRanges)
+        // one head read for the whole catch-up: the head is above toBlock
+        assert.strictEqual(state.heads, 1)
       })
     )
   })
@@ -486,6 +488,28 @@ describe("StellarIndexer.streamEvents", () => {
       assert.strictEqual(state.heads, 7)
     }))
 
+  it.effect("stops a catch-up at the head it read and extends it on the next read", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(S_FROM + BigInt(4))
+      const options = { filter: streamOptions.filter, fromBlock: S_FROM, poll: Schedule.recurs(0) }
+      const run = Effect.gen(function*() {
+        yield* (yield* StellarIndexer.StellarIndexer).streamEvents(options).pipe(
+          // the head moves past S_TO while the first batch is handled
+          Stream.runForEach(() =>
+            Effect.sync(() => {
+              state.head = S_TO
+            })
+          )
+        )
+      })
+      yield* provide(run, layer, { confirmations: 0, maxBlockRange: 3 })
+      assert.deepStrictEqual(state.ranges, [[S_FROM, S_FROM + BigInt(2)], [S_FROM + BigInt(3), S_FROM + BigInt(4)], [
+        S_FROM + BigInt(5),
+        S_FROM + BigInt(7)
+      ], [S_FROM + BigInt(8), S_TO]])
+      assert.strictEqual(state.heads, 3)
+    }))
+
   it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
     const { layer, state } = fakeRpc(S_FROM + BigInt(5))
     const options = { filter: streamOptions.filter, fromBlock: S_FROM, poll: Schedule.recurs(0) }
@@ -493,7 +517,8 @@ describe("StellarIndexer.streamEvents", () => {
       Effect.map(({ batches, exit }) => {
         assert.isTrue(Exit.isSuccess(exit))
         assert.deepStrictEqual(bounds(batches), pinnedBatches.slice(0, 2))
-        assert.strictEqual(state.heads, 3)
+        // once for the catch-up, once more when it reaches the head
+        assert.strictEqual(state.heads, 2)
       })
     )
   })
@@ -550,6 +575,8 @@ describe("StellarIndexer.streamEvents", () => {
         assert.deepStrictEqual(bounds(batches), pinnedBatches)
         assert.deepStrictEqual(state.ranges[1], state.ranges[2])
         assert.lengthOf(state.ranges, 5)
+        // the retried step knows the head
+        assert.strictEqual(state.heads, 1)
       }))
     })
   }
@@ -597,7 +624,7 @@ describe("StellarIndexer.streamEvents", () => {
     }))
 
   it.effect("retries a step whose lastConfirmedBlock fails with a transient reason at the same ledger", () => {
-    const { layer, state } = fakeRpc(S_TO, new Map(), new Map([[2, new JsonRpc.Unavailable()]]))
+    const { layer, state } = fakeRpc(S_TO, new Map(), new Map([[1, new JsonRpc.Unavailable()]]))
     return provide(collect({ ...streamOptions, retry: Schedule.recurs(1) }), layer, {
       confirmations: 0,
       maxBlockRange: 3
@@ -605,7 +632,7 @@ describe("StellarIndexer.streamEvents", () => {
       assert.isTrue(Exit.isSuccess(exit))
       assert.deepStrictEqual(bounds(batches), pinnedBatches)
       assert.deepStrictEqual(state.ranges, pinnedRanges)
-      assert.strictEqual(state.heads, 5)
+      assert.strictEqual(state.heads, 2)
     }))
   })
 

@@ -16,17 +16,19 @@
  *
  * **Streaming**
  *
- * `streamEvents` follows the confirmed latest ledger from `fromBlock`: each step reads `lastConfirmedBlock` and fetches
- * the next `maxBlockRange` ledgers at most, up to it, through `fetchEvents`, as one {@link StellarIndexerBatch}. A
- * batch is emitted even when it has no events, so the caller's cursor moves on a quiet contract. Caught up, the stream
- * reads the head again on the `poll` schedule until it reaches the next ledger, the schedule starting afresh after each
- * batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after the
- * batch reaching it. With `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`)
- * is retried at the same ledger; any other failure, or an exhausted schedule, fails the stream. `Pruned` is one of
- * them: RPC nodes keep about 7 days of ledgers, so a `fromBlock` older than that fails the stream at once and the
- * caller picks a newer `fromBlock`. Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart
- * from the ledger after it. Run one stream per (network, filter) at a time: the indexer does not coordinate processes,
- * so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory lock.
+ * `streamEvents` follows the confirmed latest ledger from `fromBlock`: each step fetches the next `maxBlockRange`
+ * ledgers at most, up to the confirmed head, through `fetchEvents`, as one {@link StellarIndexerBatch}. The head is
+ * read once per catch-up segment: `lastConfirmedBlock` is read again only once the stream reaches the head it last
+ * read. A batch is emitted even when it has no events, so the caller's cursor moves on a quiet contract. Caught up, the
+ * stream reads the head again on the `poll` schedule until it reaches the next ledger, the schedule starting afresh
+ * after each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends
+ * after the batch reaching it. With `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`,
+ * `Lagging`) is retried at the same ledger; any other failure, or an exhausted schedule, fails the stream. `Pruned` is
+ * one of them: RPC nodes keep about 7 days of ledgers, so a `fromBlock` older than that fails the stream at once and
+ * the caller picks a newer `fromBlock`. Delivery is at-least-once: save `batch.toBlock` after handling a batch and
+ * restart from the ledger after it. Run one stream per (network, filter) at a time: the indexer does not coordinate
+ * processes, so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory
+ * lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"
@@ -148,6 +150,12 @@ const MAX_CONTRACT_IDS = 5
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
 
+// a stream's position: the next ledger to read and the confirmed head last read
+interface Position {
+  readonly next: bigint
+  readonly head: bigint
+}
+
 /**
  * Builds a {@link StellarIndexer} over the provided {@link StellarRpc}.
  *
@@ -214,29 +222,31 @@ export const layer = (options: {
         fetchEvents,
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next ledger to read: the head polled on `poll` until it reaches `next` (an exhausted
-          // `poll` ends the stream), then a batch up to it
+          // one step from the next ledger to read: the head last read when it reaches `next` (the confirmed head
+          // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
+          // stream), then a batch up to it
           const step = (
-            next: bigint
-          ): Effect.Effect<readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<bigint>], StellarRpcError> =>
-            lastConfirmedBlock.pipe(
-              Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }),
-              Effect.flatMap((confirmed) => {
+            { head, next }: Position
+          ): Effect.Effect<readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<Position>], StellarRpcError> =>
+            (next <= head
+              ? Effect.succeed(head)
+              : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
+              .pipe(Effect.flatMap((confirmed) => {
                 const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
                 if (next > cap) return Effect.succeed([[], Option.none()])
                 const end = BigInt_.min(next + range - BigInt(1), cap)
                 return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
                   [{ fromBlock: next, toBlock: end, events }],
-                  end === toBlock ? Option.none() : Option.some(end + BigInt(1))
+                  end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), head: confirmed })
                 ]))
-              })
-            )
+              }))
           return Stream.paginate(
-            fromBlock,
+            // a head below `fromBlock`: the first step reads it
+            { next: fromBlock, head: fromBlock - BigInt(1) },
             retry === undefined
               ? step
-              : (next) =>
-                Effect.retry(step(next), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+              : (position) =>
+                Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })

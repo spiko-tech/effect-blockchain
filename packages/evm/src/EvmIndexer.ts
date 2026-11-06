@@ -9,11 +9,12 @@
  *
  * **Streaming**
  *
- * `streamLogs` follows the confirmed head from `fromBlock`: each step reads `lastConfirmedBlock` and fetches the next
- * `maxBlockRange` blocks at most, up to it, as one {@link EvmIndexerBatch}. A batch is emitted even when it has no
- * logs, so the caller's cursor moves on a quiet contract. Caught up, the stream reads the head again on the `poll`
- * schedule until it reaches the next block, the schedule starting afresh after each batch; a bounded `poll`, e.g.
- * `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after the batch reaching it. With
+ * `streamLogs` follows the confirmed head from `fromBlock`: each step fetches the next `maxBlockRange` blocks at most,
+ * up to the confirmed head, as one {@link EvmIndexerBatch}. The head is read once per catch-up segment:
+ * `lastConfirmedBlock` is read again only once the stream reaches the head it last read. A batch is emitted even when
+ * it has no logs, so the caller's cursor moves on a quiet contract. Caught up, the stream reads the head again on the
+ * `poll` schedule until it reaches the next block, the schedule starting afresh after each batch; a bounded `poll`,
+ * e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after the batch reaching it. With
  * `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same
  * block; any other failure, or an exhausted schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock`
  * after handling a batch and restart from the block after it. Run one stream per (network, filter) at a time: the
@@ -121,6 +122,12 @@ export const DEFAULT_MAX_BLOCK_RANGE = 1000
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 
+// a stream's position: the next block to read and the confirmed head last read
+interface Position {
+  readonly next: bigint
+  readonly head: bigint
+}
+
 /**
  * Builds an {@link EvmIndexer} reading through the provided {@link EvmRpc.EvmRpc}.
  *
@@ -162,29 +169,31 @@ export const layer = (options: {
         fetchLogs,
         streamLogs: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next block to read: the head polled on `poll` until it reaches `next` (an exhausted
-          // `poll` ends the stream), then a batch up to it
+          // one step from the next block to read: the head last read when it reaches `next` (the confirmed head
+          // only moves forward), otherwise the head polled on `poll` until it does (an exhausted `poll` ends the
+          // stream), then a batch up to it
           const step = (
-            next: bigint
-          ): Effect.Effect<readonly [ReadonlyArray<EvmIndexerBatch>, Option.Option<bigint>], EvmRpc.EvmRpcError> =>
-            lastConfirmedBlock.pipe(
-              Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }),
-              Effect.flatMap((confirmed) => {
+            { head, next }: Position
+          ): Effect.Effect<readonly [ReadonlyArray<EvmIndexerBatch>, Option.Option<Position>], EvmRpc.EvmRpcError> =>
+            (next <= head
+              ? Effect.succeed(head)
+              : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next })))
+              .pipe(Effect.flatMap((confirmed) => {
                 const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
                 if (next > cap) return Effect.succeed([[], Option.none()])
                 const end = BigInt_.min(next + size - BigInt(1), cap)
                 return fetchLogs({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((logs) => [
                   [{ fromBlock: next, toBlock: end, logs }],
-                  end === toBlock ? Option.none() : Option.some(end + BigInt(1))
+                  end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), head: confirmed })
                 ]))
-              })
-            )
+              }))
           return Stream.paginate(
-            fromBlock,
+            // a head below `fromBlock`: the first step reads it
+            { next: fromBlock, head: fromBlock - BigInt(1) },
             retry === undefined
               ? step
-              : (next) =>
-                Effect.retry(step(next), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+              : (position) =>
+                Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
           )
         }
       })

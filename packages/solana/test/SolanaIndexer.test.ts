@@ -475,6 +475,7 @@ describe("SolanaIndexer.streamTransactions", () => {
     return provide(collect(options), layer).pipe(Effect.map(({ batches, exit }) => {
       expect(Exit.isSuccess(exit)).toBe(true)
       expect(bounds(batches)).toStrictEqual([[FROM, BigInt(11), 4], [BigInt(12), BigInt(15), 2]])
+      // once for the two-batch catch-up, once more when it reaches the head
       expect(slots(state)).toBe(2)
     }))
   })
