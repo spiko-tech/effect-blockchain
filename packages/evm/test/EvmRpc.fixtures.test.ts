@@ -27,6 +27,7 @@ const setup = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
 
 const EUTBL = EvmAddress.make("0xa0769f7a8fc65e47de93797b4e21c073c117fc80")
 const USTBL = EvmAddress.make("0xe4880249745eac5f1ed9d8f7df844792d560e750")
+const FOUNDATION = EvmAddress.make("0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae")
 const TRANSFER = EvmHexData.make("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 // the pinned inputs of `scripts/record-fixtures.ts`
 const FROM = BigInt(26083549)
@@ -86,6 +87,12 @@ describe("EvmRpc fixtures", () => {
           expect(new Date(Number(block.timestamp) * 1000).toISOString()).toBe("2026-09-29T13:53:47.000Z")
         })
       ))
+
+    // a block past the last 128: both providers serve archive state
+    it.effect(`fixture: ${provider} getBalance`, () =>
+      setup([{ name: provider, cases: ["chainId", "blockNumber", "getBalance"] }]).run((rpc) =>
+        rpc.getBalance({ address: FOUNDATION, blockNumber: FROM })
+      ).pipe(Effect.map((wei) => expect(wei).toBe(BigInt("5774491790776062094343")))))
 
     it.effect(`fixture: ${provider} invalid-params`, () =>
       setup([{ name: provider, cases: ["chainId", "blockNumber", "invalid-params"] }]).run((rpc) =>

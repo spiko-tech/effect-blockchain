@@ -118,6 +118,17 @@ export class EvmRpc extends Context.Service<EvmRpc, {
    */
   readonly getBlockByNumber: (options: { readonly blockNumber: bigint }) => Effect.Effect<EvmBlock, EvmRpcError>
   /**
+   * `eth_getBalance`: the balance of `address` in wei at the end of `blockNumber`, only answered by an endpoint whose
+   * head has reached `blockNumber`. A block older than the endpoint's state history needs an archive endpoint: pruned
+   * nodes answer with provider-specific codes (-32000, -32602, -32603), which fall back but never map to `Pruned`.
+   *
+   * @since 0.3.0
+   */
+  readonly getBalance: (options: {
+    readonly address: EvmAddress
+    readonly blockNumber: bigint
+  }) => Effect.Effect<bigint, EvmRpcError>
+  /**
    * `eth_getLogs`, only answered by an endpoint whose head has reached `toBlock`. Logs are returned in chain order:
    * sorted by block then log index. A removed, pending or out-of-filter log fails with `InvalidResponse`. An empty
    * range returns `[]`.
@@ -241,6 +252,12 @@ export const layer = (options: {
         blockNumber: rpc.withFallback(blockNumberOn),
         getBlockByNumber: ({ blockNumber }) =>
           rpc.withFallback((endpoint) => getBlockByNumberOn(endpoint, blockNumber)),
+        getBalance: ({ address, blockNumber }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.requireHead(endpoint, RpcMethods.getBalance.name, blockNumber, blockNumberOn(endpoint)).pipe(
+              Effect.andThen(rpc.call(endpoint, RpcMethods.getBalance, [address, blockNumber]))
+            )
+          ),
         getLogs: (filter) =>
           filter.fromBlock > filter.toBlock
             ? Effect.succeed([])

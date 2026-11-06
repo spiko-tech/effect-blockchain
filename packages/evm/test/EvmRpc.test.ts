@@ -259,6 +259,44 @@ describe("EvmRpc", () => {
   })
 })
 
+describe("EvmRpc.getBalance", () => {
+  const address = EvmAddress.make("0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae")
+  const balance = () => ({ result: "0x139092bf9246076ac07" })
+
+  it.effect("sends the address and the block as a hex quantity, and decodes wei", () => {
+    let params: ReadonlyArray<Schema.Json> = []
+    const { run } = setup({
+      a: {
+        eth_blockNumber: head(20),
+        eth_getBalance: (p) => {
+          params = p
+          return balance()
+        }
+      }
+    })
+    return run((rpc) => rpc.getBalance({ address, blockNumber: BigInt(10) })).pipe(Effect.map((wei) => {
+      expect(params).toStrictEqual([address, "0xa"])
+      expect(wei).toBe(BigInt("5774491790776062094343"))
+    }))
+  })
+
+  it.effect("skips an endpoint whose head is below the block", () => {
+    const { calls, run } = setup({
+      a: { eth_blockNumber: head(5), eth_getBalance: balance },
+      b: { eth_blockNumber: head(20), eth_getBalance: balance }
+    })
+    return run((rpc) => rpc.getBalance({ address, blockNumber: BigInt(10) })).pipe(Effect.map(() => {
+      expect(calls).toStrictEqual([
+        "a:eth_chainId",
+        "a:eth_blockNumber",
+        "b:eth_chainId",
+        "b:eth_blockNumber",
+        "b:eth_getBalance"
+      ])
+    }))
+  })
+})
+
 describe("EvmRpc.getBlockByNumber", () => {
   const rawBlock = (number: string) => ({
     number,
