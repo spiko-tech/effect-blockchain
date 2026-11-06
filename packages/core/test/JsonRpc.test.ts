@@ -322,6 +322,63 @@ describe("JsonRpc", () => {
       }
     }))
 
+  describe("a JSON-RPC error in a non-2xx reply", () => {
+    const errorReply = (status: number, code: number, headers: Record<string, string> = {}) => () =>
+      Response.json({ jsonrpc: "2.0", id: 1, error: { code, message: "no" } }, { status, headers })
+
+    it.effect("is classified by its code, Rejected falling back without retries", () => {
+      // Alchemy's answer to an eth_getLogs range over its limit
+      const { calls, run } = setup({ a: { blockNumber: errorReply(400, -32600) }, b: { blockNumber: head(7) } }, {
+        retries: 3
+      })
+      return Effect.gen(function*() {
+        expect(yield* run((rpc) => rpc.blockNumber)).toBe(7)
+        expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
+        const error = yield* failure(errorReply(400, -32600))
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32600 })
+        assert.instanceOf(error.cause, Error)
+        expect(error.cause.message).toBe("StatusCodeError 400")
+        expect(error.cause.cause).toMatchObject({ code: -32600, message: "no" })
+        expect((yield* failure(errorReply(400, -32001))).reason._tag).toBe("Pruned")
+      })
+    })
+
+    it.effect("is Unavailable with the status when the body is not a JSON-RPC error", () =>
+      Effect.gen(function*() {
+        for (const body of ["bad request", "", "{\"error\":\"nope\"}"]) {
+          expect(yield* failure(() => new Response(body, { status: 400 }))).toMatchObject({
+            reason: { _tag: "Unavailable", status: 400 },
+            code: 400
+          })
+        }
+      }))
+
+    it.live("retries an Unavailable code with its status", () => {
+      let attempts = 0
+      const { calls, run } = setup({
+        a: { blockNumber: () => ++attempts === 1 ? errorReply(400, -32005)() : errorReply(503, -32005)() }
+      }, { retries: 2 })
+      return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable", status: 503 }, code: -32005 })
+        expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "a:blockNumber", "a:blockNumber"])
+      }))
+    })
+
+    // live clock: Retry-After sleeps for real
+    it.live("retries a 429 whatever its code, waiting for Retry-After", () => {
+      let attempts = 0
+      const { calls, run } = setup({
+        a: { blockNumber: () => ++attempts === 1 ? errorReply(429, -32600, { "Retry-After": "1" })() : head(5)() }
+      }, { retries: 1 })
+      return Effect.gen(function*() {
+        const start = yield* Clock.currentTimeMillis
+        expect(yield* run((rpc) => rpc.blockNumber)).toBe(5)
+        expect((yield* Clock.currentTimeMillis) - start).toBeGreaterThanOrEqual(1000)
+        expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "a:blockNumber"])
+      })
+    })
+  })
+
   it.effect("classifies an invalid result or a non-JSON body as InvalidResponse", () =>
     Effect.gen(function*() {
       expect((yield* failure(() => ({ result: "twenty" }))).reason._tag).toBe("InvalidResponse")
@@ -349,6 +406,7 @@ describe("JsonRpc", () => {
         const reply of [
           () => new Response("busy", { status: 503 }),
           () => ({ error: { code: 3, message: "no" } }),
+          () => Response.json({ error: { code: -32600, message: "no" } }, { status: 400 }),
           () => new Response("<html>"),
           () => Promise.reject(new TypeError("fetch failed: https://a.rpc.test/secret-key"))
         ]

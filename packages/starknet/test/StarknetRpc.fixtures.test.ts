@@ -112,10 +112,16 @@ describe("StarknetRpc fixtures", () => {
         )
       ).pipe(Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 33 }))))
 
+    // HTTP 401: Alchemy's JSON-RPC -32600 body is Rejected, Infura's text body is Unavailable
     it.effect(`fixture: ${provider} invalid key`, () =>
       replay([{ name: provider, cases: ["invalid-key"] }])((rpc) => Effect.flip(rpc.chainId)).pipe(
         Effect.map((error) =>
-          expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401, method: "starknet_chainId" })
+          expect(error).toMatchObject({
+            ...(provider === "alchemy"
+              ? { reason: { _tag: "Rejected" }, code: -32600 }
+              : { reason: { _tag: "Unavailable", status: 401 }, code: 401 }),
+            method: "starknet_chainId"
+          })
         )
       ))
   }

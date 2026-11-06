@@ -128,8 +128,8 @@ describe("SolanaRpc fixtures", () => {
   it.effect("fixture: alchemy invalid-key", () =>
     replay([{ name: "alchemy", cases: ["invalid-key"] }]).run((rpc) => Effect.flip(rpc.getSlot(finalized))).pipe(
       Effect.map((error) =>
-        // HTTP 401 with a JSON-RPC -32600 body: the status wins, and another endpoint may hold a valid key
-        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: 401, method: "getGenesisHash" })
+        // HTTP 401 with a JSON-RPC -32600 body: Rejected by its code, another endpoint may hold a valid key
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32600, method: "getGenesisHash" })
       )
     ))
 
