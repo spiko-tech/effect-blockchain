@@ -24,6 +24,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install dependencies
         uses: ./.github/actions/setup
+      # Temporary, for the first publish: changesets/action v2 does not write NPM_TOKEN to .npmrc.
+      # Remove this step and set NPM_TOKEN back to "" once trusted publishing is configured on npm.
+      - name: Authenticate to npm
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create Release Pull Request or Publish
         uses: changesets/action@v2.1.2
         with:
