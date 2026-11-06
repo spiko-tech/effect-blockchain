@@ -19,16 +19,18 @@
  * `streamEvents` follows the confirmed latest ledger from `fromBlock`: each step reads `lastConfirmedBlock` and fetches
  * the next `maxBlockRange` ledgers at most, up to it, through `fetchEvents`, as one {@link StellarIndexerBatch}. A
  * batch is emitted even when it has no events, so the caller's cursor moves on a quiet contract. Caught up, the stream
- * sleeps `pollInterval` and checks again; with a `toBlock` it ends after the batch reaching it. With `retry`, a step
- * failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`) is retried at the same ledger; any
- * other failure, or an exhausted schedule, fails the stream. `Pruned` is one of them: RPC nodes keep about 7 days of
- * ledgers, so a `fromBlock` older than that fails the stream at once and the caller picks a newer `fromBlock`.
- * Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart from the ledger after it. Run one
- * stream per (network, filter) at a time: the indexer does not coordinate processes, so a service with several
- * replicas provides the exclusivity itself, for example with a Postgres advisory lock.
+ * reads the head again on the `poll` schedule until it reaches the next ledger, the schedule starting afresh after each
+ * batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops. With a `toBlock` it ends after the
+ * batch reaching it. With `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`)
+ * is retried at the same ledger; any other failure, or an exhausted schedule, fails the stream. `Pruned` is one of
+ * them: RPC nodes keep about 7 days of ledgers, so a `fromBlock` older than that fails the stream at once and the
+ * caller picks a newer `fromBlock`. Delivery is at-least-once: save `batch.toBlock` after handling a batch and restart
+ * from the ledger after it. Run one stream per (network, filter) at a time: the indexer does not coordinate processes,
+ * so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"
+ * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
  * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
  * import type { StellarIndexerFilter } from "@effect-blockchain/stellar/StellarIndexer"
@@ -39,7 +41,9 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* StellarIndexer
- *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1) }).pipe(
+ *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
+ *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
@@ -57,7 +61,7 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Order from "effect/Order"
-import type * as Schedule from "effect/Schedule"
+import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
@@ -115,7 +119,8 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
    * time, following the latest ledger: see the module's "Streaming" section.
    *
    * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
-   * - `pollInterval`: the wait once caught up, defaults to {@link DEFAULT_POLL_INTERVAL}.
+   * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
+   *   bounded schedule ends the stream when it is exhausted while still caught up.
    * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same ledger. Off by
    *   default: the first failure fails the stream. `Pruned` is never retried.
    */
@@ -123,15 +128,16 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
     readonly filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
     readonly fromBlock: bigint
     readonly toBlock?: bigint | undefined
-    readonly pollInterval?: Duration.Input | undefined
+    // the schedule's output is ignored
+    readonly poll?: Schedule.Schedule<unknown> | undefined
     // the schedule's output is ignored
     readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
   }) => Stream.Stream<StellarIndexerBatch, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarIndexer") {}
 
 /**
- * The default `pollInterval` of {@link StellarIndexer.Service.streamEvents}: the wait before reading the latest ledger
- * again once caught up.
+ * The default spacing of the `poll` schedule of {@link StellarIndexer.Service.streamEvents}: the head is read again
+ * every 10 seconds once caught up.
  *
  * @since 0.1.0
  * @category constants
@@ -206,16 +212,18 @@ export const layer = (options: {
       return StellarIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
-        streamEvents: ({ filter, fromBlock, pollInterval = DEFAULT_POLL_INTERVAL, retry, toBlock }) => {
+        streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next ledger to read: a batch up to the confirmed ledger, or a sleep once caught up
+          // one step from the next ledger to read: the head polled on `poll` until it reaches `next` (an exhausted
+          // `poll` ends the stream), then a batch up to it
           const step = (
             next: bigint
           ): Effect.Effect<readonly [ReadonlyArray<StellarIndexerBatch>, Option.Option<bigint>], StellarRpcError> =>
             lastConfirmedBlock.pipe(
+              Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }),
               Effect.flatMap((confirmed) => {
                 const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-                if (next > cap) return Effect.as(Effect.sleep(pollInterval), [[], Option.some(next)])
+                if (next > cap) return Effect.succeed([[], Option.none()])
                 const end = BigInt_.min(next + range - BigInt(1), cap)
                 return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
                   [{ fromBlock: next, toBlock: end, events }],

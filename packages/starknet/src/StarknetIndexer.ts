@@ -13,18 +13,20 @@
  * **Streaming**
  *
  * `streamEvents` follows the confirmed head from `fromBlock`: each step reads `lastConfirmedBlock` and fetches the next
- * `maxBlockRange` blocks at most, up to it, through `fetchEvents` (so with its chunk restart), as one
- * {@link StarknetIndexerBatch}. A batch is emitted even when it has no events, so the caller's cursor moves on a quiet
- * contract. Caught up, the stream sleeps `pollInterval` and checks again; with a `toBlock` it ends after the batch
- * reaching it. With `retry`, a step failing with a transient reason (`Unavailable`, `InvalidResponse`, `Lagging`),
- * including a cursor page still failing after the chunk restart, is retried at the same block; any other failure, or
- * an exhausted schedule, fails the stream. Delivery is at-least-once: save `batch.toBlock` after handling a batch and
- * restart from the block after it. Run one stream per (network, filter) at a time: the indexer does not coordinate
- * processes, so a service with several replicas provides the exclusivity itself, for example with a Postgres advisory
- * lock.
+ * `maxBlockRange` blocks at most, up to it, through `fetchEvents` (so with its chunk restart), as one {@link
+ * StarknetIndexerBatch}. A batch is emitted even when it has no events, so the caller's cursor moves on a quiet
+ * contract. Caught up, the stream reads the head again on the `poll` schedule until it reaches the next block, the
+ * schedule starting afresh after each batch; a bounded `poll`, e.g. `Schedule.recurs(0)`, drains to the head and stops.
+ * With a `toBlock` it ends after the batch reaching it. With `retry`, a step failing with a transient reason
+ * (`Unavailable`, `InvalidResponse`, `Lagging`), including a cursor page still failing after the chunk restart, is
+ * retried at the same block; any other failure, or an exhausted schedule, fails the stream. Delivery is at-least-once:
+ * save `batch.toBlock` after handling a batch and restart from the block after it. Run one stream per (network, filter)
+ * at a time: the indexer does not coordinate processes, so a service with several replicas provides the exclusivity
+ * itself, for example with a Postgres advisory lock.
  *
  * ```ts
  * import * as Effect from "effect/Effect"
+ * import * as Schedule from "effect/Schedule"
  * import * as Stream from "effect/Stream"
  * import { StarknetIndexer } from "@effect-blockchain/starknet/StarknetIndexer"
  * import type { StarknetIndexerFilter } from "@effect-blockchain/starknet/StarknetIndexer"
@@ -35,7 +37,9 @@
  *
  * const program = Effect.gen(function*() {
  *   const indexer = yield* StarknetIndexer
- *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1) }).pipe(
+ *   // idle, wait 1 s, 2 s, 4 s... between head reads, at most 1 minute
+ *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
+ *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
@@ -52,7 +56,7 @@ import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
-import type * as Schedule from "effect/Schedule"
+import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
@@ -108,7 +112,8 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
    * following the head: see the module's "Streaming" section.
    *
    * - `toBlock`: the stream ends after the batch reaching it. `fromBlock > toBlock` is an empty stream.
-   * - `pollInterval`: the wait once caught up, defaults to {@link DEFAULT_POLL_INTERVAL}.
+   * - `poll`: when to read the head again once caught up, defaults to `Schedule.spaced(DEFAULT_POLL_INTERVAL)`. A
+   *   bounded schedule ends the stream when it is exhausted while still caught up.
    * - `retry`: retries a step failing with `Unavailable`, `InvalidResponse` or `Lagging` at the same block. Off by
    *   default: the first failure fails the stream.
    */
@@ -116,15 +121,16 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
     readonly filter: Omit<StarknetIndexerFilter, "fromBlock" | "toBlock">
     readonly fromBlock: bigint
     readonly toBlock?: bigint | undefined
-    readonly pollInterval?: Duration.Input | undefined
+    // the schedule's output is ignored
+    readonly poll?: Schedule.Schedule<unknown> | undefined
     // the schedule's output is ignored
     readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
   }) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetIndexer") {}
 
 /**
- * The default `pollInterval` of {@link StarknetIndexer.Service.streamEvents}: the wait before reading the head again
- * once caught up.
+ * The default spacing of the `poll` schedule of {@link StarknetIndexer.Service.streamEvents}: the head is read again
+ * every 10 seconds once caught up.
  *
  * @since 0.1.0
  * @category constants
@@ -191,16 +197,18 @@ export const layer = (options: {
       return StarknetIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
-        streamEvents: ({ filter, fromBlock, pollInterval = DEFAULT_POLL_INTERVAL, retry, toBlock }) => {
+        streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
-          // one step from the next block to read: a batch up to the confirmed head, or a sleep once caught up
+          // one step from the next block to read: the head polled on `poll` until it reaches `next` (an exhausted
+          // `poll` ends the stream), then a batch up to it
           const step = (
             next: bigint
           ): Effect.Effect<readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<bigint>], StarknetRpcError> =>
             lastConfirmedBlock.pipe(
+              Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }),
               Effect.flatMap((confirmed) => {
                 const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-                if (next > cap) return Effect.as(Effect.sleep(pollInterval), [[], Option.some(next)])
+                if (next > cap) return Effect.succeed([[], Option.none()])
                 const end = BigInt_.min(next + size - BigInt(1), cap)
                 return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
                   [{ fromBlock: next, toBlock: end, events }],

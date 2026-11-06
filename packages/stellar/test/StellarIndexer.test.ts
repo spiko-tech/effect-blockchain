@@ -438,13 +438,13 @@ describe("StellarIndexer.streamEvents", () => {
     )
   })
 
-  for (const pollInterval of [undefined, "1 minute"] as const) {
-    it.effect(`polls the latest ledger every ${pollInterval ?? "10 seconds (default)"} once caught up`, () =>
+  for (const poll of [undefined, Schedule.spaced("1 minute")]) {
+    it.effect(`polls the latest ledger every ${poll === undefined ? "10 seconds (default)" : "1 minute"} once caught up`, () =>
       Effect.gen(function*() {
-        const wait = pollInterval === undefined ? StellarIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
+        const wait = poll === undefined ? StellarIndexer.DEFAULT_POLL_INTERVAL : Duration.minutes(1)
         const { layer, state } = fakeRpc(S_FROM + BigInt(2))
         const batches = new Array<StellarIndexer.StellarIndexerBatch>()
-        const options = { filter: streamOptions.filter, fromBlock: S_FROM, pollInterval }
+        const options = { filter: streamOptions.filter, fromBlock: S_FROM, poll }
         const run = Effect.gen(function*() {
           yield* (yield* StellarIndexer.StellarIndexer).streamEvents(options).pipe(
             Stream.runForEach((batch) => Effect.sync(() => batches.push(batch)))
@@ -463,6 +463,70 @@ describe("StellarIndexer.streamEvents", () => {
         assert.lengthOf(state.ranges, 4)
       }))
   }
+
+  it.effect("backs off on an exponential poll while idle and starts it afresh after a batch", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(S_FROM + BigInt(2))
+      const options = { filter: streamOptions.filter, fromBlock: S_FROM, poll: Schedule.exponential("1 second") }
+      yield* provide(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(Effect.forkChild)
+      yield* TestClock.adjust(0)
+      assert.strictEqual(state.heads, 2)
+      yield* TestClock.adjust("1 second")
+      assert.strictEqual(state.heads, 3)
+      yield* TestClock.adjust("2 seconds")
+      assert.strictEqual(state.heads, 4)
+      state.head = S_FROM + BigInt(5)
+      yield* TestClock.adjust("3999 millis")
+      assert.strictEqual(state.heads, 4)
+      yield* TestClock.adjust("1 milli")
+      // the batch, then the next step's read: caught up again, the poll waits 1 second
+      assert.lengthOf(state.ranges, 2)
+      assert.strictEqual(state.heads, 6)
+      yield* TestClock.adjust("1 second")
+      assert.strictEqual(state.heads, 7)
+    }))
+
+  it.effect("drains to the head and ends on Schedule.recurs(0)", () => {
+    const { layer, state } = fakeRpc(S_FROM + BigInt(5))
+    const options = { filter: streamOptions.filter, fromBlock: S_FROM, poll: Schedule.recurs(0) }
+    return provide(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+      Effect.map(({ batches, exit }) => {
+        assert.isTrue(Exit.isSuccess(exit))
+        assert.deepStrictEqual(bounds(batches), pinnedBatches.slice(0, 2))
+        assert.strictEqual(state.heads, 3)
+      })
+    )
+  })
+
+  it.effect("retries a head failing with a transient reason while polling, with retry", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(S_FROM + BigInt(2), new Map(), new Map([[3, new JsonRpc.Unavailable()]]))
+      const options = { ...streamOptions, toBlock: S_FROM + BigInt(5), retry: Schedule.recurs(1) }
+      const fiber = yield* provide(collect(options), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+        Effect.forkChild
+      )
+      yield* TestClock.adjust(0)
+      state.head = S_FROM + BigInt(5)
+      yield* TestClock.adjust(StellarIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      assert.isTrue(Exit.isSuccess(exit))
+      assert.deepStrictEqual(bounds(batches), pinnedBatches.slice(0, 2))
+      assert.strictEqual(state.heads, 4)
+    }))
+
+  it.effect("fails on a head failing while polling, without retry", () =>
+    Effect.gen(function*() {
+      const { layer, state } = fakeRpc(S_FROM + BigInt(2), new Map(), new Map([[3, new JsonRpc.Unavailable()]]))
+      const fiber = yield* provide(collect(streamOptions), layer, { confirmations: 0, maxBlockRange: 3 }).pipe(
+        Effect.forkChild
+      )
+      yield* TestClock.adjust(0)
+      yield* TestClock.adjust(StellarIndexer.DEFAULT_POLL_INTERVAL)
+      const { batches, exit } = yield* Fiber.join(fiber)
+      assert.strictEqual(reasonOf(exit), "Unavailable")
+      assert.lengthOf(batches, 1)
+      assert.strictEqual(state.heads, 3)
+    }))
 
   it.effect("waits for toBlock to be confirmed", () =>
     Effect.gen(function*() {
