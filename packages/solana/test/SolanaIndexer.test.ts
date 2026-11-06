@@ -339,7 +339,7 @@ const streamOptions = { filter: { address: EUTBL }, fromBlock: FROM, toBlock: TO
 const bounds = (batches: ReadonlyArray<SolanaIndexer.SolanaIndexerBatch>) =>
   batches.map((batch) => [batch.fromBlock, batch.toBlock, batch.transactions.length])
 
-const collect = (options: SolanaIndexer.SolanaStreamOptions) =>
+const collect = (options: SolanaIndexer.SolanaIndexerStreamOptions) =>
   Effect.gen(function*() {
     const batches = new Array<SolanaIndexer.SolanaIndexerBatch>()
     const exit = yield* (yield* SolanaIndexer.SolanaIndexer).streamTransactions(options).pipe(

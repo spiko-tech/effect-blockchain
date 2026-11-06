@@ -1,8 +1,5 @@
-import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
-import * as Option from "effect/Option"
-import * as Predicate from "effect/Predicate"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
-import * as SchemaTransformation from "effect/SchemaTransformation"
 import { EvmAddress } from "../EvmAddress.ts"
 import { EvmBlock } from "../EvmBlock.ts"
 import { EvmHexData } from "../EvmHexData.ts"
@@ -38,16 +35,7 @@ export const getLogs = make({
       address: Schema.Array(EvmAddress),
       fromBlock: QuantityFromHex,
       toBlock: QuantityFromHex,
-      // `topics: undefined` is accepted and omitted on encode, since `undefined` is not JSON
-      topics: Schema.optionalKey(Schema.toEncoded(Topics)).pipe(
-        Schema.decodeTo(
-          Schema.optional(Topics),
-          SchemaTransformation.transformOptional<typeof Topics.Encoded | undefined, typeof Topics.Encoded>({
-            decode: (topics) => topics,
-            encode: (topics) => Option.filter(topics, Predicate.isNotUndefined)
-          })
-        )
-      )
+      topics: JsonRpc.optionalOmitted(Topics)
     })
   ]),
   // a log dropped by a reorg comes back with `removed: true` and must not be returned

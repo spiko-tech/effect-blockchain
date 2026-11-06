@@ -44,7 +44,7 @@ export const StellarAccountAddress = pipe(
   Schema.brand("StellarAccountAddress"),
   Schema.annotate({
     identifier: "StellarAccountAddress",
-    title: "StellarAccountAddress",
+    title: "Stellar account address",
     description:
       "a valid Stellar account address, starting with G and followed by 55 base32 characters e.g. \"GBYIQXBKEB655EB3WTRITS6RR5GXEP6SQRBLPREZHNFYKT7WBMTMPR3H\""
   })
@@ -76,7 +76,7 @@ export const StellarContractAddress = pipe(
   Schema.brand("StellarContractAddress"),
   Schema.annotate({
     identifier: "StellarContractAddress",
-    title: "StellarContractAddress",
+    title: "Stellar contract address",
     description:
       "a valid Stellar contract address, starting with C and followed by 55 base32 characters e.g. \"CCAANR7HZNOXYZD7SXS2WQLV5BAOXSRZ7V4O43IANSB355QN2RNG7WVC\""
   })
@@ -109,6 +109,6 @@ export type StellarAddress = typeof StellarAddress.Type
  * @since 0.1.0
  * @category constants
  */
-export const NULL_STELLAR_ADDRESS: StellarAccountAddress = StellarAccountAddress.make(
+export const NULL_ADDRESS: StellarAccountAddress = StellarAccountAddress.make(
   "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
 )

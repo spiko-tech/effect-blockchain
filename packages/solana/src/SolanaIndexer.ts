@@ -105,7 +105,7 @@ export interface SolanaIndexerBatch<Encoding extends SolanaTransactionEncoding =
  * @since 0.1.0
  * @category models
  */
-export interface SolanaStreamOptions {
+export interface SolanaIndexerStreamOptions {
   readonly filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
   readonly fromBlock: bigint
   /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
@@ -149,10 +149,10 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
    */
   readonly streamTransactions: {
     (
-      options: SolanaStreamOptions & { readonly encoding?: "base64" | undefined }
+      options: SolanaIndexerStreamOptions & { readonly encoding?: "base64" | undefined }
     ): Stream.Stream<SolanaIndexerBatch, SolanaRpcError>
     <Encoding extends SolanaTransactionEncoding>(
-      options: SolanaStreamOptions & { readonly encoding: Encoding }
+      options: SolanaIndexerStreamOptions & { readonly encoding: Encoding }
     ): Stream.Stream<SolanaIndexerBatch<Encoding>, SolanaRpcError>
   }
 }>()("@effect-blockchain/solana/SolanaIndexer") {}
@@ -194,12 +194,12 @@ const groupBySlot = (
 
 // a stream position: the next slot to emit, then either nothing pending (read the head and page the signatures) or
 // the groups of `[next, cap]` still to fetch, one per step
-interface Position {
+interface StreamPosition {
   readonly next: bigint
   readonly cap: bigint
   readonly groups: ReadonlyArray<Arr.NonEmptyReadonlyArray<SolanaSignatureInfo>>
 }
-type Step = readonly [ReadonlyArray<SolanaIndexerBatch<SolanaTransactionEncoding>>, Option.Option<Position>]
+type Step = readonly [ReadonlyArray<SolanaIndexerBatch<SolanaTransactionEncoding>>, Option.Option<StreamPosition>]
 
 /**
  * Builds a {@link SolanaIndexer} on the provided {@link SolanaRpc}.
@@ -289,23 +289,23 @@ export const layer = (options: {
       }
 
       function streamTransactions(
-        options: SolanaStreamOptions & { readonly encoding?: "base64" | undefined }
+        options: SolanaIndexerStreamOptions & { readonly encoding?: "base64" | undefined }
       ): Stream.Stream<SolanaIndexerBatch, SolanaRpcError>
       function streamTransactions<Encoding extends SolanaTransactionEncoding>(
-        options: SolanaStreamOptions & { readonly encoding: Encoding }
+        options: SolanaIndexerStreamOptions & { readonly encoding: Encoding }
       ): Stream.Stream<SolanaIndexerBatch<Encoding>, SolanaRpcError>
       function streamTransactions(
-        options: SolanaStreamOptions & { readonly encoding?: SolanaTransactionEncoding | undefined }
+        options: SolanaIndexerStreamOptions & { readonly encoding?: SolanaTransactionEncoding | undefined }
       ): Stream.Stream<SolanaIndexerBatch<SolanaTransactionEncoding>, SolanaRpcError> {
         const { encoding = "base64", filter, fromBlock, retry, toBlock } = options
         const poll = options.poll ?? Schedule.spaced(DEFAULT_POLL_INTERVAL)
         if (toBlock !== undefined && fromBlock > toBlock) {
           return Stream.empty
         }
-        const after = (end: bigint, cap: bigint, groups: Position["groups"]): Option.Option<Position> =>
+        const after = (end: bigint, cap: bigint, groups: StreamPosition["groups"]): Option.Option<StreamPosition> =>
           end === toBlock ? Option.none() : Option.some({ next: end + BigInt(1), cap, groups })
         // one step: the transactions of the next pending group, else the signatures up to the polled confirmed head
-        const step = (position: Position): Effect.Effect<Step, SolanaRpcError> => {
+        const step = (position: StreamPosition): Effect.Effect<Step, SolanaRpcError> => {
           const { cap, groups, next } = position
           if (Arr.isReadonlyArrayNonEmpty(groups)) {
             const [group, ...rest] = groups
@@ -341,7 +341,7 @@ export const layer = (options: {
           )
         }
         return Stream.paginate(
-          { next: fromBlock, cap: fromBlock, groups: [] } satisfies Position,
+          { next: fromBlock, cap: fromBlock, groups: [] } satisfies StreamPosition,
           retry === undefined
             ? step
             : (position) =>

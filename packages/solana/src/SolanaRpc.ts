@@ -253,7 +253,7 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
 }>()("@effect-blockchain/solana/SolanaRpc") {}
 
 // JSON-RPC codes from @solana/errors, any other code is `Rejected`
-const codeReasons: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
+const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [429, "Unavailable"],
   [SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR, "Unavailable"],
   [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY, "Unavailable"],
@@ -295,7 +295,7 @@ export const layer = (options: {
         timeout: options.timeout,
         retries: options.retries,
         retryDelay: options.retryDelay,
-        codes: codeReasons,
+        codes,
         parseBody: BigIntJson.parse,
         checkNetwork: (send, endpoint) =>
           send(RpcMethods.getGenesisHash, []).pipe(

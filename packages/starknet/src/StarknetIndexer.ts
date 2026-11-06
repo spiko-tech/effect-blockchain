@@ -2,9 +2,9 @@
  * Starknet event indexing on top of {@link StarknetRpc}: the last confirmed block, the events of a contract over a
  * block range, and a stream of them following the confirmed head.
  *
- * Ranges are read in chunks of at most `maxBlockRange` blocks, each paged with `starknet_getEvents` until its
- * continuation token is absent. A cursor page is pinned to the endpoint that issued it, so when it fails the chunk
- * restarts once from its first page, through the fallback again. Any other failure fails the whole call and drops the
+ * A range is split into ranges of at most `maxBlockRange` blocks, each paged with `starknet_getEvents` (`chunkSize`
+ * events per page) until its continuation token is absent. A cursor page is pinned to the endpoint that issued it, so
+ * when it fails the range restarts once from its first page, through the fallback again. Any other failure fails the whole call and drops the
  * events already read: the caller retries the same range.
  *
  * @example
@@ -74,12 +74,32 @@ export interface StarknetIndexerBatch {
 
 /**
  * The default `maxBlockRange`. Starknet nodes do not limit the block range of `starknet_getEvents` (they cap the page
- * size), so a chunk only bounds the work a restart redoes: 10000 blocks is a few hours of mainnet.
+ * size), so a range only bounds the work a restart redoes: 10000 blocks is a few hours of mainnet.
  *
  * @since 0.1.0
  * @category constants
  */
 export const DEFAULT_MAX_BLOCK_RANGE = 10_000
+
+/**
+ * The {@link StarknetIndexer.Service.streamEvents} options.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface StarknetIndexerStreamOptions {
+  readonly filter: Omit<StarknetIndexerFilter, "fromBlock" | "toBlock">
+  readonly fromBlock: bigint
+  /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
+  readonly toBlock?: bigint | undefined
+  /**
+   * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts after
+   * each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
+   */
+  readonly poll?: Schedule.Schedule<unknown> | undefined
+  /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same block. Off by default. */
+  readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+}
 
 /**
  * @since 0.1.0
@@ -97,19 +117,7 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
    * The events matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed blocks, following
    * the confirmed head.
    */
-  readonly streamEvents: (options: {
-    readonly filter: Omit<StarknetIndexerFilter, "fromBlock" | "toBlock">
-    readonly fromBlock: bigint
-    /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
-    readonly toBlock?: bigint | undefined
-    /**
-     * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts
-     * after each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
-     */
-    readonly poll?: Schedule.Schedule<unknown> | undefined
-    /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same block. Off by default. */
-    readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
-  }) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
+  readonly streamEvents: (options: StarknetIndexerStreamOptions) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetIndexer") {}
 
 /**
@@ -121,7 +129,7 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 
 // the confirmed blocks [next, head] not indexed yet, empty once the stream reaches the head it last read
-interface IndexerConfirmedRange {
+interface StreamPosition {
   readonly next: bigint
   readonly head: bigint
 }
@@ -130,7 +138,7 @@ interface IndexerConfirmedRange {
  * Builds a {@link StarknetIndexer} over the provided {@link StarknetRpc}.
  *
  * - `confirmations` defaults to {@link StarknetNetwork.defaultConfirmations} for the RPC's network.
- * - `maxBlockRange` is the largest chunk in blocks, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
+ * - `maxBlockRange` is the largest range in blocks, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
  * - `chunkSize` is the `starknet_getEvents` page size, default 1000: lower it for a provider with a smaller cap.
  *
  * @since 0.1.0
@@ -163,12 +171,12 @@ export const layer = (options: {
           ),
           (fromBlock) => {
             const toBlock = BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock)
-            const chunk = { ...filter, fromBlock, toBlock, chunkSize: options.chunkSize }
-            // a cursor page has no fallback: when it fails, the chunk restarts once from its first page
+            const range = { ...filter, fromBlock, toBlock, chunkSize: options.chunkSize }
+            // a cursor page has no fallback: when it fails, the range restarts once from its first page
             return Stream.paginate(
               Option.none<StarknetEventsCursor>(),
               (cursor) =>
-                rpc.getEvents({ ...chunk, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
+                rpc.getEvents({ ...range, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
                   onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
                   onSuccess: (page) =>
                     [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
@@ -188,9 +196,9 @@ export const layer = (options: {
           if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
           // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
           const step = (
-            { head, next }: IndexerConfirmedRange
+            { head, next }: StreamPosition
           ): Effect.Effect<
-            readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<IndexerConfirmedRange>],
+            readonly [ReadonlyArray<StarknetIndexerBatch>, Option.Option<StreamPosition>],
             StarknetRpcError
           > =>
             (next <= head

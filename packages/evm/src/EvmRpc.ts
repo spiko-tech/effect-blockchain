@@ -191,7 +191,7 @@ export const layer = (options: {
       const getBlockByNumberOn = (endpoint: Endpoint, blockNumber: bigint) =>
         Effect.gen(function*() {
           const method = RpcMethods.getBlockByNumber.name
-          yield* rpc.guard(endpoint, method, blockNumber, blockNumberOn(endpoint))
+          yield* rpc.requireHead(endpoint, method, blockNumber, blockNumberOn(endpoint))
           const block = yield* rpc.call(endpoint, RpcMethods.getBlockByNumber, [blockNumber, false])
           if (block === null) {
             const head = yield* Ref.get(endpoint.head)
@@ -216,7 +216,7 @@ export const layer = (options: {
       const getLogsOn = (endpoint: Endpoint, filter: EvmLogsFilter) =>
         Effect.gen(function*() {
           const method = RpcMethods.getLogs.name
-          yield* rpc.guard(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
+          yield* rpc.requireHead(endpoint, method, filter.toBlock, blockNumberOn(endpoint))
           const { addresses, ...range } = filter
           const logs = yield* rpc.call(endpoint, RpcMethods.getLogs, [{ ...range, address: addresses }])
           const allowed = new Set<string>(addresses)

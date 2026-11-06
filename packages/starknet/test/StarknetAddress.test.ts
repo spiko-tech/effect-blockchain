@@ -1,4 +1,4 @@
-import { NullStarknetAddress, StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
+import { NULL_ADDRESS, StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arbitrary from "effect/Arbitrary"
 import * as Effect from "effect/Effect"
@@ -22,7 +22,7 @@ describe("StarknetAddress", () => {
     expect(decode("0x32")).toStrictEqual(
       Result.succeed("0x0000000000000000000000000000000000000000000000000000000000000032")
     )
-    expect(decode("0x0")).toStrictEqual(Result.succeed(NullStarknetAddress))
+    expect(decode("0x0")).toStrictEqual(Result.succeed(NULL_ADDRESS))
   })
 
   it("accepts an address without the 0x prefix", () => {

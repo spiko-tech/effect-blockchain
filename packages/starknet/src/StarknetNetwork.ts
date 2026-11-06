@@ -31,7 +31,7 @@ export const networks = [...mainnets, ...testnets] as const
  */
 export const StarknetNetwork = Schema.Literals(networks).annotate({
   identifier: "StarknetNetwork",
-  title: "StarknetNetwork",
+  title: "Starknet network",
   description: "a Starknet network name: \"Starknet\" (mainnet) or \"StarknetSepolia\" (testnet)"
 })
 
@@ -74,7 +74,7 @@ export const toChainId = (network: StarknetNetwork): StarknetChainId => chainIds
  * Default number of confirmations an indexer waits for on each network, on top of the latest accepted block.
  *
  * @since 0.1.0
- * @category utils
+ * @category getters
  */
 export const defaultConfirmations = (network: StarknetNetwork): number => {
   switch (network) {

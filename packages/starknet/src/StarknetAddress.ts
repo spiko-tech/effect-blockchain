@@ -4,7 +4,7 @@
  * @since 0.1.0
  */
 import * as Schema from "effect/Schema"
-import { PaddedFelt } from "./internal/felt.ts"
+import { PaddedFelt } from "./internal/PaddedFelt.ts"
 
 /**
  * A Starknet address: `0x` followed by 64 lowercase hex digits.
@@ -19,7 +19,7 @@ export const StarknetAddress = PaddedFelt.pipe(
   Schema.brand("StarknetAddress"),
   Schema.annotate({
     identifier: "StarknetAddress",
-    title: "StarknetAddress",
+    title: "Starknet address",
     description:
       "a valid Starknet address, starting with 0x and followed by 64 hexadecimal characters e.g. \"0x0000000000000000000000000000000000000000000000000000000000000000\""
   })
@@ -37,6 +37,6 @@ export type StarknetAddress = typeof StarknetAddress.Type
  * @since 0.1.0
  * @category constants
  */
-export const NullStarknetAddress: StarknetAddress = StarknetAddress.make(
+export const NULL_ADDRESS: StarknetAddress = StarknetAddress.make(
   "0x0000000000000000000000000000000000000000000000000000000000000000"
 )
