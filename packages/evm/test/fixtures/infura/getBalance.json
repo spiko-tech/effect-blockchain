@@ -1,0 +1,14 @@
+{
+  "provider": "infura",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-06",
+  "request": {
+    "method": "eth_getBalance",
+    "params": [
+      "0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
+      "0x18e00dd"
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x139092bf9246076ac07\"}\n"
+}
