@@ -156,6 +156,41 @@ describe("SolanaRpc", () => {
     }))
   })
 
+  it.effect("returns getTransaction in json, with or without address table lookups", () => {
+    const params: Array<ReadonlyArray<Schema.Json>> = []
+    const message = {
+      accountKeys: [ADDRESS],
+      header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 1 },
+      recentBlockhash: "11111111111111111111111111111111",
+      instructions: [{ programIdIndex: 1, accounts: [0, 2], data: "3Bxs", stackHeight: null }]
+    }
+    const lookups = [{ accountKey: ADDRESS, writableIndexes: [3], readonlyIndexes: [] }]
+    const replies = [message, { ...message, addressTableLookups: lookups }]
+    const { run } = setup({
+      a: {
+        getTransaction: (p) => {
+          params.push(p)
+          const reply = replies[params.length - 1]
+          return {
+            result: { slot: 12, blockTime: null, transaction: { signatures: [SIGNATURE], message: reply }, meta: null }
+          }
+        }
+      }
+    })
+    const instructions = [{ programIdIndex: 1, accounts: [0, 2], data: "3Bxs" }]
+    return run((rpc) =>
+      Effect.all([1, 2].map(() => rpc.getTransaction({ signature: SIGNATURE, ...confirmed, encoding: "json" })))
+    ).pipe(Effect.map(([legacy, v0]) => {
+      expect(params[0]).toStrictEqual([SIGNATURE, {
+        commitment: "confirmed",
+        encoding: "json",
+        maxSupportedTransactionVersion: 0
+      }])
+      expect(legacy?.transaction.message).toStrictEqual({ ...message, instructions })
+      expect(v0?.transaction.message).toStrictEqual({ ...message, instructions, addressTableLookups: lookups })
+    }))
+  })
+
   it.effect("keeps a u64 slot above 2^53 exact", () =>
     setup({ a: { getSlot: raw(`"result":9007199254740993`) } }).run((rpc) => rpc.getSlot(confirmed)).pipe(
       Effect.map((value) => expect(value).toBe(BigInt("9007199254740993")))

@@ -4,6 +4,7 @@ import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { SolanaAddress } from "../SolanaAddress.ts"
+import type { SolanaEncodedTransaction, SolanaTransactionEncoding } from "../SolanaRpc.ts"
 import { SolanaTransactionHash } from "../SolanaTransactionHash.ts"
 
 /**
@@ -64,6 +65,46 @@ const BigIntFromInt = Schema.Int.pipe(
   Schema.decodeTo(Schema.BigInt, SchemaTransformation.transform({ decode: BigInt, encode: Number }))
 )
 
+// a small JSON integer read as a `number`, e.g. an account index
+const NumberFromBigInt = Schema.BigInt.pipe(
+  Schema.decodeTo(Schema.Int, SchemaTransformation.transform({ decode: Number, encode: BigInt }))
+)
+
+const Indexes = Schema.Array(NumberFromBigInt)
+
+const transactions: { readonly [E in SolanaTransactionEncoding]: Schema.Codec<SolanaEncodedTransaction[E], RpcJson> } =
+  {
+    base64: Schema.Tuple([Schema.String, Schema.Literal("base64")]).pipe(
+      Schema.decodeTo(
+        Schema.String,
+        SchemaTransformation.transform({ decode: ([data]) => data, encode: (data) => [data, "base64"] as const })
+      )
+    ),
+    json: Schema.Struct({
+      signatures: Schema.Array(SolanaTransactionHash),
+      message: Schema.Struct({
+        accountKeys: Schema.Array(SolanaAddress),
+        header: Schema.Struct({
+          numRequiredSignatures: NumberFromBigInt,
+          numReadonlySignedAccounts: NumberFromBigInt,
+          numReadonlyUnsignedAccounts: NumberFromBigInt
+        }),
+        recentBlockhash: Schema.String,
+        instructions: Schema.Array(Schema.Struct({
+          programIdIndex: NumberFromBigInt,
+          accounts: Indexes,
+          data: Schema.String
+        })),
+        // absent from legacy transactions
+        addressTableLookups: Schema.optionalKey(Schema.Array(Schema.Struct({
+          accountKey: SolanaAddress,
+          writableIndexes: Indexes,
+          readonlyIndexes: Indexes
+        })))
+      })
+    })
+  }
+
 const NoParams = Schema.Tuple([])
 
 const Commitment = Schema.Literals(["confirmed", "finalized"])
@@ -101,21 +142,22 @@ export const getSignaturesForAddress = make({
 })
 
 /** @internal */
-export const getTransaction = make({
-  name: "getTransaction",
-  params: Schema.Tuple([
-    SolanaTransactionHash,
-    Schema.Struct({
-      commitment: Commitment,
-      encoding: Schema.Literal("base64"),
-      maxSupportedTransactionVersion: Schema.Literal(0)
-    })
-  ]),
-  // `null` when the endpoint does not have the transaction
-  result: Schema.NullOr(Schema.Struct({
-    slot: Schema.BigInt,
-    blockTime: Schema.NullOr(Schema.BigInt),
-    transaction: Schema.Tuple([Schema.String, Schema.Literal("base64")]),
-    meta: JsonFromRpc
-  }))
-})
+export const getTransaction = (encoding: SolanaTransactionEncoding) =>
+  make({
+    name: "getTransaction",
+    params: Schema.Tuple([
+      SolanaTransactionHash,
+      Schema.Struct({
+        commitment: Commitment,
+        encoding: Schema.Literal(encoding),
+        maxSupportedTransactionVersion: Schema.Literal(0)
+      })
+    ]),
+    // `null` when the endpoint does not have the transaction
+    result: Schema.NullOr(Schema.Struct({
+      slot: Schema.BigInt,
+      blockTime: Schema.NullOr(Schema.BigInt),
+      transaction: transactions[encoding],
+      meta: JsonFromRpc
+    }))
+  })
