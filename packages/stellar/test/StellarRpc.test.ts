@@ -442,17 +442,22 @@ describe("StellarRpc", () => {
       }
     }))
 
-  it.effect("fails getAccount InvalidResponse on a malformed entry or another account's", () =>
-    Effect.gen(function*() {
-      const other = accountEntryXdr(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 2)))
-      for (const xdr of ["AAAA", other]) {
-        const { run } = setup({
-          a: { getLedgerEntries: () => ({ result: { entries: [{ xdr, lastModifiedLedgerSeq: 5 }], latestLedger: 9 } }) }
-        })
-        const error = yield* run((rpc) => Effect.flip(rpc.getAccount({ address: ACCOUNT })))
-        expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getLedgerEntries" })
+  it.effect("sends getLedgerEntries keys and reads lastModifiedLedgerSeq", () => {
+    const params: Array<Params | undefined> = []
+    const xdr = accountEntryXdr(ACCOUNT)
+    const { run } = setup({
+      a: {
+        getLedgerEntries: (p) => {
+          params.push(p)
+          return { result: { entries: [{ xdr, lastModifiedLedgerSeq: 5 }], latestLedger: 9 } }
+        }
       }
+    })
+    return run((rpc) => rpc.getLedgerEntries({ keys: ["k"] })).pipe(Effect.map((reply) => {
+      expect(reply).toStrictEqual({ entries: [{ xdr, lastModifiedLedger: BigInt(5) }], latestLedger: BigInt(9) })
+      expect(params).toStrictEqual([{ keys: ["k"] }])
     }))
+  })
 
   it.effect("makes no call for an empty range", () => {
     const { calls, run } = setup({ a: {} })

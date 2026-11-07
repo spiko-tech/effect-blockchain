@@ -54,6 +54,7 @@
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
@@ -309,8 +310,25 @@ export const layer = (options: {
             ] as const
           })))
 
+      // the account entry of `address` at the head, from an endpoint that has reached `block`; a malformed entry is a defect
+      const account = (address: StellarAccountAddress, block: bigint) => {
+        const key = xdr.LedgerKey.account(
+          new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() })
+        ).toXDR("base64")
+        return Effect.map(rpc.getLedgerEntries({ keys: [key], minLedger: block }), ({ entries, latestLedger }) => {
+          const entry = entries[0]
+          if (entry === undefined) return { account: undefined, latestLedger }
+          const data = xdr.LedgerEntryData.fromXDR(entry.xdr, "base64").account()
+          if (StrKey.encodeEd25519PublicKey(data.accountId().ed25519()) !== address) {
+            throw new Error(`getLedgerEntries returned another account than ${address}`)
+          }
+          const balance = BigInt(data.balance().toString())
+          return { account: { balance, lastModifiedLedger: entry.lastModifiedLedger }, latestLedger }
+        })
+      }
+
       const balanceAt = (address: StellarAccountAddress, block: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
-        Effect.flatMap(rpc.getAccount({ address, minBlock: block }), ({ account, latestLedger }) => {
+        Effect.flatMap(account(address, block), ({ account, latestLedger }) => {
           if (account === undefined) return Effect.succeed({ balance: BigInt(0), until: latestLedger })
           if (account.lastModifiedLedger <= block) {
             return Effect.succeed({ balance: account.balance, until: latestLedger })
@@ -330,7 +348,7 @@ export const layer = (options: {
         known: KnownBalance
       ): Effect.Effect<KnownBalance, StellarRpcError> =>
         block <= known.until ? Effect.succeed(known) : Effect.flatMap(
-          rpc.getAccount({ address, minBlock: block }),
+          account(address, block),
           ({ account, latestLedger }) =>
             account !== undefined && account.lastModifiedLedger <= block
               ? Effect.succeed({ balance: account.balance, until: latestLedger })
