@@ -4,10 +4,12 @@ import { StellarAccountAddress, StellarContractAddress } from "@effect-blockchai
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
+import { xdr } from "@stellar/stellar-sdk"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
+import { accountKey } from "./utils/ledgerMeta.ts"
 
 const network = ["getNetwork", "getHealth"]
 
@@ -15,6 +17,7 @@ const EUTBL = StellarContractAddress.make("CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH
 const USTBL = StellarContractAddress.make("CARUUX2FZNPH6DGJOEUFSIUQWYHNL5AVDV7PMVSHWL7OBYIBFC76F4TO")
 const BINANCE = StellarAccountAddress.make("GABFQIK63R2NETJM7T673EAMZN4RJLLGP3OFUEJU5SZVTGWUKULZJNL6")
 const MISSING = StellarAccountAddress.make("GD7777777777777777777777777777777777777777777777777773DB")
+const key = (address: string) => accountKey(address).toXDR("base64")
 // pruned on the regular endpoint, served by the archive one
 const V1_LEDGER = BigInt(55000004)
 // the pinned range, as recorded: `endLedger` is `toBlock + 1`
@@ -129,23 +132,27 @@ describe("StellarRpc fixtures", () => {
       assert.strictEqual(error.code, -32602)
     }))
 
-  it.effect("fixture: quasar getAccount of Binance and of a missing account", () =>
+  it.effect("fixture: quasar getLedgerEntries of Binance and of a missing account", () =>
     Effect.gen(function*() {
       const [binance, missing] = yield* setup([{
         name: "quasar",
         cases: ["getNetwork", "getLedgerEntries-binance", "getLedgerEntries-missing"]
-      }])((rpc) => Effect.all([rpc.getAccount({ address: BINANCE }), rpc.getAccount({ address: MISSING })]))
-      assert.deepStrictEqual(binance, {
-        account: { balance: BigInt(378110440136408), lastModifiedLedger: BigInt(65338911) },
-        latestLedger: BigInt(65338914)
-      })
-      assert.deepStrictEqual(missing, { account: undefined, latestLedger: BigInt(65338914) })
+      }])((rpc) =>
+        Effect.all([rpc.getLedgerEntries({ keys: [key(BINANCE)] }), rpc.getLedgerEntries({ keys: [key(MISSING)] })])
+      )
+      assert.strictEqual(
+        xdr.LedgerEntryData.fromXDR(binance.entries[0].xdr, "base64").account().balance().toString(),
+        "378110440136408"
+      )
+      assert.strictEqual(binance.entries[0].lastModifiedLedger, BigInt(65338911))
+      assert.strictEqual(binance.latestLedger, BigInt(65338914))
+      assert.deepStrictEqual(missing, { entries: [], latestLedger: BigInt(65338914) })
     }))
 
-  it.effect("fixture: quasar getAccount fails Lagging below minBlock", () =>
+  it.effect("fixture: quasar getLedgerEntries fails Lagging below minLedger", () =>
     Effect.gen(function*() {
       const error = yield* setup([{ name: "quasar", cases: ["getNetwork", "getLedgerEntries-binance"] }])((rpc) =>
-        Effect.flip(rpc.getAccount({ address: BINANCE, minBlock: BigInt(65338915) }))
+        Effect.flip(rpc.getLedgerEntries({ keys: [key(BINANCE)], minLedger: BigInt(65338915) }))
       )
       expect(error).toMatchObject({ reason: { _tag: "Lagging", head: BigInt(65338914), toBlock: BigInt(65338915) } })
     }))

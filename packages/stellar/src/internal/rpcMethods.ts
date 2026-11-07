@@ -76,7 +76,11 @@ export const getLedgerEntries = make({
   name: "getLedgerEntries",
   params: Schema.Struct({ keys: Schema.Array(Schema.String) }),
   result: Schema.Struct({
-    entries: Schema.Array(Schema.Struct({ xdr: Schema.String, lastModifiedLedgerSeq: LedgerFromNumber })),
+    entries: Schema.Array(
+      Schema.Struct({ xdr: Schema.String, lastModifiedLedger: LedgerFromNumber }).pipe(
+        Schema.encodeKeys({ lastModifiedLedger: "lastModifiedLedgerSeq" })
+      )
+    ),
     latestLedger: LedgerFromNumber
   })
 })
