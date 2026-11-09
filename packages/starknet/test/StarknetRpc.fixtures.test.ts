@@ -144,11 +144,6 @@ describe("StarknetRpc fixtures", () => {
         })
       ).pipe(Effect.map((felts) => expect(felts).toStrictEqual([felt(STAKING_BALANCE), felt("0x0")]))))
 
-    it.effect(`fixture: ${provider} getBalance`, () =>
-      replay([{ name: provider, cases: [...network, "call-balanceOf"] }])((rpc) =>
-        rpc.getBalance({ address: STAKING, blockNumber: BLOCK })
-      ).pipe(Effect.map((balance) => expect(balance).toBe(BigInt(STAKING_BALANCE)))))
-
     it.effect(`fixture: ${provider} call on a missing contract`, () =>
       replay([{ name: provider, cases: [...network, "call-contract-not-found"] }])((rpc) =>
         Effect.flip(rpc.call({
@@ -163,9 +158,14 @@ describe("StarknetRpc fixtures", () => {
         )
       ))
 
-    it.effect(`fixture: ${provider} getBalance beyond head`, () =>
+    it.effect(`fixture: ${provider} call beyond head`, () =>
       replay([{ name: provider, cases: network }])((rpc) =>
-        Effect.flip(rpc.getBalance({ address: STAKING, blockNumber: BigInt(99999999) }))
+        Effect.flip(rpc.call({
+          contractAddress: STRK_TOKEN_ADDRESS,
+          entryPointSelector: BALANCE_OF,
+          calldata: [STAKING],
+          blockNumber: BigInt(99999999)
+        }))
       ).pipe(
         Effect.map((error) =>
           expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "starknet_call", endpoint: provider })

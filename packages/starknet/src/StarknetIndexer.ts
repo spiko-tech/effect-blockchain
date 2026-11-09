@@ -68,8 +68,8 @@ import * as Stream from "effect/Stream"
 import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
-import type { StarknetEventsCursor, StarknetEventsFilter, StarknetRpcError } from "./StarknetRpc.ts"
-import { StarknetRpc } from "./StarknetRpc.ts"
+import type { StarknetEventsCursor, StarknetEventsFilter } from "./StarknetRpc.ts"
+import { StarknetRpc, StarknetRpcError } from "./StarknetRpc.ts"
 
 /**
  * A {@link StarknetIndexer} `fetchEvents` filter: a `starknet_getEvents` filter without its paging fields, over the
@@ -194,6 +194,9 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
 
+// sn_keccak("balanceOf"), the ERC-20 entry point selector
+const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
+
 // the confirmed blocks [next, head] not indexed yet, empty once the stream reaches the head it last read
 interface StreamPosition {
   readonly next: bigint
@@ -270,7 +273,23 @@ export const layer = (options: {
             Effect.retry(step(state), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
       const fetchNativeBalance = Effect.fn("StarknetIndexer.fetchNativeBalance")(
         ({ address, block }: { readonly address: StarknetAddress; readonly block: bigint }) =>
-          rpc.getBalance({ address, blockNumber: block })
+          rpc.call({
+            contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
+            entryPointSelector: BALANCE_OF,
+            calldata: [address],
+            blockNumber: block
+          }).pipe(Effect.flatMap((felts) =>
+            felts.length === 2
+              ? Effect.succeed(BigInt(felts[0]) + (BigInt(felts[1]) << BigInt(128)))
+              : Effect.fail(
+                new StarknetRpcError({
+                  reason: new JsonRpc.InvalidResponse(),
+                  method: "starknet_call",
+                  endpoint: "StarknetIndexer",
+                  cause: new Error(`balanceOf returned ${felts.length} felts, expected a u256 (low, high)`)
+                })
+              )
+          ))
       )
       return StarknetIndexer.of({
         lastConfirmedBlock,
