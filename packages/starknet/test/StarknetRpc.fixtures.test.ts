@@ -34,7 +34,7 @@ const filter = { address: EUTBL, fromBlock: BigInt(1380300), toBlock: BigInt(138
 const TRANSFER = "0x0099cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9"
 const felt = (value: string) => "0x" + value.slice(2).padStart(64, "0")
 
-const STRK = StarknetAddress.make("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
+const STRK_TOKEN_ADDRESS = StarknetAddress.make("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
 const STAKING = StarknetAddress.make("0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7")
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
 const BLOCK = BigInt(1380308)
@@ -137,7 +137,7 @@ describe("StarknetRpc fixtures", () => {
     it.effect(`fixture: ${provider} call balanceOf`, () =>
       replay([{ name: provider, cases: [...network, "call-balanceOf"] }])((rpc) =>
         rpc.call({
-          contractAddress: STRK,
+          contractAddress: STRK_TOKEN_ADDRESS,
           entryPointSelector: BALANCE_OF,
           calldata: [STAKING],
           blockNumber: BLOCK

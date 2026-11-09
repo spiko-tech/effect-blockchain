@@ -10,7 +10,7 @@ import { type Case, type Json, record, secret } from "../../core/scripts/recordF
 // a tokenized fund token on Starknet, blocks 1380300..1380400 hold 12 Transfer events in 3 transactions
 const EUTBL = "0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2"
 // the STRK token and the mainnet staking contract, which holds STRK: https://docs.starknet.io/resources/chain-info
-const STRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
+const STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
 const STAKING = "0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7"
 // sn_keccak("balanceOf")
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
@@ -66,7 +66,7 @@ const cases: ReadonlyArray<Case> = [
     name: "call-balanceOf",
     method: "starknet_call",
     params: {
-      request: { contract_address: STRK, entry_point_selector: BALANCE_OF, calldata: [STAKING] },
+      request: { contract_address: STRK_TOKEN_ADDRESS, entry_point_selector: BALANCE_OF, calldata: [STAKING] },
       block_id: { block_number: 1380308 }
     }
   },

@@ -5,7 +5,7 @@ import {
   networks,
   StarknetChainId,
   StarknetNetwork,
-  strkToken,
+  STRK_TOKEN_ADDRESS,
   testnets,
   toChainId
 } from "@effect-blockchain/starknet/StarknetNetwork"
@@ -29,9 +29,8 @@ describe("StarknetNetwork", () => {
     expect(networks.length).toBe(mainnets.length + testnets.length)
   })
 
-  it("serves the STRK token on every network", () => {
-    const STRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
-    expect(networks.map(strkToken)).toStrictEqual([STRK, STRK])
+  it("pins the STRK token address", () => {
+    expect(STRK_TOKEN_ADDRESS).toBe("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
   })
 
   it("waits for no confirmation on top of an accepted block", () => {

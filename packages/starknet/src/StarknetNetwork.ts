@@ -88,22 +88,16 @@ export const defaultConfirmations = (network: StarknetNetwork): number => {
   }
 }
 
-// the same address on mainnet and Sepolia: https://docs.starknet.io/resources/chain-info
-const STRK = StarknetAddress.make("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
-
 /**
- * The STRK token contract on each network, the token Starknet fees are paid in, counted in fri (10^-18 STRK).
+ * The STRK token contract, the token Starknet fees are paid in, counted in fri (10^-18 STRK). The same address on
+ * mainnet and Sepolia: https://docs.starknet.io/resources/chain-info
  *
  * @since 0.2.0
- * @category getters
+ * @category constants
  */
-export const strkToken = (network: StarknetNetwork): StarknetAddress => {
-  switch (network) {
-    case "Starknet":
-    case "StarknetSepolia":
-      return STRK
-  }
-}
+export const STRK_TOKEN_ADDRESS: StarknetAddress = StarknetAddress.make(
+  "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
+)
 
 /**
  * @since 0.1.0

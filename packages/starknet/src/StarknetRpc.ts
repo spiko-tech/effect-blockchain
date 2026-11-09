@@ -185,7 +185,7 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   }) => Effect.Effect<ReadonlyArray<string>, StarknetRpcError>
   /**
    * The STRK balance of `address` in fri at the end of `blockNumber`: `balanceOf` on
-   * {@link StarknetNetwork.strkToken}. A reply that is not one u256 fails with `InvalidResponse`.
+   * {@link StarknetNetwork.STRK_TOKEN_ADDRESS}. A reply that is not one u256 fails with `InvalidResponse`.
    */
   readonly getBalance: (
     options: { readonly address: StarknetAddress; readonly blockNumber: bigint }
@@ -311,8 +311,6 @@ export const layer = (options: {
           }))
         )
 
-      const strk = StarknetNetwork.strkToken(network)
-
       const getEvents = (filter: StarknetEventsFilter): Effect.Effect<StarknetEventsPage, StarknetRpcError> => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })
         if (filter.cursor === undefined) return rpc.withFallback((endpoint) => getEventsOn(endpoint, filter))
@@ -339,7 +337,7 @@ export const layer = (options: {
         getBalance: ({ address, blockNumber }) =>
           rpc.withFallback((endpoint) =>
             callOn(endpoint, {
-              contractAddress: strk,
+              contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
               entryPointSelector: BALANCE_OF,
               calldata: [address],
               blockNumber
