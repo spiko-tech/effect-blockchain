@@ -27,9 +27,6 @@
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import {
-  getBase64Encoder,
-  getCompiledTransactionMessageDecoder,
-  getTransactionDecoder,
   SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_CLEANED_UP,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_NOT_AVAILABLE,
@@ -49,7 +46,6 @@ import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import type * as HttpClient from "effect/http/HttpClient"
 import * as Layer from "effect/Layer"
-import * as Option from "effect/Option"
 import type * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 import * as BigIntJson from "./internal/bigIntJson.ts"
@@ -406,33 +402,6 @@ export const layer = (options: {
       })
     })
   )
-
-/**
- * The lamports of `address` before and after `transaction`, `Option.none()` when the address is not one of its accounts
- * or the node has no meta. An account's index runs over the static account keys, then the addresses loaded from lookup
- * tables, writable then readonly (see https://solana.com/docs/advanced/versions).
- *
- * @since 0.2.0
- * @category balances
- */
-export const balanceChange = <Encoding extends SolanaTransactionEncoding>(
-  transaction: SolanaTransactionInfo<Encoding>,
-  address: SolanaAddress
-): Option.Option<{ readonly pre: bigint; readonly post: bigint }> => {
-  const { meta } = transaction
-  if (meta === null) return Option.none()
-  const encoded: SolanaEncodedTransaction[SolanaTransactionEncoding] = transaction.transaction
-  const staticKeys = typeof encoded === "string"
-    ? getCompiledTransactionMessageDecoder().decode(
-      getTransactionDecoder().decode(getBase64Encoder().encode(encoded)).messageBytes
-    ).staticAccounts
-    : encoded.message.accountKeys
-  const keys = [...staticKeys, ...meta.loadedAddresses?.writable ?? [], ...meta.loadedAddresses?.readonly ?? []]
-  const index = keys.indexOf(address)
-  const pre = meta.preBalances[index]
-  const post = meta.postBalances[index]
-  return pre === undefined || post === undefined ? Option.none() : Option.some({ pre, post })
-}
 
 /**
  * Builds an {@link SolanaRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.

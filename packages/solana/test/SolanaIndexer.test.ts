@@ -55,7 +55,8 @@ const reply = (id: number, body: object) => Response.json({ jsonrpc: "2.0", id, 
  * Real replies replayed for `getGenesisHash`, `getSlot` and `getTransaction`, and a fake node serving
  * `getSignaturesForAddress` from `history` (newest first) by `before` and `limit`: the recorded pages were taken with
  * `until` and `limit: 5`, which the indexer never sends, so their entries become part of a history instead.
- * `synthetic` transactions are answered by the fake node too, `lagging` endpoints answer -32016.
+ * `synthetic` transactions are answered by the fake node too, `lagging` endpoints answer -32016, and `getSlot` answers
+ * `head` when set.
  */
 const setup = (options: {
   readonly history: ReadonlyArray<Entry>
@@ -64,6 +65,7 @@ const setup = (options: {
   readonly lagging?: ReadonlyArray<string>
   readonly endpoints?: Arr.NonEmptyReadonlyArray<string>
   readonly confirmations?: number | undefined
+  readonly head?: number
 }) => {
   const cases = ["getGenesisHash", ...options.cases ?? []]
   const endpoints: Arr.NonEmptyReadonlyArray<string> = options.endpoints ?? ["alchemy"]
@@ -85,6 +87,9 @@ const setup = (options: {
       }
       const start = options.history.findIndex((e) => e.signature === config.before) + 1
       return reply(json.id, { result: options.history.slice(start, start + (config.limit ?? 1000)) })
+    }
+    if (json.method === "getSlot" && options.head !== undefined) {
+      return reply(json.id, { result: options.head })
     }
     const fake = options.synthetic?.find((e) => json.method === "getTransaction" && e.signature === json.params[0])
     if (fake !== undefined) {
@@ -256,6 +261,38 @@ describe("SolanaIndexer", () => {
       expect(txs.length).toBe(3)
       expect(pages.map((page) => page.split(" ")[0])).toStrictEqual(["lagging", "alchemy", "lagging", "alchemy"])
     }))
+  })
+
+  it.effect("fetches a native balance over the static keys then the loaded writable and readonly addresses", () => {
+    const TX_V0_SLOT = 466165683
+    const TX_V0 = "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRGfurA7J4yk1cZY4Ybs4J59NF"
+    const { run, served } = setup({
+      history: [{ ...entry(0, TX_V0_SLOT), signature: TX_V0 }],
+      cases: ["getTransaction-v0-json"],
+      head: TX_V0_SLOT + 1000
+    })
+    // an address of the recorded v0 transaction, then its balance before and after it
+    const cases = [
+      // the fee payer, then the last static key (index 18)
+      ["FjLjHwDM1YJhoghyNSP9CEikMopsYinYFvTvACmgH9Ci", 18887889, 32188063],
+      ["ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", 3388612899, 3388612899],
+      // the third loaded writable address (index 21), then the first loaded readonly one (index 26)
+      ["A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW", 388723226, 388787583],
+      ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 9910912471, 9910912471]
+    ] as const
+    return run((indexer) =>
+      Effect.gen(function*() {
+        for (const [address, pre, post] of cases) {
+          const at = (block: number) =>
+            indexer.fetchNativeBalance({ address: SolanaAddress.make(address), block: BigInt(block) })
+          expect([yield* at(TX_V0_SLOT - 1), yield* at(TX_V0_SLOT)]).toStrictEqual([BigInt(pre), BigInt(post)])
+        }
+        // listed for an address the transaction does not hold
+        const error = yield* Effect.flip(indexer.fetchNativeBalance({ address: EUTBL, block: BigInt(TX_V0_SLOT) }))
+        expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getTransaction" })
+        expect(served.filter((s) => s.endsWith("getTransaction-v0-json"))).toHaveLength(9)
+      })
+    )
   })
 
   it.effect("lastConfirmedBlock is the finalized slot minus the confirmations, never below 0", () =>

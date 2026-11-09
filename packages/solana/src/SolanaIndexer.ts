@@ -58,7 +58,7 @@ import * as Stream from "effect/Stream"
 import type { SolanaAddress } from "./SolanaAddress.ts"
 import * as SolanaNetwork from "./SolanaNetwork.ts"
 import type { SolanaSignatureInfo, SolanaTransactionEncoding, SolanaTransactionInfo } from "./SolanaRpc.ts"
-import { balanceChange, SolanaRpc, SolanaRpcError } from "./SolanaRpc.ts"
+import { SolanaRpc, SolanaRpcError } from "./SolanaRpc.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
 
 /**
@@ -255,6 +255,24 @@ interface StreamPosition {
 // a sample, then the next stream position: the previous sample, none for the first
 type Sample = readonly [ReadonlyArray<SolanaNativeBalance>, Option.Option<Option.Option<SolanaNativeBalance>>]
 type Step = readonly [ReadonlyArray<SolanaIndexerBatch<SolanaTransactionEncoding>>, Option.Option<StreamPosition>]
+
+// the lamports of `address` before and after `transaction`, none when it is not one of its accounts. An account's
+// index runs over the static account keys, then the addresses loaded from lookup tables, writable then readonly
+// (https://solana.com/docs/advanced/versions)
+const balanceChange = (
+  { meta, transaction }: SolanaTransactionInfo<"json">,
+  address: SolanaAddress
+): Option.Option<{ readonly pre: bigint; readonly post: bigint }> => {
+  if (meta === null) return Option.none()
+  const index = [
+    ...transaction.message.accountKeys,
+    ...meta.loadedAddresses?.writable ?? [],
+    ...meta.loadedAddresses?.readonly ?? []
+  ].indexOf(address)
+  const pre = meta.preBalances[index]
+  const post = meta.postBalances[index]
+  return pre === undefined || post === undefined ? Option.none() : Option.some({ pre, post })
+}
 
 // retries a stream step failing with a transient reason at the same position
 const withRetry = <S, A>(
