@@ -373,7 +373,7 @@ describe("StarknetRpc", () => {
   })
 
   describe("call and getBalance", () => {
-    const STRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
+    const STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
     const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
     const balanceOf = (result: Schema.Json) => {
       const params = new Array<Schema.Json>()
@@ -407,7 +407,7 @@ describe("StarknetRpc", () => {
         expect(yield* run((rpc) => rpc.getBalance({ address: OTHER, blockNumber: BigInt(10) })))
           .toBe(BigInt(3) * BigInt(2) ** BigInt(128) + BigInt(5))
         expect(params).toStrictEqual([{
-          request: { contract_address: STRK, entry_point_selector: BALANCE_OF, calldata: [OTHER] },
+          request: { contract_address: STRK_TOKEN_ADDRESS, entry_point_selector: BALANCE_OF, calldata: [OTHER] },
           block_id: { block_number: 10 }
         }])
         const max = "0x" + "f".repeat(32)
