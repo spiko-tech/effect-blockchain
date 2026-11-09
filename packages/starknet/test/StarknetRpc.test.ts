@@ -372,10 +372,9 @@ describe("StarknetRpc", () => {
       }))
   })
 
-  describe("call and getBalance", () => {
-    const STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
-    const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
-    const balanceOf = (result: Schema.Json) => {
+  describe("call", () => {
+    const options = { contractAddress: TOKEN, entryPointSelector: "0x5", calldata: ["0x6"], blockNumber: BigInt(10) }
+    const setupCall = (result: Schema.Json) => {
       const params = new Array<Schema.Json>()
       const { calls, run } = setup({
         a: {
@@ -390,8 +389,7 @@ describe("StarknetRpc", () => {
     }
 
     it.effect("call sends the request by name and returns the raw felts, padded", () => {
-      const { params, run } = balanceOf(["0x1", "0x2"])
-      const options = { contractAddress: TOKEN, entryPointSelector: "0x5", calldata: ["0x6"], blockNumber: BigInt(10) }
+      const { params, run } = setupCall(["0x1", "0x2"])
       return run((rpc) => rpc.call(options)).pipe(Effect.map((felts) => {
         expect(params).toStrictEqual([{
           request: { contract_address: TOKEN, entry_point_selector: "0x5", calldata: ["0x6"] },
@@ -401,32 +399,9 @@ describe("StarknetRpc", () => {
       }))
     })
 
-    it.effect("getBalance calls balanceOf on STRK and combines the u256 (low, high)", () =>
-      Effect.gen(function*() {
-        const { params, run } = balanceOf(["0x5", "0x3"])
-        expect(yield* run((rpc) => rpc.getBalance({ address: OTHER, blockNumber: BigInt(10) })))
-          .toBe(BigInt(3) * BigInt(2) ** BigInt(128) + BigInt(5))
-        expect(params).toStrictEqual([{
-          request: { contract_address: STRK_TOKEN_ADDRESS, entry_point_selector: BALANCE_OF, calldata: [OTHER] },
-          block_id: { block_number: 10 }
-        }])
-        const max = "0x" + "f".repeat(32)
-        expect(yield* balanceOf([max, max]).run((rpc) => rpc.getBalance({ address: OTHER, blockNumber: BigInt(10) })))
-          .toBe(BigInt(2) ** BigInt(256) - BigInt(1))
-      }))
-
-    it.effect("getBalance fails InvalidResponse on a reply that is not a u256", () =>
-      Effect.gen(function*() {
-        for (const bad of [["0x1"], ["0x1", "0x0", "0x0"]]) {
-          const { run } = balanceOf(bad)
-          expect(yield* run((rpc) => Effect.flip(rpc.getBalance({ address: OTHER, blockNumber: BigInt(10) }))))
-            .toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "starknet_call" })
-        }
-      }))
-
     it.effect("returns Lagging below the head without calling", () => {
-      const { calls, run } = balanceOf(["0x1", "0x0"])
-      return run((rpc) => Effect.flip(rpc.getBalance({ address: OTHER, blockNumber: BigInt(21) }))).pipe(
+      const { calls, run } = setupCall(["0x1", "0x0"])
+      return run((rpc) => Effect.flip(rpc.call({ ...options, blockNumber: BigInt(21) }))).pipe(
         Effect.map((error) => {
           expect(error).toMatchObject({ reason: { _tag: "Lagging" }, method: "starknet_call" })
           expect(calls).not.toContain("a:starknet_call")

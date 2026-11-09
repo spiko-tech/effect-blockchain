@@ -44,6 +44,9 @@ const withIndexer = <A, E>(f: (indexer: Indexer) => Effect.Effect<A, E>) =>
 const fixtures = new URL("fixtures/", import.meta.url)
 const EUTBL = StarknetAddress.make("0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2")
 const LAST_CURSOR = "1380394-2"
+const STAKING = StarknetAddress.make("0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7")
+// the staking contract's STRK in fri at block 1380308, the u256 low felt (high is 0)
+const STAKING_BALANCE = BigInt("0xe22138cc9bba4363cc54cf")
 
 describe("StarknetIndexer fixtures", () => {
   for (const provider of ["alchemy", "infura"] as const) {
@@ -77,6 +80,18 @@ describe("StarknetIndexer fixtures", () => {
             ])
           })
         ).pipe(Effect.provide(provide(endpoints, fetch, { chunkSize: 5 })))
+      )
+    })
+
+    it.effect(`fixture: ${provider} fetchNativeBalance`, () => {
+      const { check, endpoints, fetch } = Replay.replay(fixtures, [
+        { name: provider, cases: ["chainId", "blockNumber", "call-balanceOf"] }
+      ])
+      return check(
+        withIndexer((indexer) => indexer.fetchNativeBalance({ address: STAKING, block: BigInt(1380308) })).pipe(
+          Effect.map((balance) => expect(balance).toBe(STAKING_BALANCE)),
+          Effect.provide(provide(endpoints, fetch, {}))
+        )
       )
     })
   }
@@ -275,14 +290,22 @@ const pinnedBatches = [[FROM, FROM + BigInt(2), 2], [FROM + BigInt(3), FROM + Bi
 
 // A fake `StarknetRpc`: `starknet_blockNumber` reads `state.head`, `starknet_getEvents` answers the pinned events
 // inside the range in one page and records it in `state.ranges`. The n-th `getEvents` call (1-based) fails with
-// `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`. `getBalance` answers `block * 7`,
-// records the block in `state.samples` and fails its n-th call with `failAt.get(n)` too.
+// `failAt.get(n)` when set, the n-th `blockNumber` call with `headFailAt.get(n)`. `call` answers `reply(block)`,
+// `[block * 7, 0]` by default, records the block in `state.samples` and its calldata in `state.calldata`, and fails
+// its n-th call with `failAt.get(n)` too.
 const fakeRpc = (
   head: bigint,
   failAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
-  headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map()
+  headFailAt: ReadonlyMap<number, JsonRpc.Reason> = new Map(),
+  reply: (block: bigint) => ReadonlyArray<string> = (block) => ["0x" + (block * BigInt(7)).toString(16), "0x0"]
 ) => {
-  const state = { head, heads: 0, ranges: new Array<readonly [bigint, bigint]>(), samples: new Array<bigint>() }
+  const state = {
+    head,
+    heads: 0,
+    ranges: new Array<readonly [bigint, bigint]>(),
+    samples: new Array<bigint>(),
+    calldata: new Array<ReadonlyArray<string>>()
+  }
   const fail = (reason: JsonRpc.Reason, method: string) =>
     Effect.fail(new StarknetRpc.StarknetRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const layer = Layer.succeed(
@@ -292,12 +315,12 @@ const fakeRpc = (
       chainId: Effect.die("unused"),
       getBlockWithTxHashes: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
-      call: () => Effect.die("unused"),
-      getBalance: ({ blockNumber }) =>
+      call: ({ blockNumber, calldata }) =>
         Effect.suspend(() => {
           state.samples.push(blockNumber)
+          state.calldata.push(calldata)
           const reason = failAt.get(state.samples.length)
-          return reason === undefined ? Effect.succeed(blockNumber * BigInt(7)) : fail(reason, "starknet_call")
+          return reason === undefined ? Effect.succeed(reply(blockNumber)) : fail(reason, "starknet_call")
         }),
       blockNumber: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
@@ -619,8 +642,36 @@ describe("StarknetIndexer native balance", () => {
     ).pipe(Effect.map((balance) => {
       expect(balance).toBe(FROM * BigInt(7))
       expect(state.samples).toStrictEqual([FROM])
+      expect(state.calldata).toStrictEqual([[TOKEN]])
     }))
   })
+
+  const balanceOf = (felts: ReadonlyArray<string>) =>
+    provideFake(
+      Effect.gen(function*() {
+        return yield* (yield* StarknetIndexer.StarknetIndexer).fetchNativeBalance({ address: TOKEN, block: FROM })
+      }),
+      fakeRpc(TO, new Map(), new Map(), () => felts).layer
+    )
+
+  it.effect("fetchNativeBalance combines the u256 (low, high)", () =>
+    Effect.gen(function*() {
+      expect(yield* balanceOf(["0x5", "0x3"])).toBe(BigInt(3) * BigInt(2) ** BigInt(128) + BigInt(5))
+      const max = "0x" + "f".repeat(32)
+      expect(yield* balanceOf([max, max])).toBe(BigInt(2) ** BigInt(256) - BigInt(1))
+    }))
+
+  it.effect("fetchNativeBalance fails InvalidResponse on a reply that is not a u256", () =>
+    Effect.gen(function*() {
+      for (const bad of [["0x1"], ["0x1", "0x0", "0x0"]]) {
+        expect(yield* Effect.flip(balanceOf(bad))).toMatchObject({
+          reason: { _tag: "InvalidResponse" },
+          method: "starknet_call",
+          endpoint: "StarknetIndexer",
+          cause: { message: `balanceOf returned ${bad.length} felts, expected a u256 (low, high)` }
+        })
+      }
+    }))
 
   it.effect("samples every step, unchanged balances included, and ends at the last step not above toBlock", () => {
     const { layer, state } = fakeRpc(TO + BigInt(5))
