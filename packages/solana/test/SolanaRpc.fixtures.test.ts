@@ -13,7 +13,6 @@ import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
-import * as Option from "effect/Option"
 
 // real replies recorded by `scripts/record-fixtures.ts`, replayed through the real layer
 const replay = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
@@ -164,7 +163,7 @@ describe("SolanaRpc fixtures", () => {
       })
     ))
 
-  it.effect("fixture: alchemy getTransaction-v0 and -v0-json resolve balances over the loaded addresses", () =>
+  it.effect("fixture: alchemy getTransaction-v0 and -v0-json decode the same meta, loaded addresses included", () =>
     alchemy("getTransaction-v0", "getTransaction-v0-json").run((rpc) =>
       Effect.gen(function*() {
         const base64 = yield* rpc.getTransaction({ signature: TX_V0, ...finalized })
@@ -173,33 +172,6 @@ describe("SolanaRpc fixtures", () => {
         expect(json.meta?.loadedAddresses?.writable).toHaveLength(7)
         expect(json.meta?.loadedAddresses?.readonly).toHaveLength(13)
         expect(json.meta).toMatchObject({ err: null, fee: BigInt(9000) })
-        const cases = [
-          // the fee payer, then the last static key
-          ["FjLjHwDM1YJhoghyNSP9CEikMopsYinYFvTvACmgH9Ci", 18887889, 32188063],
-          ["ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", 3388612899, 3388612899],
-          // the third loaded writable address (index 21), then the first loaded readonly one (index 26)
-          ["A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW", 388723226, 388787583],
-          ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 9910912471, 9910912471]
-        ] as const
-        for (const tx of [base64, json]) {
-          for (const [address, pre, post] of cases) {
-            expect(SolanaRpc.balanceChange(tx, SolanaAddress.make(address))).toStrictEqual(
-              Option.some({ pre: BigInt(pre), post: BigInt(post) })
-            )
-          }
-          expect(SolanaRpc.balanceChange(tx, BINANCE)).toStrictEqual(Option.none())
-          expect(SolanaRpc.balanceChange({ ...tx, meta: null }, BINANCE)).toStrictEqual(Option.none())
-        }
-        if (json.meta === null) throw new Error("the recording has a meta")
-        // a legacy transaction has no loaded addresses: only the static keys resolve
-        const { loadedAddresses: _, ...legacy } = json.meta
-        const [fee, , loaded] = cases
-        expect(SolanaRpc.balanceChange({ ...json, meta: legacy }, SolanaAddress.make(fee[0]))).toStrictEqual(
-          Option.some({ pre: BigInt(fee[1]), post: BigInt(fee[2]) })
-        )
-        expect(SolanaRpc.balanceChange({ ...json, meta: legacy }, SolanaAddress.make(loaded[0]))).toStrictEqual(
-          Option.none()
-        )
       })
     ))
 

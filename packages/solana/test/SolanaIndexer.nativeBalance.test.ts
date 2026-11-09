@@ -24,8 +24,8 @@ const signature = (n: number) =>
 interface Tx {
   readonly slot: number
   readonly post: number
-  // the account is listed at another index or not at all
-  readonly missing?: boolean
+  // `ADDRESS` is a loaded writable address by default, a static key of a legacy transaction, absent, or without meta
+  readonly shape?: "legacy" | "missing" | "noMeta"
 }
 
 /**
@@ -79,18 +79,20 @@ const fakeRpc = (options: {
       transaction: {
         signatures: [query.signature],
         message: {
-          accountKeys: [OTHER],
+          accountKeys: tx?.shape === "legacy" ? [OTHER, ADDRESS] : [OTHER],
           header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 0 },
           recentBlockhash: "",
           instructions: []
         }
       },
-      meta: {
+      meta: tx?.shape === "noMeta" ? null : {
         err: null,
         fee: BigInt(5000),
         preBalances: [BigInt(1), pre],
         postBalances: [BigInt(1), BigInt(tx?.post ?? 0)],
-        loadedAddresses: { writable: tx?.missing === true ? [] : [ADDRESS], readonly: [] }
+        ...tx?.shape === "legacy" ? {} : {
+          loadedAddresses: { writable: tx?.shape === "missing" ? [] : [ADDRESS], readonly: [] }
+        }
       }
     }))
   }
@@ -199,12 +201,19 @@ describe("SolanaIndexer.fetchNativeBalance", () => {
     }))
   })
 
-  it.effect("fails InvalidResponse when the transaction does not list the address", () => {
-    const { layer } = fakeRpc({ head: 100, txs: [{ slot: 10, post: 100, missing: true }] })
-    return provide(Effect.flip(fetch(50)), layer).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getTransaction" })
-    }))
+  it.effect("reads a static key of a legacy transaction without loaded addresses", () => {
+    const { layer } = fakeRpc({ head: 100, txs: [{ slot: 10, post: 100, shape: "legacy" }] })
+    return provide(fetch(50), layer).pipe(Effect.map((balance) => expect(balance).toBe(BigInt(100))))
   })
+
+  for (const shape of ["missing", "noMeta"] as const) {
+    it.effect(`fails InvalidResponse when the transaction ${shape === "missing" ? "omits the address" : "has no meta"}`, () => {
+      const { layer } = fakeRpc({ head: 100, txs: [{ slot: 10, post: 100, shape }] })
+      return provide(Effect.flip(fetch(50)), layer).pipe(Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getTransaction" })
+      }))
+    })
+  }
 })
 
 const stream = (options: Omit<SolanaIndexer.SolanaIndexerNativeBalanceOptions, "address">) =>
