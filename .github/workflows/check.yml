@@ -57,3 +57,22 @@ jobs:
         run: pnpm vitest
         env:
           NODE_OPTIONS: --max_old_space_size=8192
+
+  anvil:
+    name: Anvil
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Start Anvil
+        run: |
+          anvil --silent &
+          timeout 30 bash -c 'until cast block-number --rpc-url http://127.0.0.1:8545; do sleep 1; done'
+      - name: Test
+        run: pnpm vitest run packages/evm/test/EvmRelayer.anvil.test.ts
+        env:
+          ANVIL_RPC_URL: http://127.0.0.1:8545
