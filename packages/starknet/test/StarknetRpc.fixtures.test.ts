@@ -3,7 +3,7 @@ import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import * as StarknetRelayer from "@effect-blockchain/starknet/StarknetRelayer"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
-import { describe, expect, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
@@ -37,6 +37,8 @@ const TRANSFER = "0x0099cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e61
 const felt = (value: string) => "0x" + value.slice(2).padStart(64, "0")
 
 const STRK_TOKEN_ADDRESS = StarknetAddress.make("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
+const ACCOUNT = StarknetAddress.make("0x02d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b")
+const TRANSFER_SELECTOR = "0x0083afd3f4caedc6eebf44246fe54e38c95e3179a5ec9ea81740eca5b482d12e"
 const STAKING = StarknetAddress.make("0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7")
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
 const BLOCK = BigInt(1380308)
@@ -126,6 +128,47 @@ describe("StarknetRpc fixtures", () => {
           reason: expect.stringContaining("Transaction execution has failed")
         })
       )))
+
+    it.effect(`fixture: ${provider} getNonce and estimateFee`, () =>
+      replay([{
+        name: provider,
+        cases: [...network, "getNonce", "estimateFee", "estimateFee-reverted", "getNonce-contract-not-found"]
+      }])((rpc) =>
+        Effect.gen(function*() {
+          const nonce = yield* rpc.getNonce({ address: ACCOUNT, blockTag: "latest" })
+          expect(nonce >= BigInt(170)).toBe(true)
+          const zero = { maxAmount: BigInt(0), maxPricePerUnit: BigInt(0) }
+          const estimate = (amount: string) =>
+            rpc.estimateFee({
+              transactions: [{
+                type: "INVOKE",
+                chainId: "SN_MAIN",
+                senderAddress: ACCOUNT,
+                calldata: ["0x1", STRK_TOKEN_ADDRESS, TRANSFER_SELECTOR, "0x3", STAKING, amount, "0x0"],
+                nonce,
+                resourceBounds: { l1Gas: zero, l1DataGas: zero, l2Gas: zero },
+                tip: BigInt(0),
+                signature: []
+              }],
+              skipValidate: true,
+              blockTag: "latest"
+            })
+          const [fee] = yield* estimate("0x0")
+          assert(fee !== undefined)
+          expect(fee.l2GasConsumed > BigInt(0)).toBe(true)
+          expect(fee.overallFee).toBe(
+            fee.l1GasConsumed * fee.l1GasPrice + fee.l1DataGasConsumed * fee.l1DataGasPrice +
+              fee.l2GasConsumed * fee.l2GasPrice
+          )
+          expect(yield* Effect.flip(estimate("0xffffffffffffffffffffffffffffffff"))).toMatchObject({
+            reason: { _tag: "Rejected" },
+            code: 41
+          })
+          expect(
+            yield* Effect.flip(rpc.getNonce({ address: StarknetAddress.make(felt("0x1")), blockTag: "latest" }))
+          ).toMatchObject({ reason: { _tag: "Rejected" }, code: 20 })
+        })
+      ))
 
     it.effect(`fixture: ${provider} getBlockWithTxHashes`, () =>
       replay([{ name: provider, cases: [...network, "getBlockWithTxHashes"] }])((rpc) =>

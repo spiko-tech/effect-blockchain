@@ -1,0 +1,53 @@
+{
+  "provider": "alchemy",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_estimateFee",
+    "params": {
+      "request": [
+        {
+          "type": "INVOKE",
+          "sender_address": "0x02d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b",
+          "calldata": [
+            "0x1",
+            "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+            "0x0083afd3f4caedc6eebf44246fe54e38c95e3179a5ec9ea81740eca5b482d12e",
+            "0x3",
+            "0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7",
+            "0xffffffffffffffffffffffffffffffff",
+            "0x0"
+          ],
+          "account_deployment_data": [],
+          "version": "0x3",
+          "signature": [],
+          "nonce": "0xaa",
+          "resource_bounds": {
+            "l1_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            },
+            "l2_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            },
+            "l1_data_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            }
+          },
+          "tip": "0x0",
+          "paymaster_data": [],
+          "nonce_data_availability_mode": "L1",
+          "fee_data_availability_mode": "L1"
+        }
+      ],
+      "simulation_flags": [
+        "SKIP_VALIDATE"
+      ],
+      "block_id": "latest"
+    }
+  },
+  "status": 200,
+  "body": "{\"error\":{\"code\":41,\"data\":{\"execution_error\":{\"class_hash\":\"0x61dac032f228abef9c6626f995015233097ae253a7f72d68552db02f2971b8f\",\"contract_address\":\"0x2d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b\",\"error\":{\"class_hash\":\"0x61dac032f228abef9c6626f995015233097ae253a7f72d68552db02f2971b8f\",\"contract_address\":\"0x2d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b\",\"error\":\"0x526573756c743a3a756e77726170206661696c65642e ('Result::unwrap failed.')\",\"selector\":\"0x15d40a3d6ca2ac30f4031e42be28da9b056fef9bb7357ac5e85627ee876e5ad\"},\"selector\":\"0x15d40a3d6ca2ac30f4031e42be28da9b056fef9bb7357ac5e85627ee876e5ad\"},\"transaction_index\":0},\"message\":\"Transaction execution error\"},\"id\":1,\"jsonrpc\":\"2.0\"}"
+}

@@ -1,0 +1,14 @@
+{
+  "provider": "infura",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_getNonce",
+    "params": {
+      "block_id": "latest",
+      "contract_address": "0x0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "status": 200,
+  "body": "{\"error\":{\"code\":20,\"message\":\"Contract not found\"},\"id\":1,\"jsonrpc\":\"2.0\"}"
+}

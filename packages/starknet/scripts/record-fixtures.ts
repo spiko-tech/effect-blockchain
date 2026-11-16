@@ -3,7 +3,8 @@
 //
 //   node --env-file=<path to .env> scripts/record-fixtures.ts
 //
-// Inputs are pinned (past block range, transaction hash) so a re-run records the same replies, except the head.
+// Inputs are pinned (past block range, transaction hash) so a re-run records the same replies, except the head and
+// what is read at it (`getNonce`, `estimateFee`).
 // Bodies are the same as the ones `src/internal/rpcMethods.ts` encodes.
 import { type Case, type Json, record, secret } from "../../core/scripts/recordFixtures.ts"
 
@@ -17,6 +18,35 @@ const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b
 const RECEIPT_TX = "0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab"
 // a transaction of block 1380308 that reverted
 const REVERTED_TX = "0x05ff253c51897e03ef74d58cdbd04e17f15932c5580cdd240d472eea63f8f08a"
+
+// the account that sent `RECEIPT_TX`
+const ACCOUNT = "0x02d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b"
+// sn_keccak("transfer")
+const TRANSFER = "0x0083afd3f4caedc6eebf44246fe54e38c95e3179a5ec9ea81740eca5b482d12e"
+
+// an unsigned STRK transfer of `amount` FRI from `ACCOUNT` to the staking contract, at the nonce `getNonce` recorded:
+// a simulation, nothing is signed or sent
+const estimateTransfer = (amount: string) => (recorded: ReadonlyMap<string, string>): Json => {
+  const zero = { max_amount: "0x0", max_price_per_unit: "0x0" }
+  return {
+    request: [{
+      type: "INVOKE",
+      sender_address: ACCOUNT,
+      calldata: ["0x1", STRK_TOKEN_ADDRESS, TRANSFER, "0x3", STAKING, amount, "0x0"],
+      account_deployment_data: [],
+      version: "0x3",
+      signature: [],
+      nonce: `0x${BigInt(JSON.parse(recorded.get("getNonce") ?? "{}").result).toString(16)}`,
+      resource_bounds: { l1_gas: zero, l2_gas: zero, l1_data_gas: zero },
+      tip: "0x0",
+      paymaster_data: [],
+      nonce_data_availability_mode: "L1",
+      fee_data_availability_mode: "L1"
+    }],
+    simulation_flags: ["SKIP_VALIDATE"],
+    block_id: "latest"
+  }
+}
 
 const events = (filter: { readonly [key: string]: Json }): Json => ({
   filter: {
@@ -104,6 +134,22 @@ const cases: ReadonlyArray<Case> = [
     name: "getTransactionStatus-not-found",
     method: "starknet_getTransactionStatus",
     params: { transaction_hash: "0x0000000000000000000000000000000000000000000000000000000000000001" }
+  },
+  { name: "getNonce", method: "starknet_getNonce", params: { block_id: "latest", contract_address: ACCOUNT } },
+  {
+    name: "getNonce-contract-not-found",
+    method: "starknet_getNonce",
+    params: {
+      block_id: "latest",
+      contract_address: "0x0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  { name: "estimateFee", method: "starknet_estimateFee", params: estimateTransfer("0x0") },
+  // more STRK than exists
+  {
+    name: "estimateFee-reverted",
+    method: "starknet_estimateFee",
+    params: estimateTransfer("0xffffffffffffffffffffffffffffffff")
   }
 ]
 

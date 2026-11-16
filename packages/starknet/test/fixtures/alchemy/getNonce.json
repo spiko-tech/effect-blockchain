@@ -1,0 +1,14 @@
+{
+  "provider": "alchemy",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_getNonce",
+    "params": {
+      "block_id": "latest",
+      "contract_address": "0x02d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b"
+    }
+  },
+  "status": 200,
+  "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":\"0xaa\"}"
+}

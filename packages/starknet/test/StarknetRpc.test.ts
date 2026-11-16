@@ -2,6 +2,10 @@ import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
 import { StarknetEvent } from "@effect-blockchain/starknet/StarknetEvent"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
+import type {
+  StarknetDeployAccountTransaction,
+  StarknetInvokeTransaction
+} from "@effect-blockchain/starknet/StarknetTransaction"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
@@ -451,6 +455,150 @@ describe("StarknetRpc", () => {
       expect(page).toStrictEqual({ events: [], cursor: undefined })
       expect(calls).toStrictEqual([])
     }))
+  })
+
+  it.effect("getNonce reads the nonce at a block tag", () => {
+    let params: Schema.Json = null
+    const { run } = setup({ a: { starknet_getNonce: (p) => (params = p, { result: "0x1f" }) } })
+    return run((rpc) => rpc.getNonce({ address: TOKEN, blockTag: "pre_confirmed" })).pipe(Effect.map((nonce) => {
+      expect(nonce).toBe(BigInt(31))
+      expect(params).toStrictEqual({ block_id: "pre_confirmed", contract_address: TOKEN })
+    }))
+  })
+
+  const resourceBounds = {
+    l1Gas: { maxAmount: BigInt(1), maxPricePerUnit: BigInt(2) },
+    l1DataGas: { maxAmount: BigInt(3), maxPricePerUnit: BigInt(4) },
+    l2Gas: { maxAmount: BigInt(5), maxPricePerUnit: BigInt(6) }
+  }
+  const v3 = {
+    version: "0x3",
+    resource_bounds: {
+      l1_gas: { max_amount: "0x1", max_price_per_unit: "0x2" },
+      l2_gas: { max_amount: "0x5", max_price_per_unit: "0x6" },
+      l1_data_gas: { max_amount: "0x3", max_price_per_unit: "0x4" }
+    },
+    tip: "0x0",
+    paymaster_data: [],
+    nonce_data_availability_mode: "L1",
+    fee_data_availability_mode: "L1"
+  }
+  const invoke: StarknetInvokeTransaction = {
+    type: "INVOKE",
+    chainId: "SN_MAIN",
+    senderAddress: TOKEN,
+    calldata: ["0x1", "0xab"],
+    nonce: BigInt(7),
+    resourceBounds,
+    tip: BigInt(0),
+    signature: ["0xa", "0xb"]
+  }
+  const rawInvoke = {
+    type: "INVOKE",
+    sender_address: TOKEN,
+    calldata: ["0x1", "0xab"],
+    account_deployment_data: [],
+    signature: ["0xa", "0xb"],
+    nonce: "0x7",
+    ...v3
+  }
+  const deployAccount: StarknetDeployAccountTransaction = {
+    type: "DEPLOY_ACCOUNT",
+    chainId: "SN_MAIN",
+    classHash: "0xc1a55",
+    contractAddressSalt: "0x5a17",
+    constructorCalldata: ["0x9"],
+    nonce: BigInt(0),
+    resourceBounds,
+    tip: BigInt(0),
+    signature: []
+  }
+  const rawDeployAccount = {
+    type: "DEPLOY_ACCOUNT",
+    class_hash: "0xc1a55",
+    contract_address_salt: "0x5a17",
+    constructor_calldata: ["0x9"],
+    signature: [],
+    nonce: "0x0",
+    ...v3
+  }
+
+  it.effect("estimateFee sends V3 transactions and decodes one estimate each", () => {
+    const params: Array<Schema.Json> = []
+    const estimate = {
+      l1_gas_consumed: "0x0",
+      l1_gas_price: "0x10",
+      l1_data_gas_consumed: "0x80",
+      l1_data_gas_price: "0x20",
+      l2_gas_consumed: "0x1000",
+      l2_gas_price: "0x30",
+      overall_fee: "0x31000",
+      unit: "FRI"
+    }
+    const { run } = setup({
+      a: { starknet_estimateFee: (p) => (params.push(p), { result: [estimate, estimate] }) }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        const estimates = yield* rpc.estimateFee({
+          transactions: [deployAccount, invoke],
+          skipValidate: true,
+          blockTag: "latest"
+        })
+        expect(estimates).toHaveLength(2)
+        expect(estimates[0]).toStrictEqual({
+          l1GasConsumed: BigInt(0),
+          l1GasPrice: BigInt(16),
+          l1DataGasConsumed: BigInt(128),
+          l1DataGasPrice: BigInt(32),
+          l2GasConsumed: BigInt(4096),
+          l2GasPrice: BigInt(48),
+          overallFee: BigInt(200704)
+        })
+        yield* rpc.estimateFee({ transactions: [invoke], blockTag: "pre_confirmed" })
+        expect(params).toStrictEqual([
+          { request: [rawDeployAccount, rawInvoke], simulation_flags: ["SKIP_VALIDATE"], block_id: "latest" },
+          { request: [rawInvoke], simulation_flags: [], block_id: "pre_confirmed" }
+        ])
+      })
+    )
+  })
+
+  it.effect("addInvokeTransaction and addDeployAccountTransaction submit the transaction", () => {
+    const params: Array<Schema.Json> = []
+    const { run } = setup({
+      a: {
+        starknet_addInvokeTransaction: (p) => (params.push(p), { result: { transaction_hash: "0xcd" } }),
+        starknet_addDeployAccountTransaction: (p) => (params.push(p), {
+          result: { transaction_hash: "0xef", contract_address: "0x22" }
+        })
+      },
+      b: {
+        starknet_addInvokeTransaction: () => ({ error: { code: 59, message: "A transaction with the same hash" } })
+      }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.addInvokeTransaction({ transaction: invoke })).toBe("0x" + "cd".padStart(64, "0"))
+        expect(yield* rpc.addDeployAccountTransaction({ transaction: deployAccount })).toStrictEqual({
+          transactionHash: "0x" + "ef".padStart(64, "0"),
+          contractAddress: "0x" + "22".padStart(64, "0")
+        })
+        expect(params).toStrictEqual([
+          { invoke_transaction: rawInvoke },
+          { deploy_account_transaction: rawDeployAccount }
+        ])
+      })
+    )
+  })
+
+  it.effect("a refused transaction is Rejected with the spec's error code", () => {
+    const { run } = setup({
+      a: { starknet_addInvokeTransaction: () => ({ error: { code: 52, message: "Invalid transaction nonce" } }) }
+    })
+    return run((rpc) => Effect.flip(rpc.addInvokeTransaction({ transaction: invoke }))).pipe(
+      Effect.map((error) => expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 52 }))
+    )
   })
 })
 
