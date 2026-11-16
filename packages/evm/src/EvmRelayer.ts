@@ -70,11 +70,11 @@ export class EvmRelayer extends Context.Service<EvmRelayer, {
    * The status of the transaction as the answering endpoint sees it. An endpoint behind the head, or one that never
    * received the transaction, answers `Pending` or `NotFound` for a transaction another one has in a block.
    */
-  readonly status: (options: {
+  readonly fetchTransactionStatus: (options: {
     readonly hash: EvmTransactionHash
   }) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
   /**
-   * Reads {@link status} on `poll` (`Schedule.spaced(EvmIndexer.DEFAULT_POLL_INTERVAL)` by default) until it is
+   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(EvmIndexer.DEFAULT_POLL_INTERVAL)` by default) until it is
    * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A `poll` that
    * ends first returns the last status read.
    */
@@ -98,24 +98,26 @@ export const layer = (options: {
     EvmRelayer,
     Effect.gen(function*() {
       const rpc = yield* EvmRpc.EvmRpc
-      const status = Effect.fn("EvmRelayer.status")(function*({ hash }: { readonly hash: EvmTransactionHash }) {
-        const receipt = yield* rpc.getTransactionReceipt({ hash })
-        if (receipt === null) {
-          const transaction = yield* rpc.getTransactionByHash({ hash })
-          return transaction === null ? { _tag: "NotFound" } as const : { _tag: "Pending" } as const
+      const fetchTransactionStatus = Effect.fn("EvmRelayer.fetchTransactionStatus")(
+        function*({ hash }: { readonly hash: EvmTransactionHash }) {
+          const receipt = yield* rpc.getTransactionReceipt({ hash })
+          if (receipt === null) {
+            const transaction = yield* rpc.getTransactionByHash({ hash })
+            return transaction === null ? { _tag: "NotFound" } as const : { _tag: "Pending" } as const
+          }
+          // read after the receipt: a head older than the receipt's block could only delay `Confirmed`
+          const confirmed = yield* Confirmations.lastConfirmedBlock(rpc, options.confirmations)
+          const block = receipt.blockNumber
+          if (block > confirmed) return { _tag: "Included", block } as const
+          return receipt.status === 1
+            ? { _tag: "Confirmed", block } as const
+            : { _tag: "Failed", block, reason: undefined } as const
         }
-        // read after the receipt: a head older than the receipt's block could only delay `Confirmed`
-        const confirmed = yield* Confirmations.lastConfirmedBlock(rpc, options.confirmations)
-        const block = receipt.blockNumber
-        if (block > confirmed) return { _tag: "Included", block } as const
-        return receipt.status === 1
-          ? { _tag: "Confirmed", block } as const
-          : { _tag: "Failed", block, reason: undefined } as const
-      })
+      )
       return EvmRelayer.of({
-        status,
+        fetchTransactionStatus,
         awaitConfirmation: ({ hash, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL) }) =>
-          status({ hash }).pipe(
+          fetchTransactionStatus({ hash }).pipe(
             Effect.repeat({ schedule: poll, until: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" }),
             Effect.withSpan("EvmRelayer.awaitConfirmation")
           )

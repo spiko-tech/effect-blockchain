@@ -80,7 +80,7 @@ const setup = (initial: Node, options?: Parameters<typeof EvmRelayer.layer>[0]) 
 }
 
 const statusOf = (node: Node, options?: Parameters<typeof EvmRelayer.layer>[0]) =>
-  setup(node, options).run((relayer) => relayer.status({ hash: HASH }))
+  setup(node, options).run((relayer) => relayer.fetchTransactionStatus({ hash: HASH }))
 
 describe("EvmRelayer", () => {
   it.effect("maps what the node knows to a status", () =>
@@ -169,12 +169,12 @@ describe("EvmRelayer", () => {
         Effect.gen(function*() {
           const relayer = yield* EvmRelayer.EvmRelayer
           expect(
-            yield* relayer.status({
+            yield* relayer.fetchTransactionStatus({
               hash: EvmTransactionHash.make("0x5b742dac0f3747de0d0196a04c4d821c8e086f06c4b98d024b08ae18ea39678e")
             })
           ).toStrictEqual({ _tag: "Confirmed", block: BigInt(26083549) })
           expect(
-            yield* relayer.status({
+            yield* relayer.fetchTransactionStatus({
               hash: EvmTransactionHash.make("0x94bb947f04a680590b0c639820e7c7552521a26b2fa424824984be66e5bcc39c")
             })
           ).toStrictEqual({ _tag: "Failed", block: BigInt(26083549), reason: undefined })
