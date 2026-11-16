@@ -16,7 +16,7 @@ import { QuantityFromHex } from "./internal/QuantityFromHex.ts"
  */
 export const EvmFeeHistory = Schema.Struct({
   oldestBlock: QuantityFromHex,
-  baseFeePerGas: Schema.Array(QuantityFromHex),
+  baseFeePerGas: Schema.NonEmptyArray(QuantityFromHex),
   gasUsedRatio: Schema.Array(Schema.Number),
   reward: Schema.optionalKey(Schema.Array(Schema.Array(QuantityFromHex)))
 }).annotate({ identifier: "EvmFeeHistory", title: "EVM fee history" })
