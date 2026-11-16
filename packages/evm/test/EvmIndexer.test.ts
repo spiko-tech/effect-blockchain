@@ -239,6 +239,12 @@ const fakeRpc = (
       network: "Ethereum",
       chainId: Effect.die("unused"),
       getBlockByNumber: () => Effect.die("unused"),
+      getTransactionByHash: () => Effect.die("unused"),
+      getTransactionReceipt: () => Effect.die("unused"),
+      sendRawTransaction: () => Effect.die("unused"),
+      getTransactionCount: () => Effect.die("unused"),
+      estimateGas: () => Effect.die("unused"),
+      feeHistory: () => Effect.die("unused"),
       getBalance: ({ blockNumber }) =>
         Effect.suspend(() => {
           state.samples.push(blockNumber)

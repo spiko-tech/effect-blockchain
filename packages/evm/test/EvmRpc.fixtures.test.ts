@@ -4,6 +4,7 @@ import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
 import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
+import { EvmTransactionHash } from "@effect-blockchain/evm/EvmTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
@@ -32,6 +33,12 @@ const TRANSFER = EvmHexData.make("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4
 // the pinned inputs of `scripts/record-fixtures.ts`
 const FROM = BigInt(26083549)
 const TO = BigInt(26083558)
+const TRANSACTION = EvmTransactionHash.make("0x5b742dac0f3747de0d0196a04c4d821c8e086f06c4b98d024b08ae18ea39678e")
+const REVERTED = EvmTransactionHash.make("0x94bb947f04a680590b0c639820e7c7552521a26b2fa424824984be66e5bcc39c")
+const UNKNOWN = EvmTransactionHash.make(`0x${"0".repeat(63)}1`)
+const BURN = EvmAddress.make("0x000000000000000000000000000000000000dead")
+const USDC = EvmAddress.make("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+const OVERDRAWN = EvmHexData.make(`0xa9059cbb${BURN.slice(2).padStart(64, "0")}8${"0".repeat(63)}`)
 const filter: EvmRpc.EvmLogsFilter = { addresses: [EUTBL, USTBL], fromBlock: FROM, toBlock: TO, topics: [TRANSFER] }
 
 const expectPinnedLogs = (logs: ReadonlyArray<{ readonly address: string }>) => {
@@ -93,6 +100,88 @@ describe("EvmRpc fixtures", () => {
       setup([{ name: provider, cases: ["chainId", "blockNumber", "getBalance"] }]).run((rpc) =>
         rpc.getBalance({ address: FOUNDATION, blockNumber: FROM })
       ).pipe(Effect.map((wei) => expect(wei).toBe(BigInt("5774491790776062094343")))))
+
+    it.effect(`fixture: ${provider} getTransactionByHash`, () =>
+      setup([{ name: provider, cases: ["chainId", "getTransactionByHash", "getTransactionByHash-unknown"] }]).run((
+        rpc
+      ) =>
+        Effect.gen(function*() {
+          expect(yield* rpc.getTransactionByHash({ hash: TRANSACTION })).toStrictEqual({
+            hash: TRANSACTION,
+            from: "0x923489cbb30f861fa60bae5c5c4e8e81bc13caf9",
+            to: "0xbd6ad96f51e8d732811587468d0e2f9efa55f605",
+            nonce: BigInt(5530),
+            value: BigInt(0),
+            input: expect.stringMatching(/^0xa1703954/u),
+            gas: BigInt(167522),
+            blockNumber: FROM,
+            blockHash: "0xebffcdc425e4c9fad20245382350bcf847f91c1f2aff1f47342586fa20e2df6e",
+            transactionIndex: 345
+          })
+          expect(yield* rpc.getTransactionByHash({ hash: UNKNOWN })).toBeNull()
+        })
+      ))
+
+    it.effect(`fixture: ${provider} getTransactionReceipt`, () =>
+      setup([{
+        name: provider,
+        cases: ["chainId", "getTransactionReceipt", "getTransactionReceipt-reverted", "getTransactionReceipt-unknown"]
+      }]).run((rpc) =>
+        Effect.gen(function*() {
+          const receipt = yield* rpc.getTransactionReceipt({ hash: TRANSACTION })
+          expect(receipt).toMatchObject({
+            transactionHash: TRANSACTION,
+            transactionIndex: 345,
+            blockNumber: FROM,
+            from: "0x923489cbb30f861fa60bae5c5c4e8e81bc13caf9",
+            to: "0xbd6ad96f51e8d732811587468d0e2f9efa55f605",
+            status: 1,
+            gasUsed: BigInt(165045),
+            effectiveGasPrice: BigInt(1031993887)
+          })
+          expect(receipt?.logs.map((log) => log.logIndex)).toContain(1188)
+          expect(yield* rpc.getTransactionReceipt({ hash: REVERTED })).toMatchObject({
+            blockNumber: FROM,
+            status: 0,
+            logs: []
+          })
+          expect(yield* rpc.getTransactionReceipt({ hash: UNKNOWN })).toBeNull()
+        })
+      ))
+
+    // a contract older than EIP-161: its nonce is 0
+    it.effect(`fixture: ${provider} getTransactionCount`, () =>
+      setup([{ name: provider, cases: ["chainId", "getTransactionCount"] }]).run((rpc) =>
+        rpc.getTransactionCount({ address: FOUNDATION, blockTag: "pending" })
+      ).pipe(Effect.map((count) => expect(count).toBe(BigInt(0)))))
+
+    it.effect(`fixture: ${provider} estimateGas`, () =>
+      setup([{ name: provider, cases: ["chainId", "estimateGas"] }]).run((rpc) =>
+        rpc.estimateGas({ from: FOUNDATION, to: BURN, value: BigInt(1) })
+      ).pipe(Effect.map((gas) => expect(gas).toBe(BigInt(21000)))))
+
+    // geth's code 3 carries the revert message: a call that reverts is Rejected
+    it.effect(`fixture: ${provider} estimateGas-reverted`, () =>
+      setup([{ name: provider, cases: ["chainId", "estimateGas-reverted"] }]).run((rpc) =>
+        Effect.flip(rpc.estimateGas({ from: BURN, to: USDC, data: OVERDRAWN }))
+      ).pipe(Effect.map((error) =>
+        expect(error).toMatchObject({
+          reason: { _tag: "Rejected" },
+          code: 3,
+          cause: { message: "execution reverted: ERC20: transfer amount exceeds balance" }
+        })
+      )))
+
+    // read at the head of each recording: only the shape is stable
+    it.effect(`fixture: ${provider} feeHistory`, () =>
+      setup([{ name: provider, cases: ["chainId", "feeHistory"] }]).run((rpc) =>
+        rpc.feeHistory({ blockCount: 4, newestBlock: "latest", rewardPercentiles: [25, 75] })
+      ).pipe(Effect.map((fees) => {
+        expect(fees.oldestBlock).toBeGreaterThan(TO)
+        expect(fees.baseFeePerGas).toHaveLength(5)
+        expect(fees.gasUsedRatio).toHaveLength(4)
+        expect(fees.reward?.map((block) => block.length)).toStrictEqual([2, 2, 2, 2])
+      })))
 
     it.effect(`fixture: ${provider} invalid-params`, () =>
       setup([{ name: provider, cases: ["chainId", "blockNumber", "invalid-params"] }]).run((rpc) =>

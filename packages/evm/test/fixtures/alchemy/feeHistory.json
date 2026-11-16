@@ -1,0 +1,18 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "eth_feeHistory",
+    "params": [
+      "0x4",
+      "latest",
+      [
+        25,
+        75
+      ]
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"baseFeePerGas\":[\"0x85b60fd\",\"0x8627dc3\",\"0x878bd61\",\"0x847588b\",\"0x85478ad\"],\"gasUsedRatio\":[0.5132980833333334,0.5414602333333334,0.4088984333333333,0.5247727833333333],\"baseFeePerBlobGas\":[\"0x7c5a46\",\"0x7d493b\",\"0x809bcc\",\"0x878533\",\"0x7d493b\"],\"blobGasUsedRatio\":[0.09523809523809523,0.3333333333333333,0.6666666666666666,0.3333333333333333],\"oldestBlock\":\"0x1933e5d\",\"reward\":[[\"0x36c4\",\"0x62bb8d5\"],[\"0x2710\",\"0xbebc200\"],[\"0x4c4b40\",\"0x77481bc\"],[\"0x2dc6c0\",\"0x5f5e100\"]]}}"
+}

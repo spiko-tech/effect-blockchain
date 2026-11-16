@@ -1,0 +1,17 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "eth_estimateGas",
+    "params": [
+      {
+        "from": "0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
+        "to": "0x000000000000000000000000000000000000dead",
+        "value": "0x1"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x5208\"}"
+}

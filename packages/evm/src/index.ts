@@ -15,6 +15,11 @@ export * as EvmAddress from "./EvmAddress.ts"
 export * as EvmBlock from "./EvmBlock.ts"
 
 /**
+ * @since 0.3.0
+ */
+export * as EvmFeeHistory from "./EvmFeeHistory.ts"
+
+/**
  * @since 0.1.0
  */
 export * as EvmHexData from "./EvmHexData.ts"
@@ -35,9 +40,24 @@ export * as EvmLog from "./EvmLog.ts"
 export * as EvmNetwork from "./EvmNetwork.ts"
 
 /**
+ * @since 0.3.0
+ */
+export * as EvmRelayer from "./EvmRelayer.ts"
+
+/**
  * @since 0.1.0
  */
 export * as EvmRpc from "./EvmRpc.ts"
+
+/**
+ * @since 0.3.0
+ */
+export * as EvmSigner from "./EvmSigner.ts"
+
+/**
+ * @since 0.3.0
+ */
+export * as EvmTransaction from "./EvmTransaction.ts"
 
 /**
  * @since 0.1.0

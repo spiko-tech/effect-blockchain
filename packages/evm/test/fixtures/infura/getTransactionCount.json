@@ -1,0 +1,14 @@
+{
+  "provider": "infura",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "eth_getTransactionCount",
+    "params": [
+      "0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
+      "pending"
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":\"0x0\",\"id\":1}\n"
+}

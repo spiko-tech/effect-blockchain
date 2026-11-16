@@ -1,9 +1,10 @@
 /**
- * Typed, read-only EVM JSON-RPC methods over an ordered list of endpoints with fallback.
+ * Typed EVM JSON-RPC methods over an ordered list of endpoints with fallback.
  *
  * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`eth_chainId`). Every method is a read, so retries and fallback
- * are safe. Methods are named after the JSON-RPC method without its namespace (`eth_getLogs` is `getLogs`).
+ * is checked once to serve the configured network (`eth_chainId`). Every method but `sendRawTransaction` is a read,
+ * so retries and fallback are safe; `sendRawTransaction` documents its own case. Methods are named after the JSON-RPC
+ * method without its namespace (`eth_getLogs` is `getLogs`).
  *
  * @example
  * ```ts
@@ -42,9 +43,12 @@ import * as Ref from "effect/Ref"
 import * as Schema from "effect/Schema"
 import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmBlock } from "./EvmBlock.ts"
+import type { EvmFeeHistory } from "./EvmFeeHistory.ts"
 import type { EvmHexData } from "./EvmHexData.ts"
 import type { EvmLog } from "./EvmLog.ts"
 import * as EvmNetwork from "./EvmNetwork.ts"
+import type { EvmTransaction, EvmTransactionReceipt } from "./EvmTransaction.ts"
+import type { EvmTransactionHash } from "./EvmTransactionHash.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 
 /**
@@ -101,6 +105,14 @@ export interface EvmLogsFilter {
 }
 
 /**
+ * The block a state read is made at: `latest` is the head, `pending` adds the transactions of the node's pool.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export type EvmBlockTag = "latest" | "pending"
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -134,6 +146,68 @@ export class EvmRpc extends Context.Service<EvmRpc, {
    * range returns `[]`.
    */
   readonly getLogs: (filter: EvmLogsFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpcError>
+  /**
+   * `eth_getTransactionByHash`: the transaction, pending or included, or `null` when the answering endpoint does not
+   * know it. `null` does not fall back: an endpoint behind the head or with another pool answers it too.
+   *
+   * @since 0.3.0
+   */
+  readonly getTransactionByHash: (options: {
+    readonly hash: EvmTransactionHash
+  }) => Effect.Effect<EvmTransaction | null, EvmRpcError>
+  /**
+   * `eth_getTransactionReceipt`: the receipt, or `null` until the answering endpoint has the transaction in a block.
+   * `null` does not fall back.
+   *
+   * @since 0.3.0
+   */
+  readonly getTransactionReceipt: (options: {
+    readonly hash: EvmTransactionHash
+  }) => Effect.Effect<EvmTransactionReceipt | null, EvmRpcError>
+  /**
+   * `eth_sendRawTransaction`: submits a signed transaction and returns its hash. A retry or a fallback sends the same
+   * bytes, so it never creates a second transaction, but a node that already has them refuses the second copy. A
+   * refusal (`already known`, `nonce too low`, `replacement transaction underpriced`, `insufficient funds`...) is
+   * `Rejected`, with the node's message in `cause`.
+   *
+   * @since 0.3.0
+   */
+  readonly sendRawTransaction: (options: {
+    readonly signed: EvmHexData
+  }) => Effect.Effect<EvmTransactionHash, EvmRpcError>
+  /**
+   * `eth_getTransactionCount`: the number of transactions sent by `address` at `blockTag`, which is the nonce of its
+   * next one. `pending` counts the transactions of the answering node's pool, which differs between nodes.
+   *
+   * @since 0.3.0
+   */
+  readonly getTransactionCount: (options: {
+    readonly address: EvmAddress
+    readonly blockTag: EvmBlockTag
+  }) => Effect.Effect<bigint, EvmRpcError>
+  /**
+   * `eth_estimateGas`: the gas a call from `from` to `to` needs at the head. A call that reverts is `Rejected`, with
+   * the node's message in `cause`.
+   *
+   * @since 0.3.0
+   */
+  readonly estimateGas: (options: {
+    readonly from: EvmAddress
+    readonly to: EvmAddress
+    readonly value?: bigint | undefined
+    readonly data?: EvmHexData | undefined
+  }) => Effect.Effect<bigint, EvmRpcError>
+  /**
+   * `eth_feeHistory`: the fees of the `blockCount` blocks ending at `newestBlock`, with the priority fees at
+   * `rewardPercentiles` (each between 0 and 100, in ascending order). A node may return fewer blocks.
+   *
+   * @since 0.3.0
+   */
+  readonly feeHistory: (options: {
+    readonly blockCount: number
+    readonly newestBlock: EvmBlockTag
+    readonly rewardPercentiles: ReadonlyArray<number>
+  }) => Effect.Effect<EvmFeeHistory, EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRpc") {}
 
 // the JSON-RPC codes viem 2.57.11 retries (`utils/buildRequest.ts`, `shouldRetry`): limit exceeded, internal error,
@@ -246,6 +320,9 @@ export const layer = (options: {
           return Arr.sort(logs.map(({ removed: _removed, ...log }) => log), byBlockThenIndex)
         })
 
+      const callOn = <Params, A>(method: JsonRpc.Method<Params, A>, params: Params) =>
+        rpc.withFallback((endpoint) => rpc.call(endpoint, method, params))
+
       return EvmRpc.of({
         network,
         chainId: rpc.withFallback(rpc.checkNetwork),
@@ -261,7 +338,14 @@ export const layer = (options: {
         getLogs: (filter) =>
           filter.fromBlock > filter.toBlock
             ? Effect.succeed([])
-            : rpc.withFallback((endpoint) => getLogsOn(endpoint, filter))
+            : rpc.withFallback((endpoint) => getLogsOn(endpoint, filter)),
+        getTransactionByHash: ({ hash }) => callOn(RpcMethods.getTransactionByHash, [hash]),
+        getTransactionReceipt: ({ hash }) => callOn(RpcMethods.getTransactionReceipt, [hash]),
+        sendRawTransaction: ({ signed }) => callOn(RpcMethods.sendRawTransaction, [signed]),
+        getTransactionCount: ({ address, blockTag }) => callOn(RpcMethods.getTransactionCount, [address, blockTag]),
+        estimateGas: (call) => callOn(RpcMethods.estimateGas, [call]),
+        feeHistory: ({ blockCount, newestBlock, rewardPercentiles }) =>
+          callOn(RpcMethods.feeHistory, [blockCount, newestBlock, rewardPercentiles])
       })
     })
   )

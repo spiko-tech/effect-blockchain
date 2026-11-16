@@ -1,0 +1,13 @@
+{
+  "provider": "alchemy",
+  "network": "Ethereum",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "eth_getTransactionByHash",
+    "params": [
+      "0x5b742dac0f3747de0d0196a04c4d821c8e086f06c4b98d024b08ae18ea39678e"
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"type\":\"0x2\",\"chainId\":\"0x1\",\"nonce\":\"0x159a\",\"gas\":\"0x28e62\",\"maxFeePerGas\":\"0x5086543c\",\"maxPriorityFeePerGas\":\"0x3c740b5\",\"to\":\"0xbd6ad96f51e8d732811587468d0e2f9efa55f605\",\"value\":\"0x0\",\"accessList\":[],\"input\":\"0xa1703954000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000e4880249745eac5f1ed9d8f7df844792d560e75000000000000000000000000000000000000000000000000000000005d21dba00000000000000000000000000923489cbb30f861fa60bae5c5c4e8e81bc13caf90000000000000000000000000000000000000000000000000000000087b6fe58\",\"r\":\"0x9e0b3a8fe424ee6fcec2ff089c74028943949e661254379c53c6db34c9922722\",\"s\":\"0x103c81dd7c94aeb06fd79eb1d8350fe04103ea41eb0ec5a5158cfe25cd1c1ce3\",\"yParity\":\"0x1\",\"v\":\"0x1\",\"hash\":\"0x5b742dac0f3747de0d0196a04c4d821c8e086f06c4b98d024b08ae18ea39678e\",\"blockHash\":\"0xebffcdc425e4c9fad20245382350bcf847f91c1f2aff1f47342586fa20e2df6e\",\"blockNumber\":\"0x18e00dd\",\"transactionIndex\":\"0x159\",\"from\":\"0x923489cbb30f861fa60bae5c5c4e8e81bc13caf9\",\"gasPrice\":\"0x3d82fa1f\",\"blockTimestamp\":\"0x6abbc2eb\"}}"
+}

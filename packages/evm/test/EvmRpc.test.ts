@@ -4,6 +4,7 @@ import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import { EvmLog } from "@effect-blockchain/evm/EvmLog"
 import * as EvmNetwork from "@effect-blockchain/evm/EvmNetwork"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
+import { EvmTransactionHash } from "@effect-blockchain/evm/EvmTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
 import * as Arr from "effect/Array"
 import * as Config from "effect/Config"
@@ -126,6 +127,97 @@ describe("EvmRpc", () => {
         // undefined is not JSON: the key is left out, and a single address is still sent as an array
         Effect.map(() => expect(params).toStrictEqual([{ address: [TOKEN], fromBlock: "0xa", toBlock: "0x14" }]))
       )
+    )
+  })
+
+  it.effect("encodes the transaction methods' params and decodes their results", () => {
+    const sent: Record<string, ReadonlyArray<Schema.Json>> = {}
+    const answer = (method: string, result: Schema.Json) => (params: ReadonlyArray<Schema.Json>) => {
+      sent[method] = params
+      return { result }
+    }
+    const hash = EvmTransactionHash.make("0x" + "cd".repeat(32))
+    const { run } = setup({
+      a: {
+        eth_sendRawTransaction: answer("send", hash),
+        eth_getTransactionCount: answer("count", "0x2a"),
+        eth_estimateGas: answer("gas", "0x5208"),
+        // no percentile requested: geth leaves `reward` out
+        eth_feeHistory: answer("fees", { oldestBlock: "0xa", baseFeePerGas: ["0x7", "0x8"], gasUsedRatio: [0.5] }),
+        eth_getTransactionByHash: answer("transaction", {
+          hash,
+          from: TOKEN,
+          to: null,
+          nonce: "0x2a",
+          value: "0x0",
+          input: "0x",
+          gas: "0x5208",
+          blockNumber: null,
+          blockHash: null,
+          transactionIndex: null
+        })
+      }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.sendRawTransaction({ signed: EvmHexData.make("0x02ab") })).toBe(hash)
+        expect(yield* rpc.getTransactionCount({ address: TOKEN, blockTag: "latest" })).toBe(BigInt(42))
+        expect(yield* rpc.estimateGas({ from: TOKEN, to: OTHER, data: EvmHexData.make("0xab") })).toBe(BigInt(21000))
+        expect(yield* rpc.feeHistory({ blockCount: 1, newestBlock: "pending", rewardPercentiles: [] })).toStrictEqual({
+          oldestBlock: BigInt(10),
+          baseFeePerGas: [BigInt(7), BigInt(8)],
+          gasUsedRatio: [0.5]
+        })
+        // a pending contract creation
+        expect(yield* rpc.getTransactionByHash({ hash })).toMatchObject({
+          to: null,
+          nonce: BigInt(42),
+          blockNumber: null
+        })
+        expect(sent).toStrictEqual({
+          send: ["0x02ab"],
+          count: [TOKEN, "latest"],
+          gas: [{ from: TOKEN, to: OTHER, data: "0xab" }],
+          fees: ["0x1", "pending", []],
+          transaction: [hash]
+        })
+      })
+    )
+  })
+
+  it.effect("rejects a refused transaction with the node's message, after every endpoint", () => {
+    const refuse = () => ({ error: { code: -32000, message: "nonce too low" } })
+    const { calls, run } = setup({ a: { eth_sendRawTransaction: refuse }, b: { eth_sendRawTransaction: refuse } })
+    return run((rpc) => Effect.flip(rpc.sendRawTransaction({ signed: EvmHexData.make("0x02ab") }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32000, endpoint: "b" })
+        expect(error.cause).toMatchObject({ errors: [{}, { cause: { message: "nonce too low" } }] })
+        expect(calls.filter((call) => call.endsWith("eth_sendRawTransaction"))).toHaveLength(2)
+      })
+    )
+  })
+
+  it.effect("does not fall back on an unknown transaction, and rejects a receipt without a status", () => {
+    const { calls, run } = setup({
+      a: {
+        eth_getTransactionReceipt: (params) => ({
+          result: params[0] === "0x" + "cd".repeat(32) ? null : { root: "0x" + "ab".repeat(32) }
+        })
+      },
+      b: { eth_getTransactionReceipt: () => ({ result: null }) }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.getTransactionReceipt({ hash: EvmTransactionHash.make("0x" + "cd".repeat(32)) })).toBeNull()
+        expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_getTransactionReceipt"])
+        // a's reply does not decode: InvalidResponse falls back to b
+        expect(yield* rpc.getTransactionReceipt({ hash: EvmTransactionHash.make("0x" + "ef".repeat(32)) })).toBeNull()
+        expect(calls.slice(2)).toStrictEqual([
+          "a:eth_getTransactionReceipt",
+          "b:eth_chainId",
+          "b:eth_getTransactionReceipt"
+        ])
+      })
     )
   })
 
