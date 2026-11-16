@@ -55,6 +55,10 @@ const setup = (initial: Node, options?: Parameters<typeof SolanaRelayer.layer>[0
           return { slot: BigInt(node.current.head), value: [node.current.status ?? null] }
         }),
       getBalance: () => Effect.die("unused"),
+      getLatestBlockhash: () => Effect.die("unused"),
+      simulateTransaction: () => Effect.die("unused"),
+      getRecentPrioritizationFees: () => Effect.die("unused"),
+      sendTransaction: () => Effect.die("unused"),
       getSignaturesForAddress: () => Effect.die("unused"),
       getTransaction: () => Effect.die("unused")
     })

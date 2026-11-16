@@ -20,12 +20,19 @@ const UNKNOWN_TX = "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDa
 const FAILED_CUSTOM = "65AsgMptVkfYADN4Jv4Av1SJJAErag2FnDaYE8FJGzDAejiDyJr2JUawciHHUG5ApDX38U4w3kNW48cViH7sCWyd"
 // a BINANCE transaction failing in a native program (`{ InstructionError: [0, "InvalidArgument"] }`)
 const FAILED_NAMED = "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ"
+// unsigned v0 transfers of 1 lamport to EUTBL, never sent: from BINANCE, then from an address that holds no account
+const TRANSFER =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABA0jAG1BZAFRV2dywxrzs3LT7Wy6rwamoK1c5K6qkDwTmVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
+const TRANSFER_UNFUNDED =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABAzmZGF4hAZXnrjzCLzvpuAbmKzGFNed473dzSiOxrvGWVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
 // far above the head for years
 const FUTURE_SLOT = 999_999_999_999
 
 const finalized = { commitment: "finalized" }
 const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }
 const json = { ...base64, encoding: "json" }
+// the signatures are zeroes and the blockhash a placeholder: the node skips the first and replaces the second
+const simulation = { encoding: "base64", ...finalized, sigVerify: false, replaceRecentBlockhash: true }
 
 // params in the order and shape `src/internal/rpcMethods.ts` encodes them
 const cases: ReadonlyArray<Case> = [
@@ -63,6 +70,10 @@ const cases: ReadonlyArray<Case> = [
   },
   // without the history, a transaction older than the node's status cache is unknown
   { name: "getSignatureStatuses-recent", method: "getSignatureStatuses", params: [[TX_1], {}] },
+  { name: "getLatestBlockhash", method: "getLatestBlockhash", params: [finalized] },
+  { name: "getRecentPrioritizationFees", method: "getRecentPrioritizationFees", params: [[BINANCE]] },
+  { name: "simulateTransaction", method: "simulateTransaction", params: [TRANSFER, simulation] },
+  { name: "simulateTransaction-failed", method: "simulateTransaction", params: [TRANSFER_UNFUNDED, simulation] },
   // Alchemy accepts a `limit` from 1 to 10000
   { name: "invalid-params", method: "getSignaturesForAddress", params: [EUTBL, { limit: 0, ...finalized }] },
   { name: "invalid-key", method: "getGenesisHash", params: [], invalidKey: true }

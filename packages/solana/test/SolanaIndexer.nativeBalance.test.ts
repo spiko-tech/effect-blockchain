@@ -109,6 +109,10 @@ const fakeRpc = (options: {
           expect(address).toBe(ADDRESS)
           return { slot: BigInt(options.balanceSlot ?? state.head), value: BigInt(options.balance ?? 0) }
         }),
+      getLatestBlockhash: () => Effect.die("unused"),
+      simulateTransaction: () => Effect.die("unused"),
+      getRecentPrioritizationFees: () => Effect.die("unused"),
+      sendTransaction: () => Effect.die("unused"),
       getSignaturesForAddress: ({ address, before, limit }) =>
         call("getSignaturesForAddress", () => {
           expect(address).toBe(ADDRESS)

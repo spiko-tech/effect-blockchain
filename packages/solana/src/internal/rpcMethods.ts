@@ -203,3 +203,57 @@ export const getTransaction = (encoding: keyof typeof transactions) =>
       meta: Schema.NullOr(Meta)
     }))
   })
+
+/** @internal */
+export const getLatestBlockhash = make({
+  name: "getLatestBlockhash",
+  params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
+  result: Schema.Struct({
+    context: Schema.Struct({ slot: Schema.BigInt }),
+    value: Schema.Struct({ blockhash: Schema.String, lastValidBlockHeight: Schema.BigInt })
+  })
+})
+
+/** @internal */
+export const simulateTransaction = make({
+  name: "simulateTransaction",
+  params: Schema.Tuple([
+    Schema.String,
+    Schema.Struct({
+      encoding: Schema.Literal("base64"),
+      commitment: Commitment,
+      sigVerify: JsonRpc.optionalOmitted(Schema.Boolean),
+      replaceRecentBlockhash: JsonRpc.optionalOmitted(Schema.Boolean)
+    })
+  ]),
+  result: Schema.Struct({
+    context: Schema.Struct({ slot: Schema.BigInt }),
+    value: Schema.Struct({
+      err: Schema.NullOr(TransactionError),
+      logs: Schema.NullOr(Schema.Array(Schema.String)),
+      unitsConsumed: Schema.NullOr(Schema.BigInt)
+    })
+  })
+})
+
+/** @internal */
+export const getRecentPrioritizationFees = make({
+  name: "getRecentPrioritizationFees",
+  params: Schema.Tuple([Schema.Array(SolanaAddress)]),
+  result: Schema.Array(Schema.Struct({ slot: Schema.BigInt, prioritizationFee: Schema.BigInt }))
+})
+
+/** @internal */
+export const sendTransaction = make({
+  name: "sendTransaction",
+  params: Schema.Tuple([
+    Schema.String,
+    Schema.Struct({
+      encoding: Schema.Literal("base64"),
+      skipPreflight: JsonRpc.optionalOmitted(Schema.Boolean),
+      preflightCommitment: JsonRpc.optionalOmitted(Commitment),
+      maxRetries: JsonRpc.optionalOmitted(Schema.Int)
+    })
+  ]),
+  result: SolanaTransactionHash
+})

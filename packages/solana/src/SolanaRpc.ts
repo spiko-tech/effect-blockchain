@@ -1,10 +1,10 @@
 /**
- * Typed, read-only Solana JSON-RPC methods over an ordered list of endpoints with fallback.
+ * Typed Solana JSON-RPC methods over an ordered list of endpoints with fallback.
  *
  * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`getGenesisHash`). Every method is a read, so retries and fallback
- * are safe. Methods are named after the JSON-RPC method. Every JSON integer in a reply is read as an exact `bigint`,
- * so lamport amounts above 2^53 are never rounded.
+ * is checked once to serve the configured network (`getGenesisHash`). Every method but `sendTransaction` is a read,
+ * so retries and fallback are safe; `sendTransaction` documents its own case. Methods are named after the JSON-RPC
+ * method. Every JSON integer in a reply is read as an exact `bigint`, so lamport amounts above 2^53 are never rounded.
  *
  * @example
  * ```ts
@@ -292,6 +292,45 @@ export interface SolanaSignatureStatuses {
 }
 
 /**
+ * A `getLatestBlockhash` result at the context `slot`: a transaction signed with `blockhash` can land while the block
+ * height is at most `lastValidBlockHeight`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaLatestBlockhash {
+  readonly slot: bigint
+  readonly blockhash: string
+  readonly lastValidBlockHeight: bigint
+}
+
+/**
+ * A `simulateTransaction` result at the context `slot`: `err` is `null` when the transaction would succeed, `logs` the
+ * program logs and `unitsConsumed` the compute units used, both `null` when the simulation did not run.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaSimulation {
+  readonly slot: bigint
+  readonly err: SolanaTransactionError | null
+  readonly logs: ReadonlyArray<string> | null
+  readonly unitsConsumed: bigint | null
+}
+
+/**
+ * A `getRecentPrioritizationFees` entry: the lowest compute unit price, in micro-lamports, of a transaction that
+ * landed in `slot` and locked the queried accounts. It is 0 for a slot where such a transaction paid none.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaPrioritizationFee {
+  readonly slot: bigint
+  readonly prioritizationFee: bigint
+}
+
+/**
  * The `getTransaction` options.
  *
  * @since 0.1.0
@@ -347,6 +386,43 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
       options: SolanaTransactionQuery & { readonly encoding: Encoding }
     ): Effect.Effect<SolanaTransactionInfo<Encoding>, SolanaRpcError>
   }
+  /** `getLatestBlockhash` */
+  readonly getLatestBlockhash: (options: {
+    readonly commitment: SolanaCommitment
+  }) => Effect.Effect<SolanaLatestBlockhash, SolanaRpcError>
+  /**
+   * `simulateTransaction` of a base64 wire `transaction`, run against the bank at `commitment` without being sent. A
+   * transaction that would fail is a success whose `err` says why. `sigVerify` checks the signatures, and
+   * `replaceRecentBlockhash` swaps the blockhash for the latest one, which unsigned transactions need: the node
+   * refuses both together.
+   */
+  readonly simulateTransaction: (options: {
+    readonly transaction: string
+    readonly commitment: SolanaCommitment
+    readonly sigVerify?: boolean | undefined
+    readonly replaceRecentBlockhash?: boolean | undefined
+  }) => Effect.Effect<SolanaSimulation, SolanaRpcError>
+  /**
+   * `getRecentPrioritizationFees` over the node's cache of recent slots (up to 150) for the transactions locking every
+   * one of `addresses` as writable, at most 128 of them. Without `addresses`, any transaction counts.
+   */
+  readonly getRecentPrioritizationFees: (options: {
+    readonly addresses: ReadonlyArray<SolanaAddress>
+  }) => Effect.Effect<ReadonlyArray<SolanaPrioritizationFee>, SolanaRpcError>
+  /**
+   * `sendTransaction`: submits a signed base64 wire `transaction` and returns its first signature. The node simulates
+   * it first at `preflightCommitment` (`finalized` by default) unless `skipPreflight`, then forwards it to the leader
+   * and rebroadcasts it `maxRetries` times, or until its blockhash expires when left out. A retry or a fallback sends
+   * the same bytes, so it never creates a second transaction, but a node that has processed them refuses the second
+   * copy. A refusal (a failed preflight, `BlockhashNotFound`, `AlreadyProcessed`...) is `Rejected`, with the node's
+   * message in `cause`.
+   */
+  readonly sendTransaction: (options: {
+    readonly transaction: string
+    readonly skipPreflight?: boolean | undefined
+    readonly preflightCommitment?: SolanaCommitment | undefined
+    readonly maxRetries?: number | undefined
+  }) => Effect.Effect<SolanaTransactionHash, SolanaRpcError>
 }>()("@effect-blockchain/solana/SolanaRpc") {}
 
 // JSON-RPC codes from @solana/errors, any other code is `Rejected`
@@ -470,7 +546,25 @@ export const layer = (options: {
           ),
         getSignaturesForAddress: ({ address, ...config }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSignaturesForAddress, [address, config])),
-        getTransaction
+        getTransaction,
+        getLatestBlockhash: ({ commitment }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getLatestBlockhash, [{ commitment }]).pipe(
+              Effect.map(({ context, value }) => ({ slot: context.slot, ...value }))
+            )
+          ),
+        simulateTransaction: ({ transaction, ...config }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.simulateTransaction, [transaction, { encoding: "base64", ...config }]).pipe(
+              Effect.map(({ context, value }) => ({ slot: context.slot, ...value }))
+            )
+          ),
+        getRecentPrioritizationFees: ({ addresses }) =>
+          rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getRecentPrioritizationFees, [addresses])),
+        sendTransaction: ({ transaction, ...config }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.sendTransaction, [transaction, { encoding: "base64", ...config }])
+          )
       })
     })
   )

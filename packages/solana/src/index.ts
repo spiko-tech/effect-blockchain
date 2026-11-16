@@ -30,6 +30,11 @@ export * as SolanaRelayer from "./SolanaRelayer.ts"
 export * as SolanaRpc from "./SolanaRpc.ts"
 
 /**
+ * @since 0.2.0
+ */
+export * as SolanaSigner from "./SolanaSigner.ts"
+
+/**
  * @since 0.1.0
  */
 export * as SolanaTransactionHash from "./SolanaTransactionHash.ts"
