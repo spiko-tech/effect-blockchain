@@ -3,7 +3,7 @@ import * as StellarRelayer from "@effect-blockchain/stellar/StellarRelayer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import * as StellarSigner from "@effect-blockchain/stellar/StellarSigner"
 import { describe, expect, it } from "@effect/vitest"
-import { Asset, Keypair, Operation } from "@stellar/stellar-sdk"
+import { Address, Asset, Keypair, nativeToScVal, Networks, Operation } from "@stellar/stellar-sdk"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -110,5 +110,48 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
         _tag: "StellarBroadcastError",
         reason: { _tag: "Refused", code: "txTooLate" }
       })
+    }).pipe(Effect.provide(layer)))
+
+  it.live("signs, broadcasts and confirms a contract invocation", () =>
+    Effect.gen(function*() {
+      const relayer = yield* StellarRelayer.StellarRelayer
+      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const send = Effect.fnUntraced(function*(operation: string) {
+        const { hash, maxLedger, signed } = yield* relayer.sign({ signer, operations: [operation] })
+        yield* relayer.broadcast({ signed })
+        return yield* relayer.awaitConfirmation({ hash, maxLedger, poll })
+      })
+      // the contract of the native asset: creating it is an invocation too, which fails once it exists
+      yield* Effect.ignore(send(Operation.createStellarAssetContract({ asset: Asset.native() }).toXDR("base64")))
+      const call = (name: string, from: string) =>
+        Operation.invokeContractFunction({
+          contract: Asset.native().contractId(Networks.STANDALONE),
+          function: name,
+          args: [new Address(from).toScVal(), new Address(receiver).toScVal(), nativeToScVal(1, { type: "i128" })]
+        }).toXDR("base64")
+      expect(yield* send(call("transfer", signer.address))).toMatchObject({ _tag: "Confirmed" })
+      expect(yield* Effect.flip(send(call("transfer", receiver)))).toMatchObject({
+        _tag: "StellarSimulationError",
+        reason: { _tag: "UnsupportedAuth" }
+      })
+      expect(yield* Effect.flip(send(call("missing", signer.address)))).toMatchObject({
+        _tag: "StellarSimulationError",
+        reason: { _tag: "SimulationFailed" }
+      })
+    }).pipe(Effect.provide(layer)))
+
+  it.live("confirms a transaction wrapped in a fee bump paid by another account", () =>
+    Effect.gen(function*() {
+      const relayer = yield* StellarRelayer.StellarRelayer
+      const rpc = yield* StellarRpc.StellarRpc
+      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const payer = yield* StellarSigner.fromPrivateKey(Redacted.make(Keypair.random().secret()))
+      yield* fund(payer.address)
+      const inner = yield* relayer.sign({ signer, operations: [payment(receiver, "1")] })
+      const { hash, signed } = yield* relayer.feeBump({ signer: payer, signed: inner.signed })
+      expect(yield* relayer.broadcast({ signed })).toBe(hash)
+      const status = yield* relayer.awaitConfirmation({ hash, maxLedger: inner.maxLedger, poll })
+      expect(status).toMatchObject({ _tag: "Confirmed" })
+      expect(yield* rpc.getTransaction({ hash })).toMatchObject({ status: "SUCCESS", feeBump: true })
     }).pipe(Effect.provide(layer)))
 })
