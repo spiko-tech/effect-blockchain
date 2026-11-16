@@ -1,0 +1,15 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "getBlockHeight",
+    "params": [
+      {
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":448153724,\"id\":1}\n"
+}

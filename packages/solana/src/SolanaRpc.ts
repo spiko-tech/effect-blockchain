@@ -241,6 +241,57 @@ export interface SolanaBalance {
 }
 
 /**
+ * Why an instruction failed, as the node returns it: the variant's name (`"ProgramFailedToComplete"`), the program's
+ * own error code (`{ Custom: 6001 }`), or any other variant carrying data as raw JSON (integers as decimal strings).
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export type SolanaInstructionError =
+  | string
+  | { readonly Custom: number }
+  | { readonly [variant: string]: Schema.Json }
+
+/**
+ * Why a transaction failed, as the node returns it: the variant's name (`"BlockhashNotFound"`), the failing
+ * instruction's index and error (`{ InstructionError: [2, { Custom: 6001 }] }`), or any other variant carrying data
+ * as raw JSON (integers as decimal strings).
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export type SolanaTransactionError =
+  | string
+  | { readonly InstructionError: readonly [index: number, error: SolanaInstructionError] }
+  | { readonly [variant: string]: Schema.Json }
+
+/**
+ * A `getSignatureStatuses` entry: the `slot` holding the transaction, its `err` (`null` when it succeeded) and the
+ * commitment its block has reached. `confirmations` counts the blocks built on it, `null` once it is finalized.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaSignatureStatus {
+  readonly slot: bigint
+  readonly confirmations: number | null
+  readonly err: SolanaTransactionError | null
+  readonly confirmationStatus: "processed" | "confirmed" | "finalized" | null
+}
+
+/**
+ * A `getSignatureStatuses` result: one entry of `value` per signature, in order, `null` for a signature the endpoint
+ * does not know, as seen at the context `slot`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface SolanaSignatureStatuses {
+  readonly slot: bigint
+  readonly value: ReadonlyArray<SolanaSignatureStatus | null>
+}
+
+/**
  * The `getTransaction` options.
  *
  * @since 0.1.0
@@ -263,6 +314,19 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly getSlot: (options: {
     readonly commitment: SolanaCommitment
   }) => Effect.Effect<bigint, SolanaRpcError>
+  /** `getBlockHeight`: the number of blocks below the head, lower than its slot as skipped slots hold no block. */
+  readonly getBlockHeight: (options: {
+    readonly commitment: SolanaCommitment
+  }) => Effect.Effect<bigint, SolanaRpcError>
+  /**
+   * `getSignatureStatuses` of at most 256 `signatures`, read from the blocks the node has processed, whatever their
+   * commitment. Without `searchTransactionHistory`, only the node's cache of recent slots is searched: an older
+   * transaction is `null`.
+   */
+  readonly getSignatureStatuses: (options: {
+    readonly signatures: ReadonlyArray<SolanaTransactionHash>
+    readonly searchTransactionHistory?: boolean | undefined
+  }) => Effect.Effect<SolanaSignatureStatuses, SolanaRpcError>
   /** `getBalance` at `finalized` commitment. */
   readonly getBalance: (options: {
     readonly address: SolanaAddress
@@ -390,6 +454,14 @@ export const layer = (options: {
         getGenesisHash: rpc.withFallback(rpc.checkNetwork),
         getSlot: ({ commitment }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSlot, [{ commitment }])),
+        getBlockHeight: ({ commitment }) =>
+          rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getBlockHeight, [{ commitment }])),
+        getSignatureStatuses: ({ signatures, ...config }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getSignatureStatuses, [signatures, config]).pipe(
+              Effect.map(({ context, value }) => ({ slot: context.slot, value }))
+            )
+          ),
         getBalance: ({ address }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getBalance, [address, { commitment: "finalized" }]).pipe(
