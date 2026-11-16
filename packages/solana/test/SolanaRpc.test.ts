@@ -244,6 +244,87 @@ describe("SolanaRpc", () => {
       }))
   })
 
+  it.effect("encodes and decodes the methods sending needs, leaving undefined keys out", () => {
+    const seen = new Map<string, ReadonlyArray<Schema.Json>>()
+    const reply = (method: string, result: Schema.Json) => (params: ReadonlyArray<Schema.Json>) => {
+      seen.set(method, params)
+      return { result }
+    }
+    const context = { apiVersion: "4.4.1", slot: 7 }
+    const { run } = setup({
+      a: {
+        getLatestBlockhash: reply("getLatestBlockhash", {
+          context,
+          value: { blockhash: "fg5jAcb27Hok8kTbs8bzgACf8SyfWF51NGoPabTJAPm", lastValidBlockHeight: 99 }
+        }),
+        simulateTransaction: reply("simulateTransaction", {
+          context,
+          value: { err: { InstructionError: [0, { Custom: 1 }] }, logs: ["log"], unitsConsumed: 150, returnData: null }
+        }),
+        getRecentPrioritizationFees: reply("getRecentPrioritizationFees", [{ slot: 5, prioritizationFee: 1000 }]),
+        sendTransaction: reply("sendTransaction", SIGNATURE)
+      }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.getLatestBlockhash(confirmed)).toStrictEqual({
+          slot: BigInt(7),
+          blockhash: "fg5jAcb27Hok8kTbs8bzgACf8SyfWF51NGoPabTJAPm",
+          lastValidBlockHeight: BigInt(99)
+        })
+        expect(
+          yield* rpc.simulateTransaction({
+            transaction: "AQ==",
+            ...confirmed,
+            sigVerify: undefined,
+            replaceRecentBlockhash: true
+          })
+        ).toStrictEqual({
+          slot: BigInt(7),
+          err: { InstructionError: [0, { Custom: 1 }] },
+          logs: ["log"],
+          unitsConsumed: BigInt(150)
+        })
+        expect(yield* rpc.getRecentPrioritizationFees({ addresses: [ADDRESS] })).toStrictEqual([
+          { slot: BigInt(5), prioritizationFee: BigInt(1000) }
+        ])
+        expect(yield* rpc.sendTransaction({ transaction: "AQ==", skipPreflight: undefined, maxRetries: 0 })).toBe(
+          SIGNATURE
+        )
+        expect(
+          yield* rpc.sendTransaction({ transaction: "AQ==", skipPreflight: true, preflightCommitment: "confirmed" })
+        )
+          .toBe(SIGNATURE)
+        expect(Object.fromEntries(seen)).toStrictEqual({
+          getLatestBlockhash: [confirmed],
+          simulateTransaction: ["AQ==", { encoding: "base64", ...confirmed, replaceRecentBlockhash: true }],
+          getRecentPrioritizationFees: [[ADDRESS]],
+          sendTransaction: ["AQ==", { encoding: "base64", skipPreflight: true, preflightCommitment: "confirmed" }]
+        })
+      })
+    )
+  })
+
+  it.effect("fails sendTransaction Rejected with the node's message when the preflight fails", () => {
+    const { run } = setup({
+      a: {
+        sendTransaction: () => ({
+          error: { code: -32002, message: "Transaction simulation failed: Blockhash not found" }
+        })
+      }
+    })
+    return run((rpc) => Effect.flip(rpc.sendTransaction({ transaction: "AQ==" }))).pipe(
+      Effect.map((error) =>
+        expect(error).toMatchObject({
+          reason: { _tag: "Rejected" },
+          code: -32002,
+          method: "sendTransaction",
+          cause: { message: expect.stringContaining("Blockhash not found") }
+        })
+      )
+    )
+  })
+
   it.effect("maps the chain error codes to reasons", () =>
     Effect.gen(function*() {
       const cases: ReadonlyArray<readonly [number, JsonRpc.CodeReason]> = [

@@ -1,0 +1,15 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "getLatestBlockhash",
+    "params": [
+      {
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":470175015},\"value\":{\"blockhash\":\"fg5jAcb27Hok8kTbs8bzgACf8SyfWF51NGoPabTJAPm\",\"lastValidBlockHeight\":448190049}},\"id\":1}\n"
+}

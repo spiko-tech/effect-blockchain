@@ -362,6 +362,10 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
       getBlockHeight: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: () => Effect.die("unused"),
+      getLatestBlockhash: () => Effect.die("unused"),
+      simulateTransaction: () => Effect.die("unused"),
+      getRecentPrioritizationFees: () => Effect.die("unused"),
+      sendTransaction: () => Effect.die("unused"),
       getSignaturesForAddress: ({ before, limit }) =>
         call("getSignaturesForAddress", () => {
           const start = history.findIndex((e) => e.signature === before) + 1

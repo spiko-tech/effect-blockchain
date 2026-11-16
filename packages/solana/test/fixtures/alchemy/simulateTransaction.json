@@ -1,0 +1,19 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "simulateTransaction",
+    "params": [
+      "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABA0jAG1BZAFRV2dywxrzs3LT7Wy6rwamoK1c5K6qkDwTmVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA==",
+      {
+        "encoding": "base64",
+        "commitment": "finalized",
+        "sigVerify": false,
+        "replaceRecentBlockhash": true
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":470175015},\"value\":{\"accounts\":null,\"err\":null,\"fee\":5000,\"innerInstructions\":null,\"loadedAccountsDataSize\":797,\"loadedAddresses\":{\"readonly\":[],\"writable\":[]},\"logs\":[\"Program 11111111111111111111111111111111 invoke [1]\",\"Program 11111111111111111111111111111111 success\"],\"postBalances\":[65746163003,4955521,1],\"postTokenBalances\":[],\"preBalances\":[65746168004,4955520,1],\"preTokenBalances\":[],\"replacementBlockhash\":{\"blockhash\":\"fg5jAcb27Hok8kTbs8bzgACf8SyfWF51NGoPabTJAPm\",\"lastValidBlockHeight\":448190049},\"returnData\":null,\"unitsConsumed\":150}},\"id\":1}\n"
+}

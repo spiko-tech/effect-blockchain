@@ -7,7 +7,8 @@ import {
   getBase58Decoder,
   getBase64Encoder,
   getCompiledTransactionMessageDecoder,
-  getTransactionDecoder
+  getTransactionDecoder,
+  isBlockhash
 } from "@solana/kit"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
@@ -58,7 +59,13 @@ const FAILED_NAMED = SolanaTransactionHash.make(
   "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ"
 )
 const BINANCE = SolanaAddress.make("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9")
+// unsigned v0 transfers of 1 lamport to EUTBL: from BINANCE, then from an address that holds no account
+const TRANSFER =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABA0jAG1BZAFRV2dywxrzs3LT7Wy6rwamoK1c5K6qkDwTmVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
+const TRANSFER_UNFUNDED =
+  "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABAzmZGF4hAZXnrjzCLzvpuAbmKzGFNed473dzSiOxrvGWVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
 const finalized = { commitment: "finalized" } as const
+const simulation = { ...finalized, sigVerify: false, replaceRecentBlockhash: true } as const
 const page1 = { address: EUTBL, before: BEFORE, until: UNTIL, limit: 5, ...finalized }
 
 describe("SolanaRpc fixtures", () => {
@@ -208,6 +215,45 @@ describe("SolanaRpc fixtures", () => {
         expect(json.meta?.loadedAddresses?.writable).toHaveLength(7)
         expect(json.meta?.loadedAddresses?.readonly).toHaveLength(13)
         expect(json.meta).toMatchObject({ err: null, fee: BigInt(9000) })
+      })
+    ))
+
+  it.effect("fixture: alchemy getLatestBlockhash", () =>
+    alchemy("getLatestBlockhash").run((rpc) => rpc.getLatestBlockhash(finalized)).pipe(
+      // the head moves on every recording: only check it is past the first recording
+      Effect.map(({ blockhash, lastValidBlockHeight, slot }) => {
+        expect(isBlockhash(blockhash)).toBe(true)
+        expect(slot >= BigInt(470175015)).toBe(true)
+        expect(lastValidBlockHeight >= BigInt(448190049)).toBe(true)
+      })
+    ))
+
+  it.effect("fixture: alchemy getRecentPrioritizationFees", () =>
+    alchemy("getRecentPrioritizationFees").run((rpc) => rpc.getRecentPrioritizationFees({ addresses: [BINANCE] })).pipe(
+      // one entry per slot of the node's cache, oldest first
+      Effect.map((fees) => {
+        expect(fees.length > 0 && fees.length <= 150).toBe(true)
+        expect(fees.every(({ prioritizationFee }) => prioritizationFee >= BigInt(0))).toBe(true)
+        expect(fees.every(({ slot }, index) => index === 0 || slot > (fees[index - 1]?.slot ?? slot))).toBe(true)
+      })
+    ))
+
+  it.effect("fixture: alchemy simulateTransaction and -failed", () =>
+    alchemy("simulateTransaction", "simulateTransaction-failed").run((rpc) =>
+      Effect.gen(function*() {
+        const { slot, ...transfer } = yield* rpc.simulateTransaction({ transaction: TRANSFER, ...simulation })
+        expect(slot >= BigInt(470175015)).toBe(true)
+        expect(transfer).toStrictEqual({
+          err: null,
+          logs: [
+            "Program 11111111111111111111111111111111 invoke [1]",
+            "Program 11111111111111111111111111111111 success"
+          ],
+          unitsConsumed: BigInt(150)
+        })
+        // the fee payer does not exist: the transaction is refused before it runs
+        const unfunded = yield* rpc.simulateTransaction({ transaction: TRANSFER_UNFUNDED, ...simulation })
+        expect(unfunded).toMatchObject({ err: "AccountNotFound", logs: [], unitsConsumed: BigInt(0) })
       })
     ))
 
