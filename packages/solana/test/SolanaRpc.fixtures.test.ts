@@ -51,6 +51,12 @@ const UNKNOWN_TX = SolanaTransactionHash.make(
 const TX_V0 = SolanaTransactionHash.make(
   "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRGfurA7J4yk1cZY4Ybs4J59NF"
 )
+const FAILED_CUSTOM = SolanaTransactionHash.make(
+  "65AsgMptVkfYADN4Jv4Av1SJJAErag2FnDaYE8FJGzDAejiDyJr2JUawciHHUG5ApDX38U4w3kNW48cViH7sCWyd"
+)
+const FAILED_NAMED = SolanaTransactionHash.make(
+  "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ"
+)
 const BINANCE = SolanaAddress.make("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9")
 const finalized = { commitment: "finalized" } as const
 const page1 = { address: EUTBL, before: BEFORE, until: UNTIL, limit: 5, ...finalized }
@@ -160,6 +166,36 @@ describe("SolanaRpc fixtures", () => {
       Effect.map(({ slot, value }) => {
         expect(slot > BigInt(466165683)).toBe(true)
         expect(value > BigInt(0)).toBe(true)
+      })
+    ))
+
+  it.effect("fixture: alchemy getBlockHeight", () =>
+    alchemy("getBlockHeight").run((rpc) => rpc.getBlockHeight(finalized)).pipe(
+      // the head moves on every recording: only check it is past the first recorded height
+      Effect.map((height) => expect(height >= BigInt(448153724)).toBe(true))
+    ))
+
+  it.effect("fixture: alchemy getSignatureStatuses and -recent", () =>
+    alchemy("getSignatureStatuses", "getSignatureStatuses-recent").run((rpc) =>
+      Effect.gen(function*() {
+        const { slot, value } = yield* rpc.getSignatureStatuses({
+          signatures: [TX_1, FAILED_CUSTOM, FAILED_NAMED, UNKNOWN_TX],
+          searchTransactionHistory: true
+        })
+        expect(slot > BigInt(470138739)).toBe(true)
+        const finalizedAt = (slot: number) => ({
+          slot: BigInt(slot),
+          confirmations: null,
+          confirmationStatus: "finalized"
+        })
+        expect(value).toStrictEqual([
+          { ...finalizedAt(443760316), err: null },
+          { ...finalizedAt(470138739), err: { InstructionError: [1, { Custom: 30 }] } },
+          { ...finalizedAt(464777808), err: { InstructionError: [0, "InvalidArgument"] } },
+          null
+        ])
+        // without the history, a transaction older than the node's status cache is unknown
+        expect((yield* rpc.getSignatureStatuses({ signatures: [TX_1] })).value).toStrictEqual([null])
       })
     ))
 

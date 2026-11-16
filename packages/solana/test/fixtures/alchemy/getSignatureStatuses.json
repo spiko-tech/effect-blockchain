@@ -1,0 +1,21 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "getSignatureStatuses",
+    "params": [
+      [
+        "2ijR446DGZ3zFMDdp5JrbonSpRwrvN4bGK7oGiLpn5DpR9eCFHZjMPh89feRiuygcVhhY6HxP64y5xtnVfKJutz1",
+        "65AsgMptVkfYADN4Jv4Av1SJJAErag2FnDaYE8FJGzDAejiDyJr2JUawciHHUG5ApDX38U4w3kNW48cViH7sCWyd",
+        "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ",
+        "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDaGbNkYPhGMaFKaLwUMcnMnEHG77v"
+      ],
+      {
+        "searchTransactionHistory": true
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":470138841},\"value\":[{\"confirmationStatus\":\"finalized\",\"confirmations\":null,\"err\":null,\"slot\":443760316,\"status\":{\"Ok\":null}},{\"confirmationStatus\":\"finalized\",\"confirmations\":null,\"err\":{\"InstructionError\":[1,{\"Custom\":30}]},\"slot\":470138739,\"status\":{\"Err\":{\"InstructionError\":[1,{\"Custom\":30}]}}},{\"confirmationStatus\":\"finalized\",\"confirmations\":null,\"err\":{\"InstructionError\":[0,\"InvalidArgument\"]},\"slot\":464777808,\"status\":{\"Err\":{\"InstructionError\":[0,\"InvalidArgument\"]}}},null]},\"id\":1}\n"
+}

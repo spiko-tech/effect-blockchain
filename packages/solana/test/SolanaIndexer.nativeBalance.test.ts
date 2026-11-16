@@ -102,6 +102,8 @@ const fakeRpc = (options: {
       network: "Solana",
       getGenesisHash: Effect.die("unused"),
       getSlot: () => call("getSlot", () => state.head),
+      getBlockHeight: () => Effect.die("unused"),
+      getSignatureStatuses: () => Effect.die("unused"),
       getBalance: ({ address }) =>
         call("getBalance", () => {
           expect(address).toBe(ADDRESS)

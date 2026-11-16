@@ -16,6 +16,10 @@ const TX_V0 = "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRG
 const BINANCE = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
 // well-formed, never sent on chain
 const UNKNOWN_TX = "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDaGbNkYPhGMaFKaLwUMcnMnEHG77v"
+// a Raydium swap failing on its slippage check (`{ InstructionError: [1, { Custom: 30 }] }`)
+const FAILED_CUSTOM = "65AsgMptVkfYADN4Jv4Av1SJJAErag2FnDaYE8FJGzDAejiDyJr2JUawciHHUG5ApDX38U4w3kNW48cViH7sCWyd"
+// a BINANCE transaction failing in a native program (`{ InstructionError: [0, "InvalidArgument"] }`)
+const FAILED_NAMED = "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ"
 // far above the head for years
 const FUTURE_SLOT = 999_999_999_999
 
@@ -51,6 +55,14 @@ const cases: ReadonlyArray<Case> = [
     // Alchemy ignores `minContextSlot` here and answers: pinned like page 1 so that the reply stays the same
     params: [EUTBL, { before: BEFORE, until: UNTIL, limit: 5, ...finalized, minContextSlot: FUTURE_SLOT }]
   },
+  { name: "getBlockHeight", method: "getBlockHeight", params: [finalized] },
+  {
+    name: "getSignatureStatuses",
+    method: "getSignatureStatuses",
+    params: [[TX_1, FAILED_CUSTOM, FAILED_NAMED, UNKNOWN_TX], { searchTransactionHistory: true }]
+  },
+  // without the history, a transaction older than the node's status cache is unknown
+  { name: "getSignatureStatuses-recent", method: "getSignatureStatuses", params: [[TX_1], {}] },
   // Alchemy accepts a `limit` from 1 to 10000
   { name: "invalid-params", method: "getSignaturesForAddress", params: [EUTBL, { limit: 0, ...finalized }] },
   { name: "invalid-key", method: "getGenesisHash", params: [], invalidKey: true }

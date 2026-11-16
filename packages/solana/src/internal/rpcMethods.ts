@@ -100,6 +100,20 @@ const Meta = Schema.Struct({
   }))
 })
 
+// the node's `InstructionError` and `TransactionError` as serde writes them: a variant without data is its name, one
+// with data an object keyed by its name. Only the variants below are decoded, any other one is kept as raw JSON
+const InstructionError = Schema.Union([
+  Schema.String,
+  Schema.Struct({ Custom: NumberFromBigInt }),
+  Schema.Record(Schema.String, JsonFromRpc)
+])
+
+const TransactionError = Schema.Union([
+  Schema.String,
+  Schema.Struct({ InstructionError: Schema.Tuple([NumberFromBigInt, InstructionError]) }),
+  Schema.Record(Schema.String, JsonFromRpc)
+])
+
 const NoParams = Schema.Tuple([])
 
 const Commitment = Schema.Literals(["confirmed", "finalized"])
@@ -112,6 +126,32 @@ export const getSlot = make({
   name: "getSlot",
   params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
   result: Schema.BigInt
+})
+
+/** @internal */
+export const getBlockHeight = make({
+  name: "getBlockHeight",
+  params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
+  result: Schema.BigInt
+})
+
+/** @internal */
+export const getSignatureStatuses = make({
+  name: "getSignatureStatuses",
+  params: Schema.Tuple([
+    Schema.Array(SolanaTransactionHash),
+    Schema.Struct({ searchTransactionHistory: JsonRpc.optionalOmitted(Schema.Boolean) })
+  ]),
+  result: Schema.Struct({
+    context: Schema.Struct({ slot: Schema.BigInt }),
+    // `null` for a signature the endpoint does not know
+    value: Schema.Array(Schema.NullOr(Schema.Struct({
+      slot: Schema.BigInt,
+      confirmations: Schema.NullOr(NumberFromBigInt),
+      err: Schema.NullOr(TransactionError),
+      confirmationStatus: Schema.NullOr(Schema.Literals(["processed", "confirmed", "finalized"]))
+    })))
+  })
 })
 
 /** @internal */
