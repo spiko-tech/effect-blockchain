@@ -84,6 +84,23 @@ export const getEvents = make({
 })
 
 /** @internal */
+export const getTransactionStatus = make({
+  name: "starknet_getTransactionStatus",
+  params: Schema.Struct({ transaction_hash: StarknetTransactionHash }),
+  result: Schema.Struct({
+    finalityStatus: Schema.Literals(["RECEIVED", "CANDIDATE", "PRE_CONFIRMED", "ACCEPTED_ON_L2", "ACCEPTED_ON_L1"]),
+    executionStatus: Schema.optionalKey(Schema.Literals(["SUCCEEDED", "REVERTED"])),
+    failureReason: Schema.optionalKey(Schema.String)
+  }).pipe(
+    Schema.encodeKeys({
+      finalityStatus: "finality_status",
+      executionStatus: "execution_status",
+      failureReason: "failure_reason"
+    })
+  )
+})
+
+/** @internal */
 export const getTransactionReceipt = make({
   name: "starknet_getTransactionReceipt",
   params: Schema.Struct({ transaction_hash: StarknetTransactionHash }),

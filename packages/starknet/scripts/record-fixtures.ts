@@ -15,6 +15,8 @@ const STAKING = "0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e8
 // sn_keccak("balanceOf")
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
 const RECEIPT_TX = "0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab"
+// a transaction of block 1380308 that reverted
+const REVERTED_TX = "0x05ff253c51897e03ef74d58cdbd04e17f15932c5580cdd240d472eea63f8f08a"
 
 const events = (filter: { readonly [key: string]: Json }): Json => ({
   filter: {
@@ -82,7 +84,27 @@ const cases: ReadonlyArray<Case> = [
       block_id: { block_number: 1380308 }
     }
   },
-  { name: "invalid-key", method: "starknet_chainId", params: {}, invalidKey: true }
+  { name: "invalid-key", method: "starknet_chainId", params: {}, invalidKey: true },
+  {
+    name: "getTransactionStatus-succeeded",
+    method: "starknet_getTransactionStatus",
+    params: { transaction_hash: RECEIPT_TX }
+  },
+  {
+    name: "getTransactionStatus-reverted",
+    method: "starknet_getTransactionStatus",
+    params: { transaction_hash: REVERTED_TX }
+  },
+  {
+    name: "getTransactionReceipt-reverted",
+    method: "starknet_getTransactionReceipt",
+    params: { transaction_hash: REVERTED_TX }
+  },
+  {
+    name: "getTransactionStatus-not-found",
+    method: "starknet_getTransactionStatus",
+    params: { transaction_hash: "0x0000000000000000000000000000000000000000000000000000000000000001" }
+  }
 ]
 
 await record({

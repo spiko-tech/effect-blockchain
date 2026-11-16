@@ -151,6 +151,20 @@ export interface StarknetTransactionReceipt {
 }
 
 /**
+ * The `starknet_getTransactionStatus` result of the JSON-RPC spec v0.9. `executionStatus` is absent until the
+ * transaction is executed (`RECEIVED`, `CANDIDATE`), and `failureReason` is the node's revert message of a `REVERTED`
+ * transaction.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StarknetTransactionStatusResult {
+  readonly finalityStatus: "RECEIVED" | "CANDIDATE" | "PRE_CONFIRMED" | "ACCEPTED_ON_L2" | "ACCEPTED_ON_L1"
+  readonly executionStatus?: "SUCCEEDED" | "REVERTED" | undefined
+  readonly failureReason?: string | undefined
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -187,7 +201,16 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly getTransactionReceipt: (
     options: { readonly transactionHash: StarknetTransactionHash }
   ) => Effect.Effect<StarknetTransactionReceipt, StarknetRpcError>
+  /**
+   * `starknet_getTransactionStatus`, `null` when the last endpoint tried answers `TXN_HASH_NOT_FOUND` (29): an endpoint
+   * that does not know the transaction falls back to the next one first.
+   */
+  readonly getTransactionStatus: (
+    options: { readonly transactionHash: StarknetTransactionHash }
+  ) => Effect.Effect<StarknetTransactionStatusResult | null, StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
+
+const TXN_HASH_NOT_FOUND = 29
 
 // error codes from the Starknet JSON-RPC spec v0.9 (starknet_api_openrpc.json), plus the common provider ones
 const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
@@ -198,7 +221,7 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [429, "Unavailable"],
   // BLOCK_NOT_FOUND, TXN_HASH_NOT_FOUND: another endpoint may be further ahead
   [24, "Lagging"],
-  [29, "Lagging"]
+  [TXN_HASH_NOT_FOUND, "Lagging"]
 ])
 
 /**
@@ -327,6 +350,12 @@ export const layer = (options: {
         getTransactionReceipt: ({ transactionHash }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getTransactionReceipt, { transaction_hash: transactionHash })
+          ),
+        getTransactionStatus: ({ transactionHash }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getTransactionStatus, { transaction_hash: transactionHash })
+          ).pipe(
+            Effect.catchIf((error) => error.code === TXN_HASH_NOT_FOUND, () => Effect.succeed(null))
           )
       })
     })

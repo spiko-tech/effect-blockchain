@@ -30,6 +30,11 @@ export * as StarknetIndexer from "./StarknetIndexer.ts"
 export * as StarknetNetwork from "./StarknetNetwork.ts"
 
 /**
+ * @since 0.2.0
+ */
+export * as StarknetRelayer from "./StarknetRelayer.ts"
+
+/**
  * @since 0.1.0
  */
 export * as StarknetRpc from "./StarknetRpc.ts"
