@@ -1,10 +1,11 @@
 /**
- * Typed, read-only Starknet JSON-RPC methods over an ordered list of endpoints with fallback.
+ * Typed Starknet JSON-RPC methods over an ordered list of endpoints with fallback.
  *
  * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`starknet_chainId`). Every method is a read, so retries and
- * fallback are safe. Methods are named after the JSON-RPC method without its namespace (`starknet_getEvents` is
- * `getEvents`). A `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
+ * is checked once to serve the configured network (`starknet_chainId`). Every method but `addInvokeTransaction`
+ * and `addDeployAccountTransaction` is a read, so retries and fallback are safe; these two document their own case.
+ * Methods are named after the JSON-RPC method without its namespace (`starknet_getEvents` is `getEvents`). A
+ * `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
  *
  * @example
  * ```ts
@@ -47,6 +48,12 @@ import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetBlock } from "./StarknetBlock.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
+import type {
+  StarknetDeployAccountTransaction,
+  StarknetInvokeTransaction,
+  StarknetResourceBounds,
+  StarknetTransaction
+} from "./StarknetTransaction.ts"
 import type { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
 
 /**
@@ -165,6 +172,31 @@ export interface StarknetTransactionStatusResult {
 }
 
 /**
+ * The block a state read is made at: the latest accepted block, or the pre-confirmed block being built on top of it.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export type StarknetBlockTag = "latest" | "pre_confirmed"
+
+/**
+ * One `starknet_estimateFee` result: the amount of each resource a transaction consumes and its price, in FRI (10^-18
+ * STRK) per unit. `overallFee` is their total.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StarknetFeeEstimate {
+  readonly l1GasConsumed: bigint
+  readonly l1GasPrice: bigint
+  readonly l1DataGasConsumed: bigint
+  readonly l1DataGasPrice: bigint
+  readonly l2GasConsumed: bigint
+  readonly l2GasPrice: bigint
+  readonly overallFee: bigint
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -208,6 +240,52 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
   readonly getTransactionStatus: (
     options: { readonly transactionHash: StarknetTransactionHash }
   ) => Effect.Effect<StarknetTransactionStatusResult | null, StarknetRpcError>
+  /**
+   * `starknet_getNonce`: the nonce of the next transaction of the account at `address`. `pre_confirmed` counts the
+   * transactions of the block being built, not the ones still waiting in the mempool. An address without a contract
+   * is `Rejected` with the code 20 (`CONTRACT_NOT_FOUND`).
+   *
+   * @since 0.2.0
+   */
+  readonly getNonce: (options: {
+    readonly address: StarknetAddress
+    readonly blockTag: StarknetBlockTag
+  }) => Effect.Effect<bigint, StarknetRpcError>
+  /**
+   * `starknet_estimateFee`: one estimate per transaction, each executed on top of the previous ones at `blockTag`.
+   * `skipValidate` sends the `SKIP_VALIDATE` flag, which accepts unsigned transactions. A transaction that fails is
+   * `Rejected` with the code 41 (`TRANSACTION_EXECUTION_ERROR`) and the node's message in `cause`.
+   *
+   * @since 0.2.0
+   */
+  readonly estimateFee: (options: {
+    readonly transactions: ReadonlyArray<StarknetTransaction>
+    readonly skipValidate?: boolean | undefined
+    readonly blockTag: StarknetBlockTag
+  }) => Effect.Effect<ReadonlyArray<StarknetFeeEstimate>, StarknetRpcError>
+  /**
+   * `starknet_addInvokeTransaction`: submits a signed `INVOKE` transaction and returns its hash. A retry or a fallback
+   * sends the same transaction, so it never creates a second one, but a node that already has it refuses the second
+   * copy. A refusal (`DUPLICATE_TX`, `INVALID_TRANSACTION_NONCE`, `INSUFFICIENT_ACCOUNT_BALANCE`...) is `Rejected`,
+   * with the spec's error code as `code`.
+   *
+   * @since 0.2.0
+   */
+  readonly addInvokeTransaction: (options: {
+    readonly transaction: StarknetInvokeTransaction
+  }) => Effect.Effect<StarknetTransactionHash, StarknetRpcError>
+  /**
+   * `starknet_addDeployAccountTransaction`: submits a signed `DEPLOY_ACCOUNT` transaction and returns its hash and
+   * the address of the account. Retries, fallback and refusals are those of `addInvokeTransaction`.
+   *
+   * @since 0.2.0
+   */
+  readonly addDeployAccountTransaction: (options: {
+    readonly transaction: StarknetDeployAccountTransaction
+  }) => Effect.Effect<
+    { readonly transactionHash: StarknetTransactionHash; readonly contractAddress: StarknetAddress },
+    StarknetRpcError
+  >
 }>()("@effect-blockchain/starknet/StarknetRpc") {}
 
 const TXN_HASH_NOT_FOUND = 29
@@ -223,6 +301,42 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
   [24, "Lagging"],
   [TXN_HASH_NOT_FOUND, "Lagging"]
 ])
+
+const bound = (bound: StarknetResourceBounds["l1Gas"]) => ({
+  max_amount: bound.maxAmount,
+  max_price_per_unit: bound.maxPricePerUnit
+})
+
+const v3 = (transaction: StarknetTransaction) => ({
+  version: "0x3" as const,
+  signature: transaction.signature,
+  nonce: transaction.nonce,
+  resource_bounds: {
+    l1_gas: bound(transaction.resourceBounds.l1Gas),
+    l2_gas: bound(transaction.resourceBounds.l2Gas),
+    l1_data_gas: bound(transaction.resourceBounds.l1DataGas)
+  },
+  tip: transaction.tip,
+  paymaster_data: [] as const,
+  nonce_data_availability_mode: "L1" as const,
+  fee_data_availability_mode: "L1" as const
+})
+
+const invoke = (transaction: StarknetInvokeTransaction) => ({
+  type: transaction.type,
+  sender_address: transaction.senderAddress,
+  calldata: transaction.calldata,
+  account_deployment_data: [] as const,
+  ...v3(transaction)
+})
+
+const deployAccount = (transaction: StarknetDeployAccountTransaction) => ({
+  type: transaction.type,
+  class_hash: transaction.classHash,
+  contract_address_salt: transaction.contractAddressSalt,
+  constructor_calldata: transaction.constructorCalldata,
+  ...v3(transaction)
+})
 
 /**
  * Builds a {@link StarknetRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
@@ -356,6 +470,30 @@ export const layer = (options: {
             rpc.call(endpoint, RpcMethods.getTransactionStatus, { transaction_hash: transactionHash })
           ).pipe(
             Effect.catchIf((error) => error.code === TXN_HASH_NOT_FOUND, () => Effect.succeed(null))
+          ),
+        getNonce: ({ address, blockTag }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getNonce, { block_id: blockTag, contract_address: address })
+          ),
+        estimateFee: ({ blockTag, skipValidate, transactions }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.estimateFee, {
+              request: transactions.map((transaction) =>
+                transaction.type === "INVOKE" ? invoke(transaction) : deployAccount(transaction)
+              ),
+              simulation_flags: skipValidate === true ? ["SKIP_VALIDATE"] : [],
+              block_id: blockTag
+            })
+          ),
+        addInvokeTransaction: ({ transaction }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.addInvokeTransaction, { invoke_transaction: invoke(transaction) })
+          ).pipe(Effect.map(({ transactionHash }) => transactionHash)),
+        addDeployAccountTransaction: ({ transaction }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.addDeployAccountTransaction, {
+              deploy_account_transaction: deployAccount(transaction)
+            })
           )
       })
     })

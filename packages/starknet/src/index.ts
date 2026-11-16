@@ -40,6 +40,16 @@ export * as StarknetRelayer from "./StarknetRelayer.ts"
 export * as StarknetRpc from "./StarknetRpc.ts"
 
 /**
+ * @since 0.2.0
+ */
+export * as StarknetSigner from "./StarknetSigner.ts"
+
+/**
+ * @since 0.2.0
+ */
+export * as StarknetTransaction from "./StarknetTransaction.ts"
+
+/**
  * @since 0.1.0
  */
 export * as StarknetTransactionHash from "./StarknetTransactionHash.ts"

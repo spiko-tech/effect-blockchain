@@ -41,6 +41,10 @@ const setup = (initial: Node, options?: Parameters<typeof StarknetRelayer.layer>
       getBlockWithTxHashes: () => Effect.die("unused"),
       getEvents: () => Effect.die("unused"),
       call: () => Effect.die("unused"),
+      getNonce: () => Effect.die("unused"),
+      estimateFee: () => Effect.die("unused"),
+      addInvokeTransaction: () => Effect.die("unused"),
+      addDeployAccountTransaction: () => Effect.die("unused"),
       getTransactionStatus: () =>
         Effect.sync(() => {
           node.polls++

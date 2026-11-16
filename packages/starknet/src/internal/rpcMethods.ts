@@ -117,3 +117,96 @@ export const getTransactionReceipt = make({
     Schema.encodeKeys({ transactionHash: "transaction_hash", blockNumber: "block_number", blockHash: "block_hash" })
   )
 })
+
+// a felt holding an integer: a nonce, an amount of gas, a price
+const BigIntFromFelt = Schema.String.check(Schema.isPattern(/^0x[0-9a-fA-F]{1,64}$/)).pipe(
+  Schema.decodeTo(
+    Schema.BigInt,
+    SchemaTransformation.transform({ decode: BigInt, encode: (value) => `0x${value.toString(16)}` })
+  )
+)
+
+const BlockTag = Schema.Literals(["latest", "pre_confirmed"])
+
+const ResourceBound = Schema.Struct({ max_amount: BigIntFromFelt, max_price_per_unit: BigIntFromFelt })
+
+const v3 = {
+  version: Schema.Literal("0x3"),
+  signature: Schema.Array(Felt),
+  nonce: BigIntFromFelt,
+  resource_bounds: Schema.Struct({ l1_gas: ResourceBound, l2_gas: ResourceBound, l1_data_gas: ResourceBound }),
+  tip: BigIntFromFelt,
+  paymaster_data: Schema.Tuple([]),
+  nonce_data_availability_mode: Schema.Literal("L1"),
+  fee_data_availability_mode: Schema.Literal("L1")
+}
+
+const InvokeTransaction = Schema.Struct({
+  type: Schema.Literal("INVOKE"),
+  sender_address: StarknetAddress,
+  calldata: Schema.Array(Felt),
+  account_deployment_data: Schema.Tuple([]),
+  ...v3
+})
+
+const DeployAccountTransaction = Schema.Struct({
+  type: Schema.Literal("DEPLOY_ACCOUNT"),
+  class_hash: Felt,
+  contract_address_salt: Felt,
+  constructor_calldata: Schema.Array(Felt),
+  ...v3
+})
+
+/** @internal */
+export const getNonce = make({
+  name: "starknet_getNonce",
+  params: Schema.Struct({ block_id: BlockTag, contract_address: StarknetAddress }),
+  result: BigIntFromFelt
+})
+
+/** @internal */
+export const estimateFee = make({
+  name: "starknet_estimateFee",
+  params: Schema.Struct({
+    request: Schema.Array(Schema.Union([InvokeTransaction, DeployAccountTransaction])),
+    simulation_flags: Schema.Array(Schema.Literal("SKIP_VALIDATE")),
+    block_id: BlockTag
+  }),
+  result: Schema.Array(
+    Schema.Struct({
+      l1GasConsumed: BigIntFromFelt,
+      l1GasPrice: BigIntFromFelt,
+      l1DataGasConsumed: BigIntFromFelt,
+      l1DataGasPrice: BigIntFromFelt,
+      l2GasConsumed: BigIntFromFelt,
+      l2GasPrice: BigIntFromFelt,
+      overallFee: BigIntFromFelt
+    }).pipe(Schema.encodeKeys({
+      l1GasConsumed: "l1_gas_consumed",
+      l1GasPrice: "l1_gas_price",
+      l1DataGasConsumed: "l1_data_gas_consumed",
+      l1DataGasPrice: "l1_data_gas_price",
+      l2GasConsumed: "l2_gas_consumed",
+      l2GasPrice: "l2_gas_price",
+      overallFee: "overall_fee"
+    }))
+  )
+})
+
+/** @internal */
+export const addInvokeTransaction = make({
+  name: "starknet_addInvokeTransaction",
+  params: Schema.Struct({ invoke_transaction: InvokeTransaction }),
+  result: Schema.Struct({ transactionHash: StarknetTransactionHash }).pipe(
+    Schema.encodeKeys({ transactionHash: "transaction_hash" })
+  )
+})
+
+/** @internal */
+export const addDeployAccountTransaction = make({
+  name: "starknet_addDeployAccountTransaction",
+  params: Schema.Struct({ deploy_account_transaction: DeployAccountTransaction }),
+  result: Schema.Struct({ transactionHash: StarknetTransactionHash, contractAddress: StarknetAddress }).pipe(
+    Schema.encodeKeys({ transactionHash: "transaction_hash", contractAddress: "contract_address" })
+  )
+})

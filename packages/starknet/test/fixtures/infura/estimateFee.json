@@ -1,0 +1,53 @@
+{
+  "provider": "infura",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_estimateFee",
+    "params": {
+      "request": [
+        {
+          "type": "INVOKE",
+          "sender_address": "0x02d5ad99f66e018e2708e40c52724f04278cbee65ed74aa5b144a7f884f54d7b",
+          "calldata": [
+            "0x1",
+            "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+            "0x0083afd3f4caedc6eebf44246fe54e38c95e3179a5ec9ea81740eca5b482d12e",
+            "0x3",
+            "0x00ca1702e64c81d9a07b86bd2c540188d92a2c73cf5cc0e508d949015e7e84a7",
+            "0x0",
+            "0x0"
+          ],
+          "account_deployment_data": [],
+          "version": "0x3",
+          "signature": [],
+          "nonce": "0xaa",
+          "resource_bounds": {
+            "l1_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            },
+            "l2_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            },
+            "l1_data_gas": {
+              "max_amount": "0x0",
+              "max_price_per_unit": "0x0"
+            }
+          },
+          "tip": "0x0",
+          "paymaster_data": [],
+          "nonce_data_availability_mode": "L1",
+          "fee_data_availability_mode": "L1"
+        }
+      ],
+      "simulation_flags": [
+        "SKIP_VALIDATE"
+      ],
+      "block_id": "latest"
+    }
+  },
+  "status": 200,
+  "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":[{\"l1_data_gas_consumed\":\"0x80\",\"l1_data_gas_price\":\"0x57ba95a128\",\"l1_gas_consumed\":\"0x0\",\"l1_gas_price\":\"0x4b1b18675196\",\"l2_gas_consumed\":\"0x12df40\",\"l2_gas_price\":\"0x61c113212\",\"overall_fee\":\"0x73790ccefec680\",\"unit\":\"FRI\"}]}"
+}
