@@ -1,0 +1,13 @@
+{
+  "provider": "infura",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_getTransactionStatus",
+    "params": {
+      "transaction_hash": "0x0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  "status": 200,
+  "body": "{\"error\":{\"code\":29,\"message\":\"Transaction hash not found\"},\"id\":1,\"jsonrpc\":\"2.0\"}"
+}

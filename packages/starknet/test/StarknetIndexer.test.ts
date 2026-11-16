@@ -315,6 +315,7 @@ const fakeRpc = (
       chainId: Effect.die("unused"),
       getBlockWithTxHashes: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
+      getTransactionStatus: () => Effect.die("unused"),
       call: ({ blockNumber, calldata }) =>
         Effect.suspend(() => {
           state.samples.push(blockNumber)

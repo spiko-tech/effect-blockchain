@@ -1,5 +1,6 @@
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
+import * as StarknetRelayer from "@effect-blockchain/starknet/StarknetRelayer"
 import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
@@ -29,6 +30,7 @@ const replay = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
 // the pinned inputs of the recorder
 const EUTBL = StarknetAddress.make("0x04f5e0de717daa6aa8de63b1bf2e8d7823ec5b21a88461b1519d9dbc956fb7f2")
 const RECEIPT_TX = StarknetTransactionHash.make("0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab")
+const REVERTED_TX = StarknetTransactionHash.make("0x05ff253c51897e03ef74d58cdbd04e17f15932c5580cdd240d472eea63f8f08a")
 const PAGE2_TX = StarknetTransactionHash.make("0x02904089bcb25b52af0647bfdfa7032fe48da129d6c4c8b788c845949a9d6953")
 const filter = { address: EUTBL, fromBlock: BigInt(1380300), toBlock: BigInt(1380400), chunkSize: 5 }
 const TRANSFER = "0x0099cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9"
@@ -87,6 +89,43 @@ describe("StarknetRpc fixtures", () => {
         })
         expect(receipt.events[0]).toMatchObject({ fromAddress: EUTBL, data: [felt("0x5dcf7644f"), felt("0x0")] })
       })))
+
+    it.effect(`fixture: ${provider} getTransactionStatus`, () =>
+      Effect.gen(function*() {
+        const status = (name: string, transactionHash: StarknetTransactionHash) =>
+          replay([{ name: provider, cases: [...network, `getTransactionStatus-${name}`] }])((rpc) =>
+            rpc.getTransactionStatus({ transactionHash })
+          )
+        expect(yield* status("succeeded", RECEIPT_TX)).toStrictEqual({
+          finalityStatus: "ACCEPTED_ON_L1",
+          executionStatus: "SUCCEEDED"
+        })
+        expect(yield* status("reverted", REVERTED_TX)).toMatchObject({
+          finalityStatus: "ACCEPTED_ON_L1",
+          executionStatus: "REVERTED",
+          failureReason: expect.stringContaining("Transaction execution has failed")
+        })
+        expect(yield* status("not-found", StarknetTransactionHash.make(felt("0x1")))).toBeNull()
+      }))
+
+    it.effect(`fixture: ${provider} StarknetRelayer reports the reverted transaction as Failed`, () =>
+      replay([{
+        name: provider,
+        cases: [...network, "getTransactionStatus-reverted", "getTransactionReceipt-reverted"]
+      }])((rpc) =>
+        Effect.gen(function*() {
+          const relayer = yield* StarknetRelayer.StarknetRelayer
+          return yield* relayer.fetchTransactionStatus({ hash: REVERTED_TX })
+        }).pipe(
+          Effect.provide(StarknetRelayer.layer().pipe(Layer.provide(Layer.succeed(StarknetRpc.StarknetRpc, rpc))))
+        )
+      ).pipe(Effect.map((status) =>
+        expect(status).toMatchObject({
+          _tag: "Failed",
+          block: BigInt(1380308),
+          reason: expect.stringContaining("Transaction execution has failed")
+        })
+      )))
 
     it.effect(`fixture: ${provider} getBlockWithTxHashes`, () =>
       replay([{ name: provider, cases: [...network, "getBlockWithTxHashes"] }])((rpc) =>

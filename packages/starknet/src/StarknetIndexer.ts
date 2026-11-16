@@ -65,6 +65,7 @@ import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
+import * as Confirmations from "./internal/confirmations.ts"
 import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
@@ -226,10 +227,8 @@ export const layer = (options: {
       if (!Number.isSafeInteger(maxBlockRange) || maxBlockRange < 1) {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
-      const confirmations = BigInt(options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network))
       const size = BigInt(maxBlockRange)
-      const lastConfirmedBlock = rpc.blockNumber.pipe(
-        Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0))),
+      const lastConfirmedBlock = Confirmations.lastConfirmedBlock(rpc, options.confirmations).pipe(
         Effect.withSpan("StarknetIndexer.lastConfirmedBlock")
       )
       const fetchEvents = Effect.fn("StarknetIndexer.fetchEvents")((filter: StarknetIndexerFilter) =>

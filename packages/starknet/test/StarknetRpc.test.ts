@@ -123,6 +123,41 @@ describe("StarknetRpc", () => {
     )
   })
 
+  it.effect("getTransactionStatus decodes the status and falls back past an endpoint without the transaction", () => {
+    const notFound = () => ({ error: { code: 29, message: "Transaction hash not found" } })
+    const known = setup({
+      a: { starknet_getTransactionStatus: notFound },
+      b: {
+        starknet_getTransactionStatus: () => ({
+          result: { finality_status: "ACCEPTED_ON_L2", execution_status: "REVERTED", failure_reason: "out of gas" }
+        })
+      }
+    })
+    const received = setup({
+      a: { starknet_getTransactionStatus: () => ({ result: { finality_status: "RECEIVED" } }) }
+    })
+    const unknown = setup({
+      a: { starknet_getTransactionStatus: notFound },
+      b: {
+        starknet_getTransactionStatus: notFound
+      }
+    })
+    // the last endpoint failing otherwise is an error, not an unknown transaction
+    const failing = setup({ a: { starknet_getTransactionStatus: notFound }, b: {} })
+    const status = (rpc: StarknetRpc.StarknetRpc["Service"]) => rpc.getTransactionStatus({ transactionHash: TX })
+    return Effect.gen(function*() {
+      expect(yield* known.run(status)).toStrictEqual({
+        finalityStatus: "ACCEPTED_ON_L2",
+        executionStatus: "REVERTED",
+        failureReason: "out of gas"
+      })
+      expect(known.calls.filter((call) => call.endsWith("starknet_getTransactionStatus"))).toHaveLength(2)
+      expect(yield* received.run(status)).toStrictEqual({ finalityStatus: "RECEIVED" })
+      expect(yield* unknown.run(status)).toBeNull()
+      expect(yield* Effect.flip(failing.run(status))).toMatchObject({ reason: { _tag: "Rejected" }, code: -32601 })
+    })
+  })
+
   it.effect("encodes getEvents params by name", () => {
     let params: Schema.Json = null
     const { run } = setup({

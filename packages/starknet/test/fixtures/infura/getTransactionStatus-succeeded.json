@@ -1,0 +1,13 @@
+{
+  "provider": "infura",
+  "network": "Starknet",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "starknet_getTransactionStatus",
+    "params": {
+      "transaction_hash": "0x02aa671ff923b87808ec822766994ed10fd5720d7441798a96fbd770c0b7e9ab"
+    }
+  },
+  "status": 200,
+  "body": "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"execution_status\":\"SUCCEEDED\",\"finality_status\":\"ACCEPTED_ON_L1\"}}"
+}
