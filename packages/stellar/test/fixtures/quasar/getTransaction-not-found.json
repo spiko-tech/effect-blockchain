@@ -1,0 +1,13 @@
+{
+  "provider": "quasar",
+  "network": "Stellar",
+  "recordedAt": "2026-11-16",
+  "request": {
+    "method": "getTransaction",
+    "params": {
+      "hash": "abababababababababababababababababababababababababababababababab"
+    }
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"latestLedger\":65509517,\"latestLedgerCloseTime\":\"1794833627\",\"oldestLedger\":65388558,\"oldestLedgerCloseTime\":\"1794228832\",\"status\":\"NOT_FOUND\",\"txHash\":\"abababababababababababababababababababababababababababababababab\",\"applicationOrder\":0,\"feeBump\":false,\"events\":{},\"ledger\":0,\"createdAt\":\"0\"}}"
+}

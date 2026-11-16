@@ -41,6 +41,7 @@ import * as RpcMethods from "./internal/rpcMethods.ts"
 import type { StellarContractAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
+import type { StellarTransactionHash } from "./StellarTransactionHash.ts"
 
 /**
  * A Stellar RPC endpoint. The `name` is shown in errors and spans and routes cursors, so it must be unique; the `url`
@@ -178,6 +179,29 @@ export interface StellarLedgerEntry {
 }
 
 /**
+ * A `getTransaction` reply, with the ledger range the endpoint holds transactions for. A transaction in a ledger has
+ * its `ledger`, its close time `createdAt` in unix seconds, its `applicationOrder` in the ledger and its envelope,
+ * result and meta as base64 XDR, left undecoded. `FAILED` is in a ledger too: its operations had no effect.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export type StellarTransactionInfo =
+  | { readonly status: "NOT_FOUND"; readonly latestLedger: bigint; readonly oldestLedger: bigint }
+  | {
+    readonly status: "SUCCESS" | "FAILED"
+    readonly latestLedger: bigint
+    readonly oldestLedger: bigint
+    readonly ledger: bigint
+    readonly createdAt: number
+    readonly applicationOrder: number
+    readonly feeBump: boolean
+    readonly envelopeXdr: string
+    readonly resultXdr: string
+    readonly resultMetaXdr: string
+  }
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -219,6 +243,14 @@ export class StellarRpc extends Context.Service<StellarRpc, {
     { readonly entries: ReadonlyArray<StellarLedgerEntry>; readonly latestLedger: bigint },
     StellarRpcError
   >
+  /**
+   * `getTransaction`: the transaction `hash` as the answering endpoint has it. An endpoint only holds the transactions
+   * of the ledgers it retains, from `oldestLedger` on: an older transaction is `NOT_FOUND`, like one that was never
+   * applied. `NOT_FOUND` is an answer, with no fallback to the next endpoint.
+   */
+  readonly getTransaction: (options: {
+    readonly hash: StellarTransactionHash
+  }) => Effect.Effect<StellarTransactionInfo, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarRpc") {}
 
 // JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures, retry then fall back
@@ -413,6 +445,12 @@ export const layer = (options: {
                   ))
                   : Effect.succeed({ entries, latestLedger })
               )
+            )
+          ),
+        getTransaction: ({ hash }) =>
+          withFallback((endpoint) =>
+            call(endpoint, RpcMethods.getTransaction, { hash: hash.slice(2) }).pipe(
+              Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
             )
           ),
         getEvents: (filter) => {
