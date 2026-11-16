@@ -84,3 +84,27 @@ export const getLedgerEntries = make({
     latestLedger: LedgerFromNumber
   })
 })
+
+const ledgerRange = { latestLedger: LedgerFromNumber, oldestLedger: LedgerFromNumber }
+
+/** @internal */
+export const getTransaction = make({
+  name: "getTransaction",
+  // 64 hexadecimal characters: the RPC refuses a `0x` prefix
+  params: Schema.Struct({ hash: Schema.String }),
+  result: Schema.Union([
+    // stellar-rpc fills the other fields with zero values
+    Schema.Struct({ status: Schema.Literal("NOT_FOUND"), ...ledgerRange }),
+    Schema.Struct({
+      status: Schema.Literals(["SUCCESS", "FAILED"]),
+      ...ledgerRange,
+      ledger: LedgerFromNumber,
+      createdAt: Schema.FiniteFromString,
+      applicationOrder: Schema.Int,
+      feeBump: Schema.Boolean,
+      envelopeXdr: Schema.String,
+      resultXdr: Schema.String,
+      resultMetaXdr: Schema.String
+    })
+  ])
+})

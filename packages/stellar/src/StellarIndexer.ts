@@ -67,9 +67,9 @@ import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import { accountChange } from "./internal/accountChange.ts"
+import * as Confirmations from "./internal/confirmations.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
-import * as StellarNetwork from "./StellarNetwork.ts"
 import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
 import { StellarRpc } from "./StellarRpc.ts"
 
@@ -233,7 +233,7 @@ interface StreamPosition {
 /**
  * Builds a {@link StellarIndexer} over the provided {@link StellarRpc}.
  *
- * - `confirmations`: ledgers kept behind the latest one, default {@link StellarNetwork.defaultConfirmations} of the
+ * - `confirmations`: ledgers kept behind the latest one, default `StellarNetwork.defaultConfirmations` of the
  *   RPC's network.
  * - `maxBlockRange`: ledgers per range, a positive integer, default {@link DEFAULT_MAX_BLOCK_RANGE}.
  * - `limit`: `getEvents` page size, default 1000, at most 10000.
@@ -254,12 +254,11 @@ export const layer = (options: {
       if (!Number.isSafeInteger(maxBlockRange) || maxBlockRange < 1) {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
-      const confirmations = BigInt(options.confirmations ?? StellarNetwork.defaultConfirmations(rpc.network))
       const range = BigInt(maxBlockRange)
       const { limit } = options
 
       const lastConfirmedBlock = rpc.getLatestLedger.pipe(
-        Effect.map((ledger) => BigInt_.max(ledger.sequence - confirmations, BigInt(0))),
+        Effect.map((ledger) => Confirmations.lastConfirmedBlock(rpc.network, options.confirmations, ledger.sequence)),
         Effect.withSpan("StellarIndexer.lastConfirmedBlock")
       )
       const fetchEvents = Effect.fn("StellarIndexer.fetchEvents")((filter: StellarIndexerFilter) => {

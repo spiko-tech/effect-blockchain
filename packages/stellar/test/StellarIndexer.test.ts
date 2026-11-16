@@ -356,6 +356,7 @@ const fakeRpc = (
       getNetwork: Effect.die("unused"),
       getLedgers: () => Effect.die("unused"),
       getLedgerEntries: () => Effect.die("unused"),
+      getTransaction: () => Effect.die("unused"),
       getLatestLedger: Effect.suspend(() => {
         const reason = headFailAt.get(++state.heads)
         return reason === undefined

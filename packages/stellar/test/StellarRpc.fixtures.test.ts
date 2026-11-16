@@ -3,6 +3,7 @@ import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StellarAccountAddress, StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
+import { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { xdr } from "@stellar/stellar-sdk"
 import type * as Arr from "effect/Array"
@@ -206,6 +207,34 @@ describe("StellarRpc fixtures", () => {
         reason: { _tag: "Lagging", head: BigInt(65338915), toBlock: BigInt(999999990) },
         code: -32600
       })
+    }))
+
+  it.effect("fixture: quasar getTransaction of a successful, a failed and an unknown transaction", () =>
+    Effect.gen(function*() {
+      const hashes = [
+        "8ed811d0439b12fd5f4a2ebd043138079c46a82c9d51544fecb5379bbaf48505",
+        "b1301e5ba2c2b35c9485cd8369f4c258d65666cf270cc3f2f9c03b72dded2059",
+        "ab".repeat(32)
+      ].map((hex) => StellarTransactionHash.make(`0x${hex}`))
+      const [success, failed, unknown] = yield* setup([{
+        name: "quasar",
+        cases: ["getNetwork", "getTransaction-success", "getTransaction-failed", "getTransaction-not-found"]
+      }])((rpc) => Effect.forEach(hashes, (hash) => rpc.getTransaction({ hash })))
+      const range = { latestLedger: BigInt(65509517), oldestLedger: BigInt(65388558) }
+      expect(success).toMatchObject({
+        status: "SUCCESS",
+        ...range,
+        ledger: BigInt(65509458),
+        createdAt: 1794833332,
+        applicationOrder: 79,
+        feeBump: false,
+        resultXdr: "AAAAAAAAAGQAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAA="
+      })
+      assert(success.status === "SUCCESS")
+      assert.lengthOf(success.envelopeXdr, 316)
+      assert.lengthOf(success.resultMetaXdr, 888)
+      expect(failed).toMatchObject({ status: "FAILED", ...range, ledger: BigInt(65509460), applicationOrder: 1 })
+      assert.deepStrictEqual(unknown, { status: "NOT_FOUND", ...range })
     }))
 
   it.effect("fixture: quasar invalid key", () =>

@@ -29,6 +29,16 @@ const MISSING = "GD7777777777777777777777777777777777777777777777777773DB"
 const V0_LEDGER = 30000002
 const V1_LEDGER = 55000004
 
+// transactions of ledgers 65509458 to 65509460, which Stellar RPC only serves for about 7 days: a payment, a failed
+// transaction of four operations, a fee bump whose inner transaction failed, and a hash no transaction has. To record
+// them again, pick recent ones with `getTransactions` and update the values the tests assert.
+const transactions = {
+  "success": "8ed811d0439b12fd5f4a2ebd043138079c46a82c9d51544fecb5379bbaf48505",
+  "failed": "b1301e5ba2c2b35c9485cd8369f4c258d65666cf270cc3f2f9c03b72dded2059",
+  "failed-fee-bump": "f575e03ba3b857e660410be887643c78932a5cbb3be80050ef0bd0949d0fdbaf",
+  "not-found": "ab".repeat(32)
+}
+
 const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
     .toXDR("base64")
@@ -90,7 +100,12 @@ const cases: ReadonlyArray<Case> = [
       ledgers(JSON.parse(replies.get("getLedgerEntries-binance") ?? "").result.entries[0].lastModifiedLedgerSeq)
   },
   { name: "getLedgers-pruned", method: "getLedgers", params: ledgers(V1_LEDGER) },
-  { name: "getLedgers-lagging", method: "getLedgers", params: ledgers(FUTURE_LEDGER) }
+  { name: "getLedgers-lagging", method: "getLedgers", params: ledgers(FUTURE_LEDGER) },
+  ...Object.entries(transactions).map(([name, hash]) => ({
+    name: `getTransaction-${name}`,
+    method: "getTransaction",
+    params: { hash }
+  }))
 ]
 
 const archiveCases: ReadonlyArray<Case> = [

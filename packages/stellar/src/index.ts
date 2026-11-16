@@ -25,6 +25,11 @@ export * as StellarIndexer from "./StellarIndexer.ts"
 export * as StellarNetwork from "./StellarNetwork.ts"
 
 /**
+ * @since 0.2.0
+ */
+export * as StellarRelayer from "./StellarRelayer.ts"
+
+/**
  * @since 0.1.0
  */
 export * as StellarRpc from "./StellarRpc.ts"
