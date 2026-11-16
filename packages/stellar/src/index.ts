@@ -35,6 +35,11 @@ export * as StellarRelayer from "./StellarRelayer.ts"
 export * as StellarRpc from "./StellarRpc.ts"
 
 /**
+ * @since 0.2.0
+ */
+export * as StellarSigner from "./StellarSigner.ts"
+
+/**
  * @since 0.1.0
  */
 export * as StellarTransactionHash from "./StellarTransactionHash.ts"

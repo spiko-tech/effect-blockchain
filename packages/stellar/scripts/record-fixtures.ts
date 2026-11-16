@@ -90,6 +90,7 @@ const cases: ReadonlyArray<Case> = [
     params: range(startLedger, endLedger, [EUTBL], 20000)
   },
   { name: "invalid-key", method: "getNetwork", invalidKey: true },
+  { name: "getFeeStats", method: "getFeeStats" },
   { name: "getLedgerEntries-binance", method: "getLedgerEntries", params: { keys: [accountKey(BINANCE)] } },
   { name: "getLedgerEntries-missing", method: "getLedgerEntries", params: { keys: [accountKey(MISSING)] } },
   // the ledger of Binance's last change, about 2 MB

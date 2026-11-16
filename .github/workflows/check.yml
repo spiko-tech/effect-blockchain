@@ -76,3 +76,23 @@ jobs:
         run: pnpm vitest run packages/evm/test/EvmRelayer.anvil.test.ts
         env:
           ANVIL_RPC_URL: http://127.0.0.1:8545
+
+  stellar-quickstart:
+    name: Stellar quickstart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup
+      - name: Start quickstart
+        run: |
+          docker run -d -p 8000:8000 stellar/quickstart:v693-b1627.1-latest --local --enable rpc
+          health='{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+          timeout 180 bash -c "until curl -sf -H 'content-type: application/json' -d '$health' http://127.0.0.1:8000/rpc | grep -q healthy; do sleep 2; done"
+          # friendbot starts after the RPC: fund an account nobody holds the key of
+          timeout 60 bash -c 'until curl -sf "http://127.0.0.1:8000/friendbot?addr=GD7777777777777777777777777777777777777777777777777773DB"; do sleep 2; done'
+      - name: Test
+        run: pnpm vitest run packages/stellar/test/StellarRelayer.quickstart.test.ts
+        env:
+          QUICKSTART_RPC_URL: http://127.0.0.1:8000/rpc

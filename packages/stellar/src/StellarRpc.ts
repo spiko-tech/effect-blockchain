@@ -1,10 +1,10 @@
 /**
- * Typed, read-only Stellar RPC methods over an ordered list of endpoints with fallback.
+ * Typed Stellar RPC methods over an ordered list of endpoints with fallback.
  *
  * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`getNetwork` passphrase). Every method is a read, so retries and
- * fallback are safe. Methods are named after the RPC method. A `getEvents` page cursor is only sent to the endpoint
- * that issued it, with no fallback.
+ * is checked once to serve the configured network (`getNetwork` passphrase). Every method is a read, except
+ * `sendTransaction`, which a node answers `DUPLICATE` the second time: retries and fallback are safe. Methods are
+ * named after the RPC method. A `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
  *
  * @example
  * ```ts
@@ -202,6 +202,60 @@ export type StellarTransactionInfo =
   }
 
 /**
+ * The distribution of the inclusion fees of recent transactions, in stroops per operation, over the last `ledgerCount`
+ * ledgers. Every fee is 0 when they hold no transaction of the kind (`transactionCount` 0).
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarFeeDistribution {
+  readonly max: bigint
+  readonly min: bigint
+  readonly mode: bigint
+  readonly p10: bigint
+  readonly p20: bigint
+  readonly p30: bigint
+  readonly p40: bigint
+  readonly p50: bigint
+  readonly p60: bigint
+  readonly p70: bigint
+  readonly p80: bigint
+  readonly p90: bigint
+  readonly p95: bigint
+  readonly p99: bigint
+  readonly transactionCount: number
+  readonly ledgerCount: number
+}
+
+/**
+ * A `getFeeStats` reply: the inclusion fees of classic transactions and of Soroban transactions, which compete for
+ * separate ledger space.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarFeeStats {
+  readonly inclusionFee: StellarFeeDistribution
+  readonly sorobanInclusionFee: StellarFeeDistribution
+  readonly latestLedger: bigint
+}
+
+/**
+ * A `sendTransaction` reply. `PENDING` is accepted for a later ledger, `DUPLICATE` already held by the node, and
+ * `TRY_AGAIN_LATER` not taken: neither says how the transaction ends. `ERROR` is refused, with the base64
+ * `TransactionResult` XDR saying why.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarSentTransaction {
+  readonly status: "PENDING" | "DUPLICATE" | "TRY_AGAIN_LATER" | "ERROR"
+  readonly hash: StellarTransactionHash
+  readonly latestLedger: bigint
+  readonly errorResultXdr?: string
+}
+
+/**
  * @since 0.1.0
  * @category services
  */
@@ -251,6 +305,15 @@ export class StellarRpc extends Context.Service<StellarRpc, {
   readonly getTransaction: (options: {
     readonly hash: StellarTransactionHash
   }) => Effect.Effect<StellarTransactionInfo, StellarRpcError>
+  /** `getFeeStats` */
+  readonly getFeeStats: Effect.Effect<StellarFeeStats, StellarRpcError>
+  /**
+   * `sendTransaction`: submits the base64 `TransactionEnvelope` XDR `transaction`. Every status is an answer, with no
+   * fallback to the next endpoint: read {@link StellarSentTransaction}.
+   */
+  readonly sendTransaction: (options: {
+    readonly transaction: string
+  }) => Effect.Effect<StellarSentTransaction, StellarRpcError>
 }>()("@effect-blockchain/stellar/StellarRpc") {}
 
 // JSON-RPC internal error: stellar-rpc returns it for its own database or I/O failures, retry then fall back
@@ -450,6 +513,17 @@ export const layer = (options: {
         getTransaction: ({ hash }) =>
           withFallback((endpoint) =>
             call(endpoint, RpcMethods.getTransaction, { hash: hash.slice(2) }).pipe(
+              Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
+            )
+          ),
+        getFeeStats: withFallback((endpoint) =>
+          call(endpoint, RpcMethods.getFeeStats, undefined).pipe(
+            Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
+          )
+        ),
+        sendTransaction: (options) =>
+          withFallback((endpoint) =>
+            call(endpoint, RpcMethods.sendTransaction, options).pipe(
               Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
             )
           ),

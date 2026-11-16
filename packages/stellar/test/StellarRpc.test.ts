@@ -459,6 +459,31 @@ describe("StellarRpc", () => {
     }))
   })
 
+  it.effect("sends sendTransaction and reads each status", () => {
+    const params: Array<Params | undefined> = []
+    const replies = [
+      { status: "PENDING", hash: TX_HASH, latestLedger: 9, latestLedgerCloseTime: "1700000000" },
+      { status: "ERROR", hash: TX_HASH, latestLedger: 9, errorResultXdr: "AAAA", diagnosticEventsXdr: ["AAAA"] }
+    ]
+    const { run } = setup({
+      a: {
+        sendTransaction: (p) => {
+          params.push(p)
+          return { result: replies[params.length - 1] }
+        }
+      }
+    })
+    const send = run((rpc) => rpc.sendTransaction({ transaction: "envelope" }))
+    return Effect.all([send, send], { concurrency: 1 }).pipe(Effect.map((sent) => {
+      const reply = { hash: `0x${TX_HASH}`, latestLedger: BigInt(9) }
+      expect(sent).toStrictEqual([
+        { status: "PENDING", ...reply },
+        { status: "ERROR", ...reply, errorResultXdr: "AAAA" }
+      ])
+      expect(params).toStrictEqual([{ transaction: "envelope" }, { transaction: "envelope" }])
+    }))
+  })
+
   it.effect("makes no call for an empty range", () => {
     const { calls, run } = setup({ a: {} })
     const empty = { ...filter, fromBlock: BigInt(21) }

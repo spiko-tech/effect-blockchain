@@ -12,10 +12,12 @@ import * as Schema from "effect/Schema"
 export const mainnets = ["Stellar"] as const
 
 /**
+ * `StellarStandalone` is a local network with the passphrase of `stellar/quickstart --local`.
+ *
  * @since 0.1.0
  * @category constants
  */
-export const testnets = ["StellarTestnet"] as const
+export const testnets = ["StellarTestnet", "StellarStandalone"] as const
 
 /**
  * Every supported network, mainnets first.
@@ -26,7 +28,7 @@ export const testnets = ["StellarTestnet"] as const
 export const networks = [...mainnets, ...testnets] as const
 
 /**
- * A named Stellar network: `Stellar` (public mainnet) or `StellarTestnet`.
+ * A named Stellar network: `Stellar` (public mainnet), `StellarTestnet` or `StellarStandalone` (a local network).
  *
  * @since 0.1.0
  * @category schemas
@@ -43,10 +45,11 @@ export const StellarNetwork = Schema.Literals(networks).annotate({
  */
 export type StellarNetwork = typeof StellarNetwork.Type
 
-// same values as `Networks.PUBLIC` / `Networks.TESTNET` in `@stellar/stellar-sdk`
+// same values as `Networks.PUBLIC` / `Networks.TESTNET` / `Networks.STANDALONE` in `@stellar/stellar-sdk`
 const passphrases: Record<StellarNetwork, string> = {
   Stellar: "Public Global Stellar Network ; September 2015",
-  StellarTestnet: "Test SDF Network ; September 2015"
+  StellarTestnet: "Test SDF Network ; September 2015",
+  StellarStandalone: "Standalone Network ; February 2017"
 }
 
 /**
@@ -62,7 +65,8 @@ const confirmations: Record<StellarNetwork, number> = {
   // https://developers.stellar.org/docs/learn/fundamentals/stellar-consensus-protocol
   Stellar: 0,
   // same consensus as mainnet (testnet resets wipe all history, they do not reorganise closed ledgers)
-  StellarTestnet: 0
+  StellarTestnet: 0,
+  StellarStandalone: 0
 }
 
 /**
