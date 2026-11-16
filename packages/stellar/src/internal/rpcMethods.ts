@@ -130,6 +130,24 @@ export const sendTransaction = make({
   })
 })
 
+/** @internal */
+export const simulateTransaction = make({
+  name: "simulateTransaction",
+  params: Schema.Struct({ transaction: Schema.String }),
+  result: Schema.Union([
+    Schema.Struct({ error: Schema.String, latestLedger: LedgerFromNumber }),
+    Schema.Struct({
+      transactionData: Schema.String,
+      minResourceFee: Schema.BigIntFromString,
+      // absent for the operations that return nothing: `extendFootprintTtl` and `restoreFootprint`
+      results: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ auth: Schema.Array(Schema.String), xdr: Schema.String }))
+      ),
+      latestLedger: LedgerFromNumber
+    })
+  ])
+})
+
 const ledgerRange = { latestLedger: LedgerFromNumber, oldestLedger: LedgerFromNumber }
 
 /** @internal */

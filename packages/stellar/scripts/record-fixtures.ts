@@ -5,7 +5,7 @@
 //
 // Stellar RPC only keeps about 7 days of ledgers, so the pinned range falls out of the retention window: pass a recent
 // `startLedger` (a ledger with EUTBL and USTBL events) to move it, then update the values the tests assert.
-import { Keypair, xdr } from "@stellar/stellar-sdk"
+import { Account, Keypair, Networks, Operation, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
 import { type Case, record, secret } from "../../core/scripts/recordFixtures.ts"
 
 // tokenized fund tokens
@@ -42,6 +42,15 @@ const transactions = {
 const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
     .toXDR("base64")
+// an unsigned call of an EUTBL function from Binance's account: a simulation checks neither signature nor sequence
+const simulation = (name: string) => ({
+  transaction: new TransactionBuilder(new Account(BINANCE, "0"), { fee: "100", networkPassphrase: Networks.PUBLIC })
+    .addOperation(Operation.invokeContractFunction({ contract: EUTBL, function: name, args: [] }))
+    .setTimeout(0)
+    .build()
+    .toEnvelope()
+    .toXDR("base64")
+})
 const ledgers = (startLedger: number) => ({ startLedger, pagination: { limit: 1 } })
 
 const contract = (contractIds: ReadonlyArray<string>) => [{ type: "contract", contractIds }]
@@ -91,6 +100,8 @@ const cases: ReadonlyArray<Case> = [
   },
   { name: "invalid-key", method: "getNetwork", invalidKey: true },
   { name: "getFeeStats", method: "getFeeStats" },
+  { name: "simulateTransaction-decimals", method: "simulateTransaction", params: simulation("decimals") },
+  { name: "simulateTransaction-error", method: "simulateTransaction", params: simulation("missing") },
   { name: "getLedgerEntries-binance", method: "getLedgerEntries", params: { keys: [accountKey(BINANCE)] } },
   { name: "getLedgerEntries-missing", method: "getLedgerEntries", params: { keys: [accountKey(MISSING)] } },
   // the ledger of Binance's last change, about 2 MB

@@ -6,7 +6,7 @@ import { defaultFees } from "@effect-blockchain/stellar/StellarRelayer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
-import { xdr } from "@stellar/stellar-sdk"
+import { Account, Networks, Operation, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
 import type * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
@@ -41,6 +41,15 @@ const setup = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
 }
 
 const quasarCursor = (cursor: string) => StellarRpc.StellarEventsCursor.make({ endpoint: "quasar", cursor })
+
+const simulation = (name: string) => ({
+  transaction: new TransactionBuilder(new Account(BINANCE, "0"), { fee: "100", networkPassphrase: Networks.PUBLIC })
+    .addOperation(Operation.invokeContractFunction({ contract: EUTBL, function: name, args: [] }))
+    .setTimeout(0)
+    .build()
+    .toEnvelope()
+    .toXDR("base64")
+})
 
 const eutbl = { contractIds: [EUTBL], fromBlock: FROM, toBlock: TO, limit: 3 } as const
 
@@ -262,6 +271,28 @@ describe("StellarRpc fixtures", () => {
       expect(stats.sorobanInclusionFee).toMatchObject({ max: BigInt(114406), p99: BigInt(57203), ledgerCount: 50 })
       expect(stats.latestLedger).toBe(BigInt(65511132))
       expect(defaultFees(stats.inclusionFee)).toBe(BigInt(200))
+    }))
+
+  // the unsigned calls of `scripts/record-fixtures.ts`
+  it.effect("fixture: quasar simulateTransaction of a call that runs and of one that fails", () =>
+    Effect.gen(function*() {
+      const [decimals, missing] = yield* setup([{
+        name: "quasar",
+        cases: ["getNetwork", "simulateTransaction-decimals", "simulateTransaction-error"]
+      }])((rpc) =>
+        Effect.all([rpc.simulateTransaction(simulation("decimals")), rpc.simulateTransaction(simulation("missing"))])
+      )
+      assert(!("error" in decimals))
+      assert.strictEqual(decimals.minResourceFee, BigInt(6343))
+      assert.strictEqual(decimals.latestLedger, BigInt(65511453))
+      // U32(5), with no authorization entry
+      assert.deepStrictEqual(decimals.results, [{ auth: [], xdr: "AAAAAwAAAAU=" }])
+      assert.strictEqual(
+        xdr.SorobanTransactionData.fromXDR(decimals.transactionData, "base64").resourceFee().toString(),
+        "6343"
+      )
+      assert("error" in missing)
+      assert.match(missing.error, /^HostError: Error\(WasmVm, MissingValue\)/u)
     }))
 
   it.effect("fixture: quasar invalid key", () =>

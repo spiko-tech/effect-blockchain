@@ -25,6 +25,7 @@
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import { TransactionBuilder } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
@@ -241,6 +242,24 @@ export interface StellarFeeStats {
 }
 
 /**
+ * A `simulateTransaction` reply. A Soroban transaction that would run has its `transactionData` (the base64
+ * `SorobanTransactionData` XDR holding its footprint and resources), its `minResourceFee` in stroops and, for an
+ * invocation, its `results`: the base64 `SorobanAuthorizationEntry` XDRs it needs as `auth` and its return value as
+ * `xdr`. One that would not has the node's `error`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export type StellarSimulation =
+  | { readonly error: string; readonly latestLedger: bigint }
+  | {
+    readonly transactionData: string
+    readonly minResourceFee: bigint
+    readonly results?: ReadonlyArray<{ readonly auth: ReadonlyArray<string>; readonly xdr: string }>
+    readonly latestLedger: bigint
+  }
+
+/**
  * A `sendTransaction` reply. `PENDING` is accepted for a later ledger, `DUPLICATE` already held by the node, and
  * `TRY_AGAIN_LATER` not taken: neither says how the transaction ends. `ERROR` is refused, with the base64
  * `TransactionResult` XDR saying why.
@@ -308,8 +327,16 @@ export class StellarRpc extends Context.Service<StellarRpc, {
   /** `getFeeStats` */
   readonly getFeeStats: Effect.Effect<StellarFeeStats, StellarRpcError>
   /**
+   * `simulateTransaction`: runs the base64 `TransactionEnvelope` XDR `transaction`, signed or not, without sending
+   * it. A transaction that would fail is an answer, with no fallback to the next endpoint.
+   */
+  readonly simulateTransaction: (options: {
+    readonly transaction: string
+  }) => Effect.Effect<StellarSimulation, StellarRpcError>
+  /**
    * `sendTransaction`: submits the base64 `TransactionEnvelope` XDR `transaction`. Every status is an answer, with no
-   * fallback to the next endpoint: read {@link StellarSentTransaction}.
+   * fallback to the next endpoint: read {@link StellarSentTransaction}. An envelope that is not XDR fails `Rejected`
+   * without a request, and a reply for another hash than the envelope's fails `InvalidResponse`.
    */
   readonly sendTransaction: (options: {
     readonly transaction: string
@@ -521,12 +548,37 @@ export const layer = (options: {
             Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
           )
         ),
-        sendTransaction: (options) =>
+        simulateTransaction: (options) =>
           withFallback((endpoint) =>
-            call(endpoint, RpcMethods.sendTransaction, options).pipe(
+            call(endpoint, RpcMethods.simulateTransaction, options).pipe(
               Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger)))
             )
           ),
+        sendTransaction: (options) =>
+          withFallback((endpoint) => {
+            const method = RpcMethods.sendTransaction.name
+            return Effect.try({
+              try: () => TransactionBuilder.fromXDR(options.transaction, passphrase).hash().toString("hex"),
+              catch: () =>
+                fail(
+                  endpoint,
+                  method,
+                  new JsonRpc.Rejected(),
+                  new Error("transaction is not a TransactionEnvelope XDR")
+                )
+            }).pipe(
+              Effect.flatMap((hash) =>
+                call(endpoint, RpcMethods.sendTransaction, options).pipe(
+                  Effect.tap(({ latestLedger }) => Ref.update(endpoint.head, BigInt_.max(latestLedger))),
+                  Effect.filterOrFail(
+                    (sent) => sent.hash === `0x${hash}`,
+                    (sent) =>
+                      fail(endpoint, method, new JsonRpc.InvalidResponse(), new Error(`answered for ${sent.hash}`))
+                  )
+                )
+              )
+            )
+          }),
         getEvents: (filter) => {
           const { cursor } = filter
           if (filter.fromBlock > filter.toBlock) return Effect.succeed({ events: [], cursor: undefined })

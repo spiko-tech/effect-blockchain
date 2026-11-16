@@ -3,7 +3,7 @@ import { StellarContractEvent } from "@effect-blockchain/stellar/StellarContract
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, expect, it } from "@effect/vitest"
-import { StrKey } from "@stellar/stellar-sdk"
+import { Account, Networks, Operation, StrKey, TransactionBuilder } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as Config from "effect/Config"
 import * as ConfigProvider from "effect/ConfigProvider"
@@ -32,6 +32,15 @@ const eventId = (ledger: number, index = 0) =>
 const windowEnd = (ledger: number) => `${(toid(ledger) | BigInt(0xffffffff)).toString().padStart(19, "0")}-4294967295`
 
 const ACCOUNT = StellarAccountAddress.make(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1)))
+const transaction = new TransactionBuilder(new Account(ACCOUNT, "1"), {
+  fee: "100",
+  networkPassphrase: Networks.PUBLIC
+})
+  .addOperation(Operation.bumpSequence({ bumpTo: "5" }))
+  .setTimeout(0)
+  .build()
+const ENVELOPE = transaction.toEnvelope().toXDR("base64")
+const ENVELOPE_HASH = transaction.hash().toString("hex")
 const accountEntryXdr = (address: string) => account(address, 7).data().toXDR("base64")
 
 const ledgers = (sequences: ReadonlyArray<number>) => ({
@@ -461,6 +470,7 @@ describe("StellarRpc", () => {
 
   it.effect("sends sendTransaction and reads each status", () => {
     const params: Array<Params | undefined> = []
+    const TX_HASH = ENVELOPE_HASH
     const replies = [
       { status: "PENDING", hash: TX_HASH, latestLedger: 9, latestLedgerCloseTime: "1700000000" },
       { status: "ERROR", hash: TX_HASH, latestLedger: 9, errorResultXdr: "AAAA", diagnosticEventsXdr: ["AAAA"] }
@@ -473,14 +483,61 @@ describe("StellarRpc", () => {
         }
       }
     })
-    const send = run((rpc) => rpc.sendTransaction({ transaction: "envelope" }))
+    const send = run((rpc) => rpc.sendTransaction({ transaction: ENVELOPE }))
     return Effect.all([send, send], { concurrency: 1 }).pipe(Effect.map((sent) => {
       const reply = { hash: `0x${TX_HASH}`, latestLedger: BigInt(9) }
       expect(sent).toStrictEqual([
         { status: "PENDING", ...reply },
         { status: "ERROR", ...reply, errorResultXdr: "AAAA" }
       ])
-      expect(params).toStrictEqual([{ transaction: "envelope" }, { transaction: "envelope" }])
+      expect(params).toStrictEqual([{ transaction: ENVELOPE }, { transaction: ENVELOPE }])
+    }))
+  })
+
+  it.effect("refuses a sendTransaction reply for another hash, and an envelope that is not XDR", () => {
+    const { calls, run } = setup({
+      a: { sendTransaction: () => ({ result: { status: "PENDING", hash: TX_HASH, latestLedger: 9 } }) }
+    })
+    return Effect.gen(function*() {
+      const other = yield* run((rpc) => Effect.flip(rpc.sendTransaction({ transaction: ENVELOPE })))
+      expect(other).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "sendTransaction" })
+      expect(calls).toStrictEqual(["a:getNetwork", "a:sendTransaction"])
+      const broken = yield* run((rpc) => Effect.flip(rpc.sendTransaction({ transaction: "not XDR" })))
+      expect(broken).toMatchObject({ reason: { _tag: "Rejected" }, method: "sendTransaction" })
+      // refused before any request
+      expect(calls).toHaveLength(2)
+    })
+  })
+
+  it.effect("sends simulateTransaction and reads a simulation and an error", () => {
+    const replies = [
+      { transactionData: "AAAA", minResourceFee: "6343", events: [], results: [{ auth: ["BBBB"], xdr: "CCCC" }] },
+      { transactionData: "AAAA", minResourceFee: "1", cost: { cpuInsns: "1", memBytes: "1" } },
+      { error: "HostError", events: [] }
+    ]
+    const params: Array<Params | undefined> = []
+    const { run } = setup({
+      a: {
+        simulateTransaction: (p) => {
+          params.push(p)
+          return { result: { ...replies[params.length - 1], latestLedger: 9 } }
+        }
+      }
+    })
+    const simulate = run((rpc) => rpc.simulateTransaction({ transaction: "envelope" }))
+    return Effect.all([simulate, simulate, simulate], { concurrency: 1 }).pipe(Effect.map((simulations) => {
+      const latestLedger = BigInt(9)
+      expect(simulations).toStrictEqual([
+        {
+          transactionData: "AAAA",
+          minResourceFee: BigInt(6343),
+          results: [{ auth: ["BBBB"], xdr: "CCCC" }],
+          latestLedger
+        },
+        { transactionData: "AAAA", minResourceFee: BigInt(1), latestLedger },
+        { error: "HostError", latestLedger }
+      ])
+      expect(params[0]).toStrictEqual({ transaction: "envelope" })
     }))
   })
 

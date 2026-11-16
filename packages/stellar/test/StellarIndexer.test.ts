@@ -357,6 +357,7 @@ const fakeRpc = (
       getLedgers: () => Effect.die("unused"),
       getLedgerEntries: () => Effect.die("unused"),
       getFeeStats: Effect.die("unused"),
+      simulateTransaction: () => Effect.die("unused"),
       sendTransaction: () => Effect.die("unused"),
       getTransaction: () => Effect.die("unused"),
       getLatestLedger: Effect.suspend(() => {

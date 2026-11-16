@@ -8,7 +8,9 @@
  * must each pass their own sequence number, as the account's sequence number does not move until a transaction is in
  * a ledger, and two concurrent `sign` calls read the same one.
  *
- * Only classic operations are signed: a Soroban invocation needs a simulation first. `sign` returns the transaction
+ * A transaction holds classic operations, or one Soroban invocation, which `sign` simulates first for its footprint,
+ * its resource fee and its authorization entries. Contract upload and deployment, the restoration of archived entries
+ * and entries another account must sign are not handled. `sign` returns the transaction
  * hash before anything is broadcast, so it can be stored first, and `broadcast` can be repeated with the same
  * envelope. A signed transaction can only enter a ledger up to its `maxLedger`: past it, signing again with the same
  * sequence number is safe.
@@ -65,7 +67,7 @@
  *
  * @since 0.2.0
  */
-import { Account, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
+import { Account, FeeBumpTransaction, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
 import type * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
@@ -134,6 +136,10 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * (stroops per operation) comes from the layer's fee strategy, and a missing `maxLedger` is the latest ledger plus
    * the layer's `validity`.
    *
+   * A single `invokeHostFunction` operation is simulated: the transaction gets its footprint and resources, the
+   * operation the authorization entries it has none of, and the resource fee is added to `fee`, then taken from the
+   * Soroban inclusion fees. Fails with a {@link StellarSimulationError} when the simulation does.
+   *
    * Fails with a `StellarSignerError` when an operation is not XDR, or when the account does not exist and no
    * `sequence` is given.
    */
@@ -143,7 +149,26 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
     readonly sequence?: bigint | undefined
     readonly fee?: bigint | undefined
     readonly maxLedger?: bigint | undefined
-  }) => Effect.Effect<StellarSignedTransaction, StellarRpc.StellarRpcError | StellarSignerError>
+  }) => Effect.Effect<
+    StellarSignedTransaction,
+    StellarRpc.StellarRpcError | StellarSignerError | StellarSimulationError
+  >
+  /**
+   * Wraps the signed transaction `signed` in a fee bump paid and signed by `signer`, without sending it, and returns
+   * its envelope and its own hash, the one to follow. A missing `fee` (stroops per operation, the fee bump counting
+   * as one) comes from the layer's fee strategy, and is at least the fee of `signed`, as the network requires.
+   *
+   * The fee bump shares the sequence number and `maxLedger` of `signed`. Fails with a `StellarSignerError` when
+   * `signed` is not a transaction envelope, or `fee` is below its fee.
+   */
+  readonly feeBump: (options: {
+    readonly signer: StellarSigner
+    readonly signed: string
+    readonly fee?: bigint | undefined
+  }) => Effect.Effect<
+    { readonly hash: StellarTransactionHash; readonly signed: string },
+    StellarRpc.StellarRpcError | StellarSignerError
+  >
   /**
    * Sends a signed envelope with `sendTransaction` and returns its hash. Sending the same envelope again is safe: a
    * node that already holds the transaction, or has it in a ledger, is a success. `TRY_AGAIN_LATER` and a refusal
@@ -205,6 +230,8 @@ const MIN_FEE = BigInt(100)
 export const defaultFees = (inclusionFee: StellarRpc.StellarFeeDistribution): bigint =>
   BigInt_.max(inclusionFee.p90, MIN_FEE)
 
+const toSignerError = (cause: unknown) => new StellarSignerError({ cause })
+
 const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
     .toXDR("base64")
@@ -212,8 +239,8 @@ const accountKey = (address: string) =>
 /**
  * Builds a {@link StellarRelayer} over the provided {@link StellarRpc.StellarRpc}. `confirmations` overrides the
  * network's default (0), as in `StellarIndexer.layer`: both agree on the last confirmed ledger. `fees` (default
- * {@link defaultFees}) prices the transactions signed without an explicit fee from the classic inclusion fees of
- * `getFeeStats`, and `validity` (default 60, about 5 minutes) is the number of ledgers after the latest one that a
+ * {@link defaultFees}) prices the transactions signed without an explicit fee from the inclusion fees of
+ * `getFeeStats`, classic or Soroban, and `validity` (default 60, about 5 minutes) is the number of ledgers after the latest one that a
  * transaction signed without `maxLedger` can enter.
  *
  * @since 0.2.0
@@ -229,40 +256,105 @@ export const layer = (options: {
     Effect.gen(function*() {
       const rpc = yield* StellarRpc.StellarRpc
       const networkPassphrase = StellarNetwork.toPassphrase(rpc.network)
+      // Soroban and classic transactions compete for separate ledger space, each with its own fees
+      const estimateFee = (soroban: boolean) =>
+        Effect.map(
+          rpc.getFeeStats,
+          (stats) => (options.fees ?? defaultFees)(soroban ? stats.sorobanInclusionFee : stats.inclusionFee)
+        )
+      const hashOf = (envelope: string) =>
+        Effect.try({
+          try: () =>
+            StellarTransactionHash.make(
+              `0x${TransactionBuilder.fromXDR(envelope, networkPassphrase).hash().toString("hex")}`
+            ),
+          catch: toSignerError
+        })
       const sign = Effect.fn("StellarRelayer.sign")(
         function*({ operations, signer, ...given }: Parameters<StellarRelayer["Service"]["sign"]>[0]) {
+          const parsed = yield* Effect.try({
+            try: () => operations.map((operation) => xdr.Operation.fromXDR(operation, "base64")),
+            catch: toSignerError
+          })
+          const [first] = parsed
+          const invocation = parsed.length === 1 && first?.body().switch().name === "invokeHostFunction"
+            ? first.body().invokeHostFunctionOp()
+            : undefined
           const [{ entries: [account], latestLedger }, fee] = yield* Effect.all([
             rpc.getLedgerEntries({ keys: [accountKey(signer.address)] }),
-            given.fee === undefined
-              ? Effect.map(rpc.getFeeStats, (stats) => (options.fees ?? defaultFees)(stats.inclusionFee))
-              : Effect.succeed(given.fee)
+            given.fee === undefined ? estimateFee(invocation !== undefined) : Effect.succeed(given.fee)
           ], { concurrency: "unbounded" })
           const maxLedger = given.maxLedger ?? latestLedger + BigInt(options.validity ?? 60)
           const sequence = given.sequence ?? (account === undefined
             ? yield* new StellarSignerError({ cause: new Error(`account ${signer.address} does not exist`) })
             : BigInt(xdr.LedgerEntryData.fromXDR(account.xdr, "base64").account().seqNum().toString()) + BigInt(1))
-          const toError = (cause: unknown) => new StellarSignerError({ cause })
-          const envelope = yield* Effect.try({
-            try: () => {
-              // the builder signs with the sequence number after the account's
-              const source = new Account(signer.address, (sequence - BigInt(1)).toString())
-              const builder = new TransactionBuilder(source, {
-                fee: fee.toString(),
-                networkPassphrase,
-                ledgerbounds: { minLedger: 0, maxLedger: Number(maxLedger) },
-                timebounds: { minTime: 0, maxTime: 0 }
-              })
-              operations.forEach((operation) => builder.addOperation(xdr.Operation.fromXDR(operation, "base64")))
-              return builder.build().toEnvelope().toXDR("base64")
-            },
-            catch: toError
+          const build = (fee: bigint, sorobanData?: string) =>
+            Effect.try({
+              try: () => {
+                // the builder signs with the sequence number after the account's
+                const source = new Account(signer.address, (sequence - BigInt(1)).toString())
+                const builder = new TransactionBuilder(source, {
+                  fee: fee.toString(),
+                  networkPassphrase,
+                  ledgerbounds: { minLedger: 0, maxLedger: Number(maxLedger) },
+                  timebounds: { minTime: 0, maxTime: 0 },
+                  ...(sorobanData === undefined ? {} : { sorobanData })
+                })
+                parsed.forEach((operation) => builder.addOperation(operation))
+                return builder.build().toEnvelope().toXDR("base64")
+              },
+              catch: toSignerError
+            })
+          const prepare = Effect.fnUntraced(function*(invocation: xdr.InvokeHostFunctionOp) {
+            const simulation = yield* rpc.simulateTransaction({ transaction: yield* build(fee) })
+            if ("error" in simulation) {
+              return yield* new StellarSimulationError({ reason: new SimulationFailed({ error: simulation.error }) })
+            }
+            // entries the caller built and signed are kept
+            if (invocation.auth().length === 0) {
+              const auth = (simulation.results?.[0]?.auth ?? []).map((entry) =>
+                xdr.SorobanAuthorizationEntry.fromXDR(entry, "base64")
+              )
+              // any other credentials carry a signature of their own, which the transaction's does not replace
+              if (auth.some((entry) => entry.credentials().switch().name !== "sorobanCredentialsSourceAccount")) {
+                return yield* new StellarSimulationError({ reason: new UnsupportedAuth() })
+              }
+              invocation.auth(auth)
+            }
+            // the builder adds the resource fee `transactionData` holds, the simulation's `minResourceFee`
+            return yield* build(fee, simulation.transactionData)
           })
+          const envelope = yield* (invocation === undefined ? build(fee) : prepare(invocation))
           const signed = yield* signer.signTransaction({ network: rpc.network, envelope })
-          const hash = yield* Effect.try({
-            try: () => TransactionBuilder.fromXDR(signed, networkPassphrase).hash().toString("hex"),
-            catch: toError
+          return { hash: yield* hashOf(signed), signed, sequence, maxLedger }
+        }
+      )
+      const feeBump = Effect.fn("StellarRelayer.feeBump")(
+        function*({ signed, signer, ...given }: Parameters<StellarRelayer["Service"]["feeBump"]>[0]) {
+          const inner = yield* Effect.try({
+            try: () => {
+              const transaction = TransactionBuilder.fromXDR(signed, networkPassphrase)
+              if (transaction instanceof FeeBumpTransaction) throw new Error("already a fee bump")
+              return transaction
+            },
+            catch: toSignerError
           })
-          return { hash: StellarTransactionHash.make(`0x${hash}`), signed, sequence, maxLedger }
+          const sorobanData = inner.tx instanceof xdr.Transaction && inner.tx.ext().switch() === 1
+            ? inner.tx.ext().sorobanData()
+            : undefined
+          const count = BigInt(inner.operations.length)
+          const resourceFee = BigInt(sorobanData?.resourceFee().toString() ?? 0)
+          // a fee bump must offer at least the inclusion fee per operation of its inner transaction (CAP-0015)
+          const innerFee = (BigInt(inner.fee) - resourceFee + count - BigInt(1)) / count
+          const fee = given.fee ?? BigInt_.max(innerFee, yield* estimateFee(sorobanData !== undefined))
+          const envelope = yield* Effect.try({
+            try: () =>
+              TransactionBuilder.buildFeeBumpTransaction(signer.address, fee.toString(), inner, networkPassphrase)
+                .toEnvelope().toXDR("base64"),
+            catch: toSignerError
+          })
+          const bumped = yield* signer.signTransaction({ network: rpc.network, envelope })
+          return { hash: yield* hashOf(bumped), signed: bumped }
         }
       )
       const broadcast = Effect.fn("StellarRelayer.broadcast")(
@@ -304,6 +396,7 @@ export const layer = (options: {
       )
       return StellarRelayer.of({
         sign,
+        feeBump,
         broadcast,
         fetchTransactionStatus,
         awaitConfirmation: ({ poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), ...transaction }) =>
@@ -458,4 +551,33 @@ export type StellarBroadcastReason = typeof StellarBroadcastReason.Type
  */
 export class StellarBroadcastError extends Schema.TaggedError<StellarBroadcastError>()("StellarBroadcastError", {
   reason: StellarBroadcastReason
+}) {}
+
+/**
+ * The simulation of the invocation failed: `error` is the node's message, with the contract's diagnostic.
+ *
+ * @since 0.2.0
+ * @category reasons
+ */
+export class SimulationFailed extends Schema.TaggedError<SimulationFailed>()("SimulationFailed", {
+  error: Schema.String
+}) {}
+
+/**
+ * The invocation needs an authorization entry signed by an address, which the signature of the transaction does not
+ * give: pass the operation with its signed entries.
+ *
+ * @since 0.2.0
+ * @category reasons
+ */
+export class UnsupportedAuth extends Schema.TaggedError<UnsupportedAuth>()("UnsupportedAuth", {}) {}
+
+/**
+ * A Soroban invocation could not be prepared for signing, for a `reason` matched with `Effect.catchReason`.
+ *
+ * @since 0.2.0
+ * @category errors
+ */
+export class StellarSimulationError extends Schema.TaggedError<StellarSimulationError>()("StellarSimulationError", {
+  reason: Schema.Union([SimulationFailed, UnsupportedAuth])
 }) {}

@@ -45,6 +45,7 @@ const setup = (initial: Node, options?: Parameters<typeof StellarRelayer.layer>[
       getEvents: () => Effect.die("unused"),
       getLedgers: () => Effect.die("unused"),
       getFeeStats: Effect.die("unused"),
+      simulateTransaction: () => Effect.die("unused"),
       sendTransaction: () => Effect.die("unused"),
       getLedgerEntries: () => Effect.die("unused"),
       getTransaction: () =>
