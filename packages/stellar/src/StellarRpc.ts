@@ -169,7 +169,8 @@ export interface StellarLedger {
 }
 
 /**
- * A ledger entry from `getLedgerEntries`: its base64 `LedgerEntryData` XDR and the last ledger that changed it.
+ * A ledger entry from `getLedgerEntries`: its base64 `LedgerEntryData` XDR, the last ledger that changed it and, on
+ * the nodes that return it, its base64 `LedgerEntryExt` XDR, which holds the account sponsoring its reserve.
  *
  * @since 0.2.0
  * @category models
@@ -177,6 +178,7 @@ export interface StellarLedger {
 export interface StellarLedgerEntry {
   readonly xdr: string
   readonly lastModifiedLedger: bigint
+  readonly extXdr?: string
 }
 
 /**

@@ -458,12 +458,23 @@ describe("StellarRpc", () => {
       a: {
         getLedgerEntries: (p) => {
           params.push(p)
-          return { result: { entries: [{ xdr, lastModifiedLedgerSeq: 5 }], latestLedger: 9 } }
+          return {
+            result: {
+              entries: [{ xdr, lastModifiedLedgerSeq: 5 }, { xdr, lastModifiedLedgerSeq: 6, extXdr: "AAAAAA==" }],
+              latestLedger: 9
+            }
+          }
         }
       }
     })
     return run((rpc) => rpc.getLedgerEntries({ keys: ["k"] })).pipe(Effect.map((reply) => {
-      expect(reply).toStrictEqual({ entries: [{ xdr, lastModifiedLedger: BigInt(5) }], latestLedger: BigInt(9) })
+      expect(reply).toStrictEqual({
+        entries: [
+          { xdr, lastModifiedLedger: BigInt(5) },
+          { xdr, lastModifiedLedger: BigInt(6), extXdr: "AAAAAA==" }
+        ],
+        latestLedger: BigInt(9)
+      })
       expect(params).toStrictEqual([{ keys: ["k"] }])
     }))
   })
