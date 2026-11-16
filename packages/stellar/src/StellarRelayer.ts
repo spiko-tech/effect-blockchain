@@ -18,6 +18,31 @@
  * The fee per operation comes from `getFeeStats` (see {@link defaultFees}) unless `sign` receives it. It is a
  * maximum: a ledger charges what its inclusion needed, 100 stroops per operation outside of surge pricing.
  *
+ * To send several transactions of one account at once, sign each with a different `channel`: an account of its own,
+ * whose sequence number the transaction uses, while the operations still act for `signer`. Choosing a free channel
+ * and holding it until its transaction is final belong to the application. A channel pays the fee of its
+ * transaction, so each one needs a balance, unless the transaction is wrapped with `feeBump`: one funded account
+ * then pays for every channel, which only keeps its minimum balance.
+ *
+ * ```ts
+ * import { StellarRelayer } from "@effect-blockchain/stellar/StellarRelayer"
+ * import type { StellarSigner } from "@effect-blockchain/stellar/StellarSigner"
+ * import * as Effect from "effect/Effect"
+ *
+ * declare const signer: StellarSigner
+ * declare const channel: StellarSigner
+ * declare const operations: readonly [string, ...Array<string>]
+ *
+ * const program = Effect.gen(function*() {
+ *   const relayer = yield* StellarRelayer
+ *   // paid by the channel
+ *   const direct = yield* relayer.sign({ signer, channel, operations })
+ *   // or paid by `signer`: follow the hash of the fee bump, with the `maxLedger` of the transaction it wraps
+ *   const bumped = yield* relayer.feeBump({ signer, signed: direct.signed })
+ *   return { direct, bumped }
+ * })
+ * ```
+ *
  * A transaction is in one {@link StellarTransactionStatus}:
  *
  * | status | meaning | final |
@@ -67,7 +92,15 @@
  *
  * @since 0.2.0
  */
-import { Account, FeeBumpTransaction, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
+import {
+  Account,
+  decodeAddressToMuxedAccount,
+  FeeBumpTransaction,
+  Keypair,
+  Operation,
+  TransactionBuilder,
+  xdr
+} from "@stellar/stellar-sdk"
 import type * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
@@ -76,6 +109,7 @@ import * as Layer from "effect/Layer"
 import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import * as Confirmations from "./internal/confirmations.ts"
+import type { StellarAccountAddress } from "./StellarAddress.ts"
 import { DEFAULT_POLL_INTERVAL } from "./StellarIndexer.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
 import * as StellarRpc from "./StellarRpc.ts"
@@ -140,12 +174,19 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * operation the authorization entries it has none of, and the resource fee is added to `fee`, then taken from the
    * Soroban inclusion fees. Fails with a {@link StellarSimulationError} when the simulation does.
    *
+   * With a `channel`, the transaction is the channel's: it uses its sequence number and pays the fee from its
+   * balance, the operations without a source account get `signer.address`, and the channel signs before `signer`.
+   * `cosigners` sign after them, for the operations whose source account is another account. The network refuses
+   * a transaction carrying a signature it does not need (`txBadAuthExtra`).
+   *
    * Fails with a `StellarSignerError` when an operation is not XDR, or when the account does not exist and no
    * `sequence` is given.
    */
   readonly sign: (options: {
     readonly signer: StellarSigner
     readonly operations: Arr.NonEmptyReadonlyArray<string>
+    readonly channel?: StellarSigner | undefined
+    readonly cosigners?: ReadonlyArray<StellarSigner> | undefined
     readonly sequence?: bigint | undefined
     readonly fee?: bigint | undefined
     readonly maxLedger?: bigint | undefined
@@ -230,6 +271,23 @@ const MIN_FEE = BigInt(100)
 export const defaultFees = (inclusionFee: StellarRpc.StellarFeeDistribution): bigint =>
   BigInt_.max(inclusionFee.p90, MIN_FEE)
 
+/**
+ * The operations creating `account` with its reserve paid by `sponsor`, so that it needs no balance of its own, as
+ * base64 `Operation` XDR for `sign`. Both accounts must sign: pass the signer of `account` as a cosigner.
+ *
+ * @since 0.2.0
+ * @category operations
+ */
+export const createSponsoredAccount = (options: {
+  readonly sponsor: StellarAccountAddress
+  readonly account: StellarAccountAddress
+}): readonly [string, string, string] => [
+  Operation.beginSponsoringFutureReserves({ sponsoredId: options.account, source: options.sponsor }).toXDR("base64"),
+  Operation.createAccount({ destination: options.account, startingBalance: "0", source: options.sponsor })
+    .toXDR("base64"),
+  Operation.endSponsoringFutureReserves({ source: options.account }).toXDR("base64")
+]
+
 const toSignerError = (cause: unknown) => new StellarSignerError({ cause })
 
 const accountKey = (address: string) =>
@@ -271,9 +329,20 @@ export const layer = (options: {
           catch: toSignerError
         })
       const sign = Effect.fn("StellarRelayer.sign")(
-        function*({ operations, signer, ...given }: Parameters<StellarRelayer["Service"]["sign"]>[0]) {
+        function*(
+          { channel, cosigners = [], operations, signer, ...given }: Parameters<StellarRelayer["Service"]["sign"]>[0]
+        ) {
+          const source = (channel ?? signer).address
           const parsed = yield* Effect.try({
-            try: () => operations.map((operation) => xdr.Operation.fromXDR(operation, "base64")),
+            try: () =>
+              operations.map((operation) => {
+                const decoded = xdr.Operation.fromXDR(operation, "base64")
+                // an operation without a source account acts for the source of the transaction: the channel
+                if (channel !== undefined && !decoded.sourceAccount()) {
+                  decoded.sourceAccount(decodeAddressToMuxedAccount(signer.address))
+                }
+                return decoded
+              }),
             catch: toSignerError
           })
           const [first] = parsed
@@ -281,19 +350,19 @@ export const layer = (options: {
             ? first.body().invokeHostFunctionOp()
             : undefined
           const [{ entries: [account], latestLedger }, fee] = yield* Effect.all([
-            rpc.getLedgerEntries({ keys: [accountKey(signer.address)] }),
+            rpc.getLedgerEntries({ keys: [accountKey(source)] }),
             given.fee === undefined ? estimateFee(invocation !== undefined) : Effect.succeed(given.fee)
           ], { concurrency: "unbounded" })
           const maxLedger = given.maxLedger ?? latestLedger + BigInt(options.validity ?? 60)
           const sequence = given.sequence ?? (account === undefined
-            ? yield* new StellarSignerError({ cause: new Error(`account ${signer.address} does not exist`) })
+            ? yield* new StellarSignerError({ cause: new Error(`account ${source} does not exist`) })
             : BigInt(xdr.LedgerEntryData.fromXDR(account.xdr, "base64").account().seqNum().toString()) + BigInt(1))
           const build = (fee: bigint, sorobanData?: string) =>
             Effect.try({
               try: () => {
                 // the builder signs with the sequence number after the account's
-                const source = new Account(signer.address, (sequence - BigInt(1)).toString())
-                const builder = new TransactionBuilder(source, {
+                const account = new Account(source, (sequence - BigInt(1)).toString())
+                const builder = new TransactionBuilder(account, {
                   fee: fee.toString(),
                   networkPassphrase,
                   ledgerbounds: { minLedger: 0, maxLedger: Number(maxLedger) },
@@ -325,7 +394,10 @@ export const layer = (options: {
             return yield* build(fee, simulation.transactionData)
           })
           const envelope = yield* (invocation === undefined ? build(fee) : prepare(invocation))
-          const signed = yield* signer.signTransaction({ network: rpc.network, envelope })
+          let signed = envelope
+          for (const each of [...(channel === undefined ? [] : [channel]), signer, ...cosigners]) {
+            signed = yield* each.signTransaction({ network: rpc.network, envelope: signed })
+          }
           return { hash: yield* hashOf(signed), signed, sequence, maxLedger }
         }
       )

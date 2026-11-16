@@ -3,12 +3,13 @@ import * as StellarRelayer from "@effect-blockchain/stellar/StellarRelayer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import * as StellarSigner from "@effect-blockchain/stellar/StellarSigner"
 import { describe, expect, it } from "@effect/vitest"
-import { Address, Asset, Keypair, nativeToScVal, Networks, Operation } from "@stellar/stellar-sdk"
+import { Address, Asset, Keypair, nativeToScVal, Networks, Operation, StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schedule from "effect/Schedule"
+import { accountKey } from "./utils/ledgerMeta.ts"
 
 // runs against a local network (`docker run -p 8000:8000 stellar/quickstart --local --enable rpc`, then
 // `QUICKSTART_RPC_URL=http://127.0.0.1:8000/rpc pnpm vitest run`), skipped otherwise
@@ -34,6 +35,13 @@ const layer = StellarRelayer.layer().pipe(
 )
 
 const poll = Schedule.spaced("200 millis")
+
+const accountEntry = (address: string) =>
+  Effect.gen(function*() {
+    const rpc = yield* StellarRpc.StellarRpc
+    const { entries } = yield* rpc.getLedgerEntries({ keys: [accountKey(address).toXDR("base64")] })
+    return xdr.LedgerEntryData.fromXDR(entries[0]?.xdr ?? "", "base64")
+  })
 
 // one sender: the tests share its sequence number
 describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false, timeout: 60_000 }, () => {
@@ -153,5 +161,55 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
       const status = yield* relayer.awaitConfirmation({ hash, maxLedger: inner.maxLedger, poll })
       expect(status).toMatchObject({ _tag: "Confirmed" })
       expect(yield* rpc.getTransaction({ hash })).toMatchObject({ status: "SUCCESS", feeBump: true })
+    }).pipe(Effect.provide(layer)))
+
+  it.live("sends two payments of one account at once through two channels, one wrapped in a fee bump", () =>
+    Effect.gen(function*() {
+      const relayer = yield* StellarRelayer.StellarRelayer
+      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const channels = yield* Effect.forEach(
+        [Keypair.random(), Keypair.random()],
+        (channel) => StellarSigner.fromPrivateKey(Redacted.make(channel.secret()))
+      )
+      yield* Effect.forEach(channels, (channel) => fund(channel.address), { concurrency: 2 })
+      const before = yield* accountEntry(signer.address)
+      const operations = [payment(receiver, "1")] as const
+      const [direct, wrapped] = yield* Effect.forEach(
+        channels,
+        (channel) => relayer.sign({ signer, channel, operations }),
+        { concurrency: 2 }
+      )
+      const bumped = yield* relayer.feeBump({ signer, signed: wrapped.signed })
+      yield* Effect.all([relayer.broadcast(direct), relayer.broadcast(bumped)], { concurrency: 2 })
+      expect(
+        yield* Effect.all([
+          relayer.awaitConfirmation({ ...direct, poll }),
+          relayer.awaitConfirmation({ hash: bumped.hash, maxLedger: wrapped.maxLedger, poll })
+        ], { concurrency: 2 })
+      ).toMatchObject([{ _tag: "Confirmed" }, { _tag: "Confirmed" }])
+      const after = yield* accountEntry(signer.address)
+      // both payments left the account, whose sequence number did not move
+      expect(after.account().seqNum().toString()).toBe(before.account().seqNum().toString())
+      // 2 stroops paid, and the fee of the fee bump: 100 stroops for the payment and 100 for the bump
+      expect(after.account().balance().toBigInt()).toBe(before.account().balance().toBigInt() - BigInt(20_000_200))
+    }).pipe(Effect.provide(layer)))
+
+  it.live("creates an account whose reserve is paid by its sponsor", () =>
+    Effect.gen(function*() {
+      const relayer = yield* StellarRelayer.StellarRelayer
+      const rpc = yield* StellarRpc.StellarRpc
+      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const account = yield* StellarSigner.fromPrivateKey(Redacted.make(Keypair.random().secret()))
+      const { hash, maxLedger, signed } = yield* relayer.sign({
+        signer,
+        operations: StellarRelayer.createSponsoredAccount({ sponsor: signer.address, account: account.address }),
+        cosigners: [account]
+      })
+      yield* relayer.broadcast({ signed })
+      expect(yield* relayer.awaitConfirmation({ hash, maxLedger, poll })).toMatchObject({ _tag: "Confirmed" })
+      const { entries: [entry] } = yield* rpc.getLedgerEntries({ keys: [accountKey(account.address).toXDR("base64")] })
+      expect(xdr.LedgerEntryData.fromXDR(entry?.xdr ?? "", "base64").account().balance().toString()).toBe("0")
+      const sponsor = xdr.LedgerEntryExt.fromXDR(entry?.extXdr ?? "", "base64").v1().sponsoringId()
+      expect(sponsor ? StrKey.encodeEd25519PublicKey(sponsor.ed25519()) : undefined).toBe(signer.address)
     }).pipe(Effect.provide(layer)))
 })

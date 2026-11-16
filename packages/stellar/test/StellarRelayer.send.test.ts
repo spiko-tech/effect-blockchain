@@ -17,7 +17,7 @@ import {
 } from "@stellar/stellar-sdk"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import { account } from "./utils/ledgerMeta.ts"
+import { account, accountKey } from "./utils/ledgerMeta.ts"
 
 const keypair = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 1))
 const ADDRESS = StellarAccountAddress.make(keypair.publicKey())
@@ -82,6 +82,7 @@ interface Node {
 
 const setup = (node: Node, options?: Parameters<typeof StellarRelayer.layer>[0]) => {
   const calls: Array<string> = []
+  const read: Array<string> = []
   const range = { latestLedger: BigInt(100), oldestLedger: BigInt(1) }
   const rpc = Layer.succeed(
     StellarRpc.StellarRpc,
@@ -91,9 +92,10 @@ const setup = (node: Node, options?: Parameters<typeof StellarRelayer.layer>[0])
       getLatestLedger: Effect.die("unused"),
       getEvents: () => Effect.die("unused"),
       getLedgers: () => Effect.die("unused"),
-      getLedgerEntries: () =>
+      getLedgerEntries: ({ keys }) =>
         Effect.sync(() => {
           calls.push("getLedgerEntries")
+          read.push(...keys)
           return {
             entries: node.sequence === undefined ? [] : [accountEntry(node.sequence)],
             latestLedger: BigInt(100)
@@ -134,7 +136,7 @@ const setup = (node: Node, options?: Parameters<typeof StellarRelayer.layer>[0])
     Effect.gen(function*() {
       return yield* f(yield* StellarRelayer.StellarRelayer)
     }).pipe(Effect.provide(StellarRelayer.layer(options).pipe(Layer.provide(rpc))))
-  return { calls, run }
+  return { calls, read, run }
 }
 
 const decode = (signed: string) => {
@@ -419,4 +421,63 @@ describe("StellarRelayer feeBump", () => {
       const broken = yield* Effect.flip(run((relayer) => relayer.feeBump({ signer: sponsor, signed: "not XDR" })))
       expect(broken._tag).toBe("StellarSignerError")
     }))
+})
+
+describe("StellarRelayer sign through a channel", () => {
+  const other = (seed: number) => {
+    const pair = Keypair.fromRawEd25519Seed(Buffer.alloc(32, seed))
+    const address = StellarAccountAddress.make(pair.publicKey())
+    return {
+      address,
+      hint: pair.signatureHint().toString("hex"),
+      signer: StellarSigner.fromHashSigner({
+        address,
+        signHash: (hash) => Effect.succeed(new Uint8Array(pair.sign(Buffer.from(hash.slice(2), "hex"))))
+      })
+    }
+  }
+  const channel = other(5)
+  const third = other(6)
+  const hints = (signed: string) => decode(signed).signatures.map((signature) => signature.hint().toString("hex"))
+
+  it.effect("uses the channel as the source and the signer as the source of the operations", () =>
+    Effect.gen(function*() {
+      const { read, run } = setup({ sequence: 41 })
+      const sourced = Operation.payment({
+        destination: ADDRESS,
+        asset: Asset.native(),
+        amount: "1",
+        source: third.address
+      }).toXDR("base64")
+      const signed = yield* run((relayer) =>
+        relayer.sign({ signer, channel: channel.signer, operations: [PAYMENT, sourced] })
+      )
+      const transaction = decode(signed.signed)
+      expect(transaction.source).toBe(channel.address)
+      // the sequence number of the channel, the only account read
+      expect([transaction.sequence, signed.sequence]).toStrictEqual(["42", BigInt(42)])
+      expect(read).toStrictEqual([accountKey(channel.address).toXDR("base64")])
+      expect(transaction.operations.map((operation) => operation.source)).toStrictEqual([ADDRESS, third.address])
+      expect(hints(signed.signed)).toStrictEqual([channel.hint, keypair.signatureHint().toString("hex")])
+    }))
+
+  it.effect("leaves the operations without a source and adds the cosigners without a channel", () =>
+    Effect.gen(function*() {
+      const signed = yield* setup({ sequence: 41 }).run((relayer) =>
+        relayer.sign({ signer, operations: [PAYMENT], cosigners: [third.signer, channel.signer] })
+      )
+      expect(decode(signed.signed).operations[0].source).toBeUndefined()
+      expect(hints(signed.signed)).toStrictEqual([keypair.signatureHint().toString("hex"), third.hint, channel.hint])
+    }))
+
+  it("createSponsoredAccount opens the sponsorship, creates the account and closes it", () => {
+    const operations = StellarRelayer.createSponsoredAccount({ sponsor: ADDRESS, account: third.address }).map((
+      operation
+    ) => Operation.fromXDRObject(xdr.Operation.fromXDR(operation, "base64")))
+    expect(operations).toMatchObject([
+      { type: "beginSponsoringFutureReserves", source: ADDRESS, sponsoredId: third.address },
+      { type: "createAccount", source: ADDRESS, destination: third.address, startingBalance: "0.0000000" },
+      { type: "endSponsoringFutureReserves", source: third.address }
+    ])
+  })
 })
