@@ -61,8 +61,8 @@ import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmLog } from "./EvmLog.ts"
-import * as EvmNetwork from "./EvmNetwork.ts"
 import * as EvmRpc from "./EvmRpc.ts"
+import * as Confirmations from "./internal/confirmations.ts"
 
 /**
  * A {@link EvmIndexer} `fetchLogs` filter: an `eth_getLogs` filter over the inclusive block range
@@ -202,7 +202,7 @@ type Page<A> = readonly [ReadonlyArray<A>, Option.Option<StreamPosition>]
 /**
  * Builds an {@link EvmIndexer} reading through the provided {@link EvmRpc.EvmRpc}.
  *
- * - `confirmations` overrides {@link EvmNetwork.defaultConfirmations} for the RPC's network.
+ * - `confirmations` overrides `EvmNetwork.defaultConfirmations` for the RPC's network.
  * - `maxBlockRange`, a positive integer, defaults to {@link DEFAULT_MAX_BLOCK_RANGE}.
  *
  * @since 0.1.0
@@ -220,10 +220,8 @@ export const layer = (options: {
       if (!Number.isSafeInteger(maxBlockRange) || maxBlockRange < 1) {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
-      const confirmations = BigInt(options.confirmations ?? EvmNetwork.defaultConfirmations(rpc.network))
       const size = BigInt(maxBlockRange)
-      const lastConfirmedBlock = rpc.blockNumber.pipe(
-        Effect.map((head) => BigInt_.max(head - confirmations, BigInt(0))),
+      const lastConfirmedBlock = Confirmations.lastConfirmedBlock(rpc, options.confirmations).pipe(
         Effect.withSpan("EvmIndexer.lastConfirmedBlock")
       )
       // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled
