@@ -22,14 +22,14 @@ describe("StellarNetwork", () => {
   })
 
   it("should match the stellar-sdk passphrases", () => {
-    expect(networks.map(toPassphrase)).toStrictEqual([Networks.PUBLIC, Networks.TESTNET])
+    expect(networks.map(toPassphrase)).toStrictEqual([Networks.PUBLIC, Networks.TESTNET, Networks.STANDALONE])
   })
 
   it("should tag testnets", () => {
-    expect(networks.map(isTestnet)).toStrictEqual([false, true])
+    expect(networks.map(isTestnet)).toStrictEqual([false, true, true])
     expect(networks.length).toBe(mainnets.length + testnets.length)
   })
   it("should need no confirmations: closed ledgers are final", () => {
-    expect(networks.map(defaultConfirmations)).toStrictEqual([0, 0])
+    expect(networks.map(defaultConfirmations)).toStrictEqual([0, 0, 0])
   })
 })

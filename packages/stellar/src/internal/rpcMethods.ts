@@ -2,6 +2,7 @@ import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import { StellarContractAddress } from "../StellarAddress.ts"
 import { StellarContractEvent } from "../StellarContractEvent.ts"
+import { StellarTransactionHash } from "../StellarTransactionHash.ts"
 import { LedgerFromNumber } from "./LedgerFromNumber.ts"
 
 const make = <Params, A>(method: JsonRpc.Method<Params, A>): JsonRpc.Method<Params, A> => method
@@ -82,6 +83,50 @@ export const getLedgerEntries = make({
       )
     ),
     latestLedger: LedgerFromNumber
+  })
+})
+
+const stroops = Schema.BigIntFromString
+
+const feeDistribution = Schema.Struct({
+  max: stroops,
+  min: stroops,
+  mode: stroops,
+  p10: stroops,
+  p20: stroops,
+  p30: stroops,
+  p40: stroops,
+  p50: stroops,
+  p60: stroops,
+  p70: stroops,
+  p80: stroops,
+  p90: stroops,
+  p95: stroops,
+  p99: stroops,
+  transactionCount: Schema.FiniteFromString,
+  ledgerCount: Schema.Int
+})
+
+/** @internal */
+export const getFeeStats = make({
+  name: "getFeeStats",
+  params: NoParams,
+  result: Schema.Struct({
+    inclusionFee: feeDistribution,
+    sorobanInclusionFee: feeDistribution,
+    latestLedger: LedgerFromNumber
+  })
+})
+
+/** @internal */
+export const sendTransaction = make({
+  name: "sendTransaction",
+  params: Schema.Struct({ transaction: Schema.String }),
+  result: Schema.Struct({
+    status: Schema.Literals(["PENDING", "DUPLICATE", "TRY_AGAIN_LATER", "ERROR"]),
+    hash: StellarTransactionHash,
+    latestLedger: LedgerFromNumber,
+    errorResultXdr: Schema.optionalKey(Schema.String)
   })
 })
 

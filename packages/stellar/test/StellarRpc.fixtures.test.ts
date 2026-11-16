@@ -2,6 +2,7 @@
 import * as Replay from "@effect-blockchain/core/test/utils/replay"
 import { StellarAccountAddress, StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
 import { toPassphrase } from "@effect-blockchain/stellar/StellarNetwork"
+import { defaultFees } from "@effect-blockchain/stellar/StellarRelayer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
@@ -235,6 +236,32 @@ describe("StellarRpc fixtures", () => {
       assert.lengthOf(success.resultMetaXdr, 888)
       expect(failed).toMatchObject({ status: "FAILED", ...range, ledger: BigInt(65509460), applicationOrder: 1 })
       assert.deepStrictEqual(unknown, { status: "NOT_FOUND", ...range })
+    }))
+
+  it.effect("fixture: quasar getFeeStats", () =>
+    Effect.gen(function*() {
+      const stats = yield* setup([{ name: "quasar", cases: ["getNetwork", "getFeeStats"] }])((rpc) => rpc.getFeeStats)
+      expect(stats.inclusionFee).toStrictEqual({
+        max: BigInt(400),
+        min: BigInt(100),
+        mode: BigInt(100),
+        p10: BigInt(100),
+        p20: BigInt(100),
+        p30: BigInt(100),
+        p40: BigInt(100),
+        p50: BigInt(100),
+        p60: BigInt(100),
+        p70: BigInt(100),
+        p80: BigInt(100),
+        p90: BigInt(200),
+        p95: BigInt(200),
+        p99: BigInt(300),
+        transactionCount: 5022,
+        ledgerCount: 10
+      })
+      expect(stats.sorobanInclusionFee).toMatchObject({ max: BigInt(114406), p99: BigInt(57203), ledgerCount: 50 })
+      expect(stats.latestLedger).toBe(BigInt(65511132))
+      expect(defaultFees(stats.inclusionFee)).toBe(BigInt(200))
     }))
 
   it.effect("fixture: quasar invalid key", () =>

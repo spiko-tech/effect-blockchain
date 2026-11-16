@@ -1,9 +1,20 @@
 /**
- * Stellar transaction relaying on top of {@link StellarRpc.StellarRpc}: following a transaction until it is final.
+ * Stellar transaction relaying on top of {@link StellarRpc.StellarRpc}: signing a transaction, broadcasting it and
+ * following it until it is final.
  *
  * A relayer here sends an account's own transactions and manages their sequence numbers and fees, as OpenZeppelin
  * Relayer does. It is not a relayer paying for someone else's transaction. It keeps no state: storing hashes and
- * sequence numbers, deciding when to resend and holding keys belong to the application.
+ * sequence numbers, deciding when to resend and holding keys belong to the application. Senders sharing an account
+ * must each pass their own sequence number, as the account's sequence number does not move until a transaction is in
+ * a ledger, and two concurrent `sign` calls read the same one.
+ *
+ * Only classic operations are signed: a Soroban invocation needs a simulation first. `sign` returns the transaction
+ * hash before anything is broadcast, so it can be stored first, and `broadcast` can be repeated with the same
+ * envelope. A signed transaction can only enter a ledger up to its `maxLedger`: past it, signing again with the same
+ * sequence number is safe.
+ *
+ * The fee per operation comes from `getFeeStats` (see {@link defaultFees}) unless `sign` receives it. It is a
+ * maximum: a ledger charges what its inclusion needed, 100 stroops per operation outside of surge pricing.
  *
  * A transaction is in one {@link StellarTransactionStatus}:
  *
@@ -26,20 +37,26 @@
  *
  * @example
  * ```ts
+ * import type { StellarAccountAddress } from "@effect-blockchain/stellar/StellarAddress"
  * import { StellarRelayer } from "@effect-blockchain/stellar/StellarRelayer"
+ * import type { StellarSigner } from "@effect-blockchain/stellar/StellarSigner"
  * import type { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
+ * import { Asset, Operation } from "@stellar/stellar-sdk"
  * import * as Effect from "effect/Effect"
  *
- * declare const hash: StellarTransactionHash
- * // the upper bound of the `ledgerBounds` the transaction was signed with
- * declare const maxLedger: bigint
+ * declare const signer: StellarSigner
+ * declare const destination: StellarAccountAddress
+ * declare const store: (hash: StellarTransactionHash, sequence: bigint, maxLedger: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
  *   const relayer = yield* StellarRelayer
- *   const now = yield* relayer.fetchTransactionStatus({ hash, maxLedger })
- *   yield* Effect.log(`currently ${now._tag}`)
- *   // without `maxLedger`, a transaction that never reaches a ledger stays `NotFound`: the timeout bounds the wait
- *   const status = yield* relayer.awaitConfirmation({ hash, maxLedger }).pipe(Effect.timeout("2 minutes"))
+ *   const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" })
+ *   const { hash, maxLedger, sequence, signed } = yield* relayer.sign({ signer, operations: [payment.toXDR("base64")] })
+ *   // stored before the broadcast: a crash in between leaves a hash to look up, never an unknown transaction
+ *   yield* store(hash, sequence, maxLedger)
+ *   yield* relayer.broadcast({ signed })
+ *   // `maxLedger` ends the wait with `Expired` when no ledger took the transaction, the timeout bounds the rest
+ *   const status = yield* relayer.awaitConfirmation({ hash, maxLedger }).pipe(Effect.timeout("10 minutes"))
  *   if (status._tag === "Failed") {
  *     yield* Effect.logError(`failed in ledger ${status.block}: ${status.reason?.code}`)
  *   }
@@ -48,7 +65,9 @@
  *
  * @since 0.2.0
  */
-import { xdr } from "@stellar/stellar-sdk"
+import { Account, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
+import type * as Arr from "effect/Array"
+import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -56,8 +75,10 @@ import * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import * as Confirmations from "./internal/confirmations.ts"
 import { DEFAULT_POLL_INTERVAL } from "./StellarIndexer.ts"
+import * as StellarNetwork from "./StellarNetwork.ts"
 import * as StellarRpc from "./StellarRpc.ts"
-import type { StellarTransactionHash } from "./StellarTransactionHash.ts"
+import { type StellarSigner, StellarSignerError } from "./StellarSigner.ts"
+import { StellarTransactionHash } from "./StellarTransactionHash.ts"
 
 /**
  * Why a transaction failed, from its result XDR: its result code and, when that is `txFailed`, the result code of each
@@ -88,10 +109,49 @@ export type StellarTransactionStatus =
   | { readonly _tag: "NotFound" }
 
 /**
+ * A transaction signed by {@link StellarRelayer.sign}: `signed` is the base64 `TransactionEnvelope` XDR `broadcast`
+ * takes, `hash` its transaction hash, `sequence` the sequence number it uses and `maxLedger` the last ledger that can
+ * hold it, which `fetchTransactionStatus` and `awaitConfirmation` take.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface StellarSignedTransaction {
+  readonly hash: StellarTransactionHash
+  readonly signed: string
+  readonly sequence: bigint
+  readonly maxLedger: bigint
+}
+
+/**
  * @since 0.2.0
  * @category services
  */
 export class StellarRelayer extends Context.Service<StellarRelayer, {
+  /**
+   * Signs a transaction of `operations` (each a base64 `Operation` XDR, at most 100) from the account
+   * `signer.address` without sending it. A missing `sequence` is the account's sequence number plus 1, a missing `fee`
+   * (stroops per operation) comes from the layer's fee strategy, and a missing `maxLedger` is the latest ledger plus
+   * the layer's `validity`.
+   *
+   * Fails with a `StellarSignerError` when an operation is not XDR, or when the account does not exist and no
+   * `sequence` is given.
+   */
+  readonly sign: (options: {
+    readonly signer: StellarSigner
+    readonly operations: Arr.NonEmptyReadonlyArray<string>
+    readonly sequence?: bigint | undefined
+    readonly fee?: bigint | undefined
+    readonly maxLedger?: bigint | undefined
+  }) => Effect.Effect<StellarSignedTransaction, StellarRpc.StellarRpcError | StellarSignerError>
+  /**
+   * Sends a signed envelope with `sendTransaction` and returns its hash. Sending the same envelope again is safe: a
+   * node that already holds the transaction, or has it in a ledger, is a success. `TRY_AGAIN_LATER` and a refusal
+   * fail with a {@link StellarBroadcastError}.
+   */
+  readonly broadcast: (options: {
+    readonly signed: string
+  }) => Effect.Effect<StellarTransactionHash, StellarBroadcastError | StellarRpc.StellarRpcError>
   /**
    * The status of the transaction as the answering endpoint sees it. An endpoint behind the head, or one that no
    * longer retains the transaction's ledger, answers `NotFound` for a transaction another one has in a ledger.
@@ -132,20 +192,96 @@ const failureOf = (resultXdr: string): StellarTransactionFailure | undefined => 
   }
 }
 
+// the network's minimum base fee: https://developers.stellar.org/docs/learn/fundamentals/fees-resource-limits-metering
+const MIN_FEE = BigInt(100)
+
+/**
+ * The library's fee strategy, in stroops per operation: the 90th percentile of the recent inclusion fees, at least
+ * the network's minimum of 100.
+ *
+ * @since 0.2.0
+ * @category fees
+ */
+export const defaultFees = (inclusionFee: StellarRpc.StellarFeeDistribution): bigint =>
+  BigInt_.max(inclusionFee.p90, MIN_FEE)
+
+const accountKey = (address: string) =>
+  xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
+    .toXDR("base64")
+
 /**
  * Builds a {@link StellarRelayer} over the provided {@link StellarRpc.StellarRpc}. `confirmations` overrides the
- * network's default (0), as in `StellarIndexer.layer`: both agree on the last confirmed ledger.
+ * network's default (0), as in `StellarIndexer.layer`: both agree on the last confirmed ledger. `fees` (default
+ * {@link defaultFees}) prices the transactions signed without an explicit fee from the classic inclusion fees of
+ * `getFeeStats`, and `validity` (default 60, about 5 minutes) is the number of ledgers after the latest one that a
+ * transaction signed without `maxLedger` can enter.
  *
  * @since 0.2.0
  * @category layers
  */
 export const layer = (options: {
   readonly confirmations?: number | undefined
+  readonly fees?: ((inclusionFee: StellarRpc.StellarFeeDistribution) => bigint) | undefined
+  readonly validity?: number | undefined
 } = {}): Layer.Layer<StellarRelayer, never, StellarRpc.StellarRpc> =>
   Layer.effect(
     StellarRelayer,
     Effect.gen(function*() {
       const rpc = yield* StellarRpc.StellarRpc
+      const networkPassphrase = StellarNetwork.toPassphrase(rpc.network)
+      const sign = Effect.fn("StellarRelayer.sign")(
+        function*({ operations, signer, ...given }: Parameters<StellarRelayer["Service"]["sign"]>[0]) {
+          const [{ entries: [account], latestLedger }, fee] = yield* Effect.all([
+            rpc.getLedgerEntries({ keys: [accountKey(signer.address)] }),
+            given.fee === undefined
+              ? Effect.map(rpc.getFeeStats, (stats) => (options.fees ?? defaultFees)(stats.inclusionFee))
+              : Effect.succeed(given.fee)
+          ], { concurrency: "unbounded" })
+          const maxLedger = given.maxLedger ?? latestLedger + BigInt(options.validity ?? 60)
+          const sequence = given.sequence ?? (account === undefined
+            ? yield* new StellarSignerError({ cause: new Error(`account ${signer.address} does not exist`) })
+            : BigInt(xdr.LedgerEntryData.fromXDR(account.xdr, "base64").account().seqNum().toString()) + BigInt(1))
+          const toError = (cause: unknown) => new StellarSignerError({ cause })
+          const envelope = yield* Effect.try({
+            try: () => {
+              // the builder signs with the sequence number after the account's
+              const source = new Account(signer.address, (sequence - BigInt(1)).toString())
+              const builder = new TransactionBuilder(source, {
+                fee: fee.toString(),
+                networkPassphrase,
+                ledgerbounds: { minLedger: 0, maxLedger: Number(maxLedger) },
+                timebounds: { minTime: 0, maxTime: 0 }
+              })
+              operations.forEach((operation) => builder.addOperation(xdr.Operation.fromXDR(operation, "base64")))
+              return builder.build().toEnvelope().toXDR("base64")
+            },
+            catch: toError
+          })
+          const signed = yield* signer.signTransaction({ network: rpc.network, envelope })
+          const hash = yield* Effect.try({
+            try: () => TransactionBuilder.fromXDR(signed, networkPassphrase).hash().toString("hex"),
+            catch: toError
+          })
+          return { hash: StellarTransactionHash.make(`0x${hash}`), signed, sequence, maxLedger }
+        }
+      )
+      const broadcast = Effect.fn("StellarRelayer.broadcast")(
+        function*({ signed }: { readonly signed: string }) {
+          const sent = yield* rpc.sendTransaction({ transaction: signed })
+          if (sent.status === "PENDING" || sent.status === "DUPLICATE") return sent.hash
+          const failure = failureOf(sent.errorResultXdr ?? "")
+          const reason = sent.status === "TRY_AGAIN_LATER"
+            ? new TryAgainLater()
+            : new Refused({ code: failure?.code, operations: failure?.operations ?? [] })
+          // a node that has this transaction in a ledger refuses its second copy: stellar-core answers
+          // `TRY_AGAIN_LATER` for about 10 ledgers after applying it, then that its sequence number is used
+          if (
+            (reason._tag === "TryAgainLater" || reason.code === "txBadSeq") &&
+            (yield* rpc.getTransaction({ hash: sent.hash })).status !== "NOT_FOUND"
+          ) return sent.hash
+          return yield* new StellarBroadcastError({ reason })
+        }
+      )
       const fetchTransactionStatus = Effect.fn("StellarRelayer.fetchTransactionStatus")(
         ({ hash, maxLedger }: Parameters<StellarRelayer["Service"]["fetchTransactionStatus"]>[0]) =>
           Effect.map(rpc.getTransaction({ hash }), (transaction): StellarTransactionStatus => {
@@ -167,6 +303,8 @@ export const layer = (options: {
           })
       )
       return StellarRelayer.of({
+        sign,
+        broadcast,
         fetchTransactionStatus,
         awaitConfirmation: ({ poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), ...transaction }) =>
           fetchTransactionStatus(transaction).pipe(
@@ -274,3 +412,50 @@ export const StellarOperationResultCode = Schema.Literals([
  * @category models
  */
 export type StellarOperationResultCode = typeof StellarOperationResultCode.Type
+
+/**
+ * The node did not take the transaction and asks to send it again later: it already holds a transaction of this
+ * account, or its queue is full.
+ *
+ * @since 0.2.0
+ * @category reasons
+ */
+export class TryAgainLater extends Schema.TaggedError<TryAgainLater>()("TryAgainLater", {}) {}
+
+/**
+ * The node refused the transaction: `code` is its result code (`txBadSeq`, `txInsufficientFee`,
+ * `txInsufficientBalance`, `txTooLate`...), `undefined` when the result XDR cannot be decoded, and `operations` the
+ * result code of each operation when the code is `txFailed`.
+ *
+ * @since 0.2.0
+ * @category reasons
+ */
+export class Refused extends Schema.TaggedError<Refused>()("Refused", {
+  code: Schema.UndefinedOr(StellarTransactionResultCode),
+  operations: Schema.Array(StellarOperationResultCode)
+}) {}
+
+/**
+ * Why a node did not accept a transaction, the `reason` of a {@link StellarBroadcastError}, matched with
+ * `Effect.catchReason`.
+ *
+ * @since 0.2.0
+ * @category reasons
+ */
+export const StellarBroadcastReason = Schema.Union([TryAgainLater, Refused])
+
+/**
+ * @since 0.2.0
+ * @category reasons
+ */
+export type StellarBroadcastReason = typeof StellarBroadcastReason.Type
+
+/**
+ * A node did not accept the transaction, for the `reason` it gave. A failed request stays a `StellarRpcError`.
+ *
+ * @since 0.2.0
+ * @category errors
+ */
+export class StellarBroadcastError extends Schema.TaggedError<StellarBroadcastError>()("StellarBroadcastError", {
+  reason: StellarBroadcastReason
+}) {}

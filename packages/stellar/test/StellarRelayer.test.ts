@@ -44,6 +44,8 @@ const setup = (initial: Node, options?: Parameters<typeof StellarRelayer.layer>[
       getLatestLedger: Effect.die("unused"),
       getEvents: () => Effect.die("unused"),
       getLedgers: () => Effect.die("unused"),
+      getFeeStats: Effect.die("unused"),
+      sendTransaction: () => Effect.die("unused"),
       getLedgerEntries: () => Effect.die("unused"),
       getTransaction: () =>
         Effect.sync((): StellarRpc.StellarTransactionInfo => {
