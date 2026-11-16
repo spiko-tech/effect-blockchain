@@ -96,3 +96,24 @@ jobs:
         run: pnpm vitest run packages/stellar/test/StellarRelayer.quickstart.test.ts
         env:
           QUICKSTART_RPC_URL: http://127.0.0.1:8000/rpc
+
+  solana-test-validator:
+    name: Solana test validator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup
+      - name: Install the Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.10/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Start solana-test-validator
+        run: |
+          solana-test-validator --reset --quiet --ledger "$RUNNER_TEMP/ledger" &
+          timeout 60 bash -c 'until solana cluster-version --url http://127.0.0.1:8899; do sleep 1; done'
+      - name: Test
+        run: pnpm vitest run packages/solana/test/SolanaRelayer.validator.test.ts
+        env:
+          SOLANA_TEST_VALIDATOR_RPC_URL: http://127.0.0.1:8899

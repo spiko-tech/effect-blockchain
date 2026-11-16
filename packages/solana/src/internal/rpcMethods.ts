@@ -108,7 +108,8 @@ const InstructionError = Schema.Union([
   Schema.Record(Schema.String, JsonFromRpc)
 ])
 
-const TransactionError = Schema.Union([
+/** @internal */
+export const TransactionError = Schema.Union([
   Schema.String,
   Schema.Struct({ InstructionError: Schema.Tuple([NumberFromBigInt, InstructionError]) }),
   Schema.Record(Schema.String, JsonFromRpc)

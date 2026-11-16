@@ -445,12 +445,15 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([
  * Builds a {@link SolanaRpc} over `endpoints`, tried in order, sending requests with the provided `HttpClient`
  * (e.g. `FetchHttpClient.layer`). `timeout` (default 30 seconds) bounds each attempt, `retries` (default 3) and
  * `retryDelay` (default 500 millis) set the backoff before falling back: see {@link JsonRpc.Unavailable}.
+ * `genesisHash` replaces the genesis hash of `network`, for a local validator or a private cluster, which have their
+ * own.
  *
  * @since 0.1.0
  * @category layers
  */
 export const layer = (options: {
   readonly network: SolanaNetwork
+  readonly genesisHash?: SolanaGenesisHash | undefined
   readonly endpoints: Arr.NonEmptyReadonlyArray<SolanaRpcEndpoint>
   readonly timeout?: Duration.Input | undefined
   readonly retries?: number | undefined
@@ -460,7 +463,7 @@ export const layer = (options: {
     SolanaRpc,
     Effect.gen(function*() {
       const { network } = options
-      const expectedGenesisHash = toGenesisHash(network)
+      const expectedGenesisHash = options.genesisHash ?? toGenesisHash(network)
       const rpc = yield* JsonRpc.make({
         spanPrefix: "SolanaRpc",
         network,
