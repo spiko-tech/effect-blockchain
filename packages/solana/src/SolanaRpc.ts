@@ -193,9 +193,61 @@ export interface SolanaEncodedTransaction {
 }
 
 /**
- * The status meta of a transaction, reduced to its outcome and lamport balances. `err` is the raw transaction error as
- * JSON (integers as decimal strings), `null` when it succeeded. `preBalances` and `postBalances` follow the account
- * keys, then `loadedAddresses` (absent from transactions older than versioned transactions).
+ * JSON as the node writes it, with every integer read as a `bigint` so that u64 values stay exact.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export type SolanaRpcJson =
+  | null
+  | boolean
+  | string
+  | number
+  | bigint
+  | ReadonlyArray<SolanaRpcJson>
+  | { readonly [key: string]: SolanaRpcJson }
+
+/**
+ * An instruction a program invoked through a cross-program invocation, compiled like a {@link SolanaCompiledInstruction}.
+ * `stackHeight` is 2 for an instruction invoked by a top-level one, and so on, `null` on transactions recorded before the
+ * node tracked it.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export type SolanaInnerInstruction = {
+  readonly programIdIndex: number
+  readonly accounts: ReadonlyArray<number>
+  readonly data: string
+  readonly stackHeight: number | null
+}
+
+/**
+ * The token balance of an account in a transaction: `accountIndex` follows the account keys, then the loaded addresses.
+ * `uiTokenAmount` types the exact `amount` in base units and the mint's `decimals`, and keeps its other fields
+ * (`uiAmount`, `uiAmountString`) as raw JSON.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export type SolanaTokenBalance = {
+  readonly accountIndex: number
+  readonly mint: SolanaAddress
+  readonly owner?: SolanaAddress
+  readonly programId?: SolanaAddress
+  readonly uiTokenAmount: {
+    readonly amount: bigint
+    readonly decimals: number
+    readonly [field: string]: SolanaRpcJson
+  }
+}
+
+/**
+ * The status meta of a transaction. `err` is the raw transaction error as JSON (integers as decimal strings), `null`
+ * when it succeeded. `preBalances` and `postBalances` follow the account keys, then `loadedAddresses` (absent from
+ * transactions older than versioned transactions). `innerInstructions`, `preTokenBalances` and `postTokenBalances`
+ * are absent or `null` when the node did not record them. Every other field (`logMessages`, `computeUnitsConsumed`,
+ * `rewards`...) is kept as raw JSON, integers as decimal strings.
  *
  * @since 0.2.0
  * @category models
@@ -209,6 +261,15 @@ export interface SolanaTransactionMeta {
     readonly writable: ReadonlyArray<SolanaAddress>
     readonly readonly: ReadonlyArray<SolanaAddress>
   }
+  readonly innerInstructions?:
+    | ReadonlyArray<{
+      readonly index: number
+      readonly instructions: ReadonlyArray<SolanaInnerInstruction>
+    }>
+    | null
+  readonly preTokenBalances?: ReadonlyArray<SolanaTokenBalance> | null
+  readonly postTokenBalances?: ReadonlyArray<SolanaTokenBalance> | null
+  readonly [field: string]: SolanaRpcJson | undefined
 }
 
 /**

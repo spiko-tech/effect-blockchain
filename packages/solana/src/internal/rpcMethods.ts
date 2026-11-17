@@ -85,18 +85,52 @@ const transactions = {
 
 const Lamports = Schema.Array(Schema.BigInt)
 
-// the fields the balance helpers read, any other field of the status meta dropped
-const Meta = Schema.Struct({
-  err: JsonFromRpc,
-  fee: Schema.BigInt,
-  preBalances: Lamports,
-  postBalances: Lamports,
-  // absent from transactions older than versioned transactions
-  loadedAddresses: Schema.optionalKey(Schema.Struct({
-    writable: Schema.Array(SolanaAddress),
-    readonly: Schema.Array(SolanaAddress)
-  }))
-})
+// `StructWithRest` also runs the rest schema on the typed keys, whose decoded values are not all JSON (a `bigint` fee):
+// `RpcJson` encodes those as they are, and the typed schema keeps their decoded value
+const Rest = Schema.Record(Schema.String, Schema.Union([JsonFromRpc, RpcJson]))
+
+// a field absent or `null` as the node's `OptionSerializer` writes it, see `UiTransactionStatusMeta` in
+// https://github.com/anza-xyz/agave/blob/master/transaction-status-client-types/src/lib.rs
+const optionalNullable = <S extends Schema.Top>(schema: S) => Schema.optionalKey(Schema.NullOr(schema))
+
+const TokenBalances = Schema.Array(Schema.Struct({
+  accountIndex: NumberFromBigInt,
+  mint: SolanaAddress,
+  owner: Schema.optionalKey(SolanaAddress),
+  programId: Schema.optionalKey(SolanaAddress),
+  // `uiAmount` (a float) and `uiAmountString` stay raw: both derive from `amount` and `decimals`
+  uiTokenAmount: Schema.StructWithRest(
+    Schema.Struct({ amount: Schema.BigIntFromString, decimals: NumberFromBigInt }),
+    [Rest]
+  )
+}))
+
+// the fields the library reads, typed, any other field of the status meta kept raw
+const Meta = Schema.StructWithRest(
+  Schema.Struct({
+    err: JsonFromRpc,
+    fee: Schema.BigInt,
+    preBalances: Lamports,
+    postBalances: Lamports,
+    // absent from transactions older than versioned transactions
+    loadedAddresses: Schema.optionalKey(Schema.Struct({
+      writable: Schema.Array(SolanaAddress),
+      readonly: Schema.Array(SolanaAddress)
+    })),
+    innerInstructions: optionalNullable(Schema.Array(Schema.Struct({
+      index: NumberFromBigInt,
+      instructions: Schema.Array(Schema.Struct({
+        programIdIndex: NumberFromBigInt,
+        accounts: Indexes,
+        data: Schema.String,
+        stackHeight: Schema.NullOr(NumberFromBigInt)
+      }))
+    }))),
+    preTokenBalances: optionalNullable(TokenBalances),
+    postTokenBalances: optionalNullable(TokenBalances)
+  }),
+  [Rest]
+)
 
 // the node's `InstructionError` and `TransactionError` as serde writes them: a variant without data is its name, one
 // with data an object keyed by its name. Only the variants below are decoded, any other one is kept as raw JSON
