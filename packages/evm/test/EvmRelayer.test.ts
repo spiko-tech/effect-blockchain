@@ -9,6 +9,8 @@ import * as EvmSigner from "@effect-blockchain/evm/EvmSigner"
 import { EvmTransaction, EvmTransactionReceipt } from "@effect-blockchain/evm/EvmTransaction"
 import { EvmTransactionHash } from "@effect-blockchain/evm/EvmTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
@@ -201,7 +203,7 @@ describe("EvmRelayer", () => {
 
   it.effect("sign reads the pending nonce, a buffered gas estimate and the fee strategy", () =>
     Effect.gen(function*() {
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       const asked: Array<unknown> = []
       // 3 blocks answered for the 10 asked
       const history: EvmFeeHistory = {
@@ -237,7 +239,7 @@ describe("EvmRelayer", () => {
 
   it.effect("sign uses the layer's fee strategy and gas multiplier, and a history without rewards", () =>
     Effect.gen(function*() {
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       const estimates: Array<EvmRelayer.EvmFeeEstimate> = []
       const { run } = setup({ head: 100 }, {
         gasMultiplier: 2,
@@ -262,7 +264,7 @@ describe("EvmRelayer", () => {
 
   it.effect("sign reads nothing when the nonce, gas and fees are given, and keeps a failed estimate", () =>
     Effect.gen(function*() {
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       const explicit = {
         signer,
         to: TO,
@@ -270,9 +272,8 @@ describe("EvmRelayer", () => {
         gas: BigInt(21000),
         fees: { maxFeePerGas: BigInt(40), maxPriorityFeePerGas: BigInt(2) }
       }
-      const { run } = setup({ head: 100 }, undefined, {
-        estimateGas: () => Effect.fail(rejected("execution reverted"))
-      })
+      const refused = rejected("execution reverted")
+      const { run } = setup({ head: 100 }, undefined, { estimateGas: () => Effect.fail(refused) })
       const { nonce, signed } = yield* run((relayer) => relayer.sign(explicit))
       expect(nonce).toBe(BigInt(3))
       expect(parseTransaction(signed)).toMatchObject({
@@ -282,7 +283,55 @@ describe("EvmRelayer", () => {
         maxPriorityFeePerGas: BigInt(2)
       })
       const error = yield* Effect.flip(run((relayer) => relayer.sign({ ...explicit, gas: undefined })))
-      expect(error).toMatchObject({ _tag: "EvmRpcError", reason: { _tag: "Rejected" } })
+      expect(error).toMatchObject({
+        _tag: "EvmSimulationError",
+        reason: { _tag: "SimulationFailed", error: "execution reverted" }
+      })
+      expect(error.cause).toBe(refused)
+    }))
+
+  it.effect("sign keeps a transport failure of the estimate an EvmRpcError", () =>
+    Effect.gen(function*() {
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
+      const unavailable = new EvmRpc.EvmRpcError({
+        reason: new JsonRpc.Unavailable({}),
+        method: "eth_estimateGas",
+        endpoint: "a",
+        cause: new Error("Transport")
+      })
+      const { run } = setup({ head: 100 }, undefined, { estimateGas: () => Effect.fail(unavailable) })
+      const error = yield* Effect.flip(run((relayer) =>
+        relayer.sign({
+          signer,
+          to: TO,
+          nonce: BigInt(3),
+          fees: { maxFeePerGas: BigInt(40), maxPriorityFeePerGas: BigInt(2) }
+        })
+      ))
+      expect(error).toBe(unavailable)
+    }))
+
+  it.effect("layerConfig reads the confirmations from config", () =>
+    Effect.gen(function*() {
+      const rpc = Layer.mock(EvmRpc.EvmRpc)({
+        network: "Ethereum",
+        blockNumber: Effect.succeed(BigInt(100)),
+        getTransactionReceipt: () => Effect.succeed(receipt(95))
+      })
+      const status = (env: Record<string, string>) =>
+        Effect.gen(function*() {
+          return yield* (yield* EvmRelayer.EvmRelayer).fetchTransactionStatus({ hash: HASH })
+        }).pipe(
+          Effect.provide(
+            EvmRelayer.layerConfig({ confirmations: Config.Int("ETHEREUM_CONFIRMATIONS") }).pipe(
+              Layer.provide(rpc),
+              Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(env)))
+            )
+          )
+        )
+      expect(yield* status({ ETHEREUM_CONFIRMATIONS: "5" })).toStrictEqual({ _tag: "Confirmed", block: BigInt(95) })
+      expect(yield* status({ ETHEREUM_CONFIRMATIONS: "6" })).toStrictEqual({ _tag: "Included", block: BigInt(95) })
+      expect(yield* Effect.flip(status({}))).toMatchObject({ _tag: "ConfigError" })
     }))
 
   it.effect("broadcast returns the node's hash", () =>
@@ -337,14 +386,14 @@ describe("EvmRelayer", () => {
       expect(yield* run((relayer) => relayer.broadcast({ signed: SIGNED }))).toBe(keccak256(SIGNED))
       node.current = { head: 100 }
       const error = yield* Effect.flip(run((relayer) => relayer.broadcast({ signed: SIGNED })))
-      expect(error).toMatchObject({ _tag: "EvmBroadcastError", reason: { _tag: "NonceTooLow" } })
+      expect(error).toMatchObject({ _tag: "EvmBroadcastError", reason: { _tag: "InvalidNonce" } })
       expect(looked).toStrictEqual([keccak256(SIGNED), keccak256(SIGNED)])
     }))
 
   it.effect("broadcast maps a node's refusal to a reason and keeps its error as the cause", () =>
     Effect.gen(function*() {
       const refusals = {
-        "OldNonce": "NonceTooLow",
+        "OldNonce": "InvalidNonce",
         "replacement transaction underpriced": "ReplacementUnderpriced",
         "ReplacementNotAllowed": "ReplacementUnderpriced",
         "insufficient funds for gas * price + value: balance 0, tx cost 21000": "InsufficientFunds",

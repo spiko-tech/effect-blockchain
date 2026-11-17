@@ -36,7 +36,7 @@ const hashSigner = (key: `0x${string}`, address = ADDRESS) =>
 describe("EvmSigner", () => {
   it.effect("fromPrivateKey signs the EIP-1559 serialization", () =>
     Effect.gen(function*() {
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       expect(signer.address).toBe(ADDRESS)
       expect(yield* signer.signTransaction(transaction)).toBe(SIGNED)
       // `value` and `data` default to 0 and `0x`
@@ -48,7 +48,7 @@ describe("EvmSigner", () => {
   it.effect("fromPrivateKey fails on an invalid key without repeating it", () =>
     Effect.gen(function*() {
       for (const key of ["not a key", "0x1234"]) {
-        const error = yield* Effect.flip(EvmSigner.fromPrivateKey(Redacted.make(key)))
+        const error = yield* Effect.flip(EvmSigner.fromPrivateKey({ key: Redacted.make(key) }))
         expect(error).toBeInstanceOf(EvmSigner.EvmSignerError)
         expect(String(error.cause)).toBe("Error: invalid private key")
       }
@@ -56,7 +56,7 @@ describe("EvmSigner", () => {
 
   it.effect("fromPrivateKey fails on a transaction that does not serialize", () =>
     Effect.gen(function*() {
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       const error = yield* Effect.flip(
         signer.signTransaction({ ...transaction, maxPriorityFeePerGas: transaction.maxFeePerGas + BigInt(1) })
       )
