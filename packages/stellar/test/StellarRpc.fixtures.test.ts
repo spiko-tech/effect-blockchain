@@ -7,7 +7,7 @@ import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { Account, Networks, Operation, TransactionBuilder, xdr } from "@stellar/stellar-sdk"
-import type * as Arr from "effect/Array"
+import * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -38,6 +38,28 @@ const setup = (endpoints: Arr.NonEmptyReadonlyArray<Replay.Endpoint>) => {
         return yield* f(yield* StellarRpc.StellarRpc)
       }).pipe(Effect.provide(layer))
     )
+}
+
+const ledgersCursor = (endpoint: string, cursor: string) => StellarRpc.StellarLedgersCursor.make({ endpoint, cursor })
+
+// a regular endpoint with no fixture, then the archive one: an archive call must skip the first
+const archive = (cases: ReadonlyArray<string>) => {
+  const { check, endpoints, fetch, served } = Replay.replay(new URL("fixtures/", import.meta.url), [
+    { name: "quasar", cases: [] },
+    { name: "quasar-archive", cases: ["getNetwork", ...cases] }
+  ])
+  const layer = StellarRpc.layer({
+    network: "Stellar",
+    endpoints: Arr.map(endpoints, (endpoint) => ({ ...endpoint, archive: endpoint.name === "quasar-archive" })),
+    retries: 0
+  }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
+  const run = <A, E>(f: (rpc: StellarRpc.StellarRpc["Service"]) => Effect.Effect<A, E>) =>
+    check(
+      Effect.gen(function*() {
+        return yield* f(yield* StellarRpc.StellarRpc)
+      }).pipe(Effect.provide(layer))
+    )
+  return { run, served }
 }
 
 const quasarCursor = (cursor: string) => StellarRpc.StellarEventsCursor.make({ endpoint: "quasar", cursor })
@@ -170,13 +192,18 @@ describe("StellarRpc fixtures", () => {
 
   it.effect("fixture: quasar getLedgers", () =>
     Effect.gen(function*() {
-      const ledgers = yield* setup([{ name: "quasar", cases: ["getNetwork", "getLedgers-binance"] }])((rpc) =>
+      const page = yield* setup([{ name: "quasar", cases: ["getNetwork", "getLedgers-binance"] }])((rpc) =>
         rpc.getLedgers({ startLedger: BigInt(65338911), limit: 1 })
       )
-      assert.deepStrictEqual(ledgers.map(({ closeTime, sequence }) => [sequence, closeTime]), [
+      assert.deepStrictEqual(page.ledgers.map(({ closeTime, sequence }) => [sequence, closeTime]), [
         [BigInt(65338911), 1793980597]
       ])
-      assert.lengthOf(ledgers[0].metadataXdr, 952376)
+      assert.lengthOf(page.ledgers[0].metadataXdr, 952376)
+      expect(page).toMatchObject({
+        cursor: { endpoint: "quasar", cursor: "65338911" },
+        latestLedger: BigInt(65338914),
+        oldestLedger: BigInt(65217955)
+      })
     }))
 
   it.effect("fixture: quasar getLedgers falls back from pruned to quasar-archive", () =>
@@ -185,7 +212,7 @@ describe("StellarRpc fixtures", () => {
         { name: "quasar", cases: ["getNetwork", "getLedgers-pruned"] },
         { name: "quasar-archive", cases: ["getNetwork", "getLedgers-v1"] }
       ])
-      const ledgers = yield* check(
+      const { ledgers } = yield* check(
         Effect.gen(function*() {
           return yield* (yield* StellarRpc.StellarRpc).getLedgers({ startLedger: V1_LEDGER, limit: 1 })
         }).pipe(
@@ -217,6 +244,70 @@ describe("StellarRpc fixtures", () => {
         reason: { _tag: "Lagging", head: BigInt(65338915), toBlock: BigInt(999999990) },
         code: -32600
       })
+    }))
+
+  it.effect("fixture: quasar getLedgers cursor pruned, quasar-archive cursor lagging", () =>
+    Effect.gen(function*() {
+      const errors = yield* setup([
+        { name: "quasar", cases: ["getNetwork", "getLedgers-cursor-pruned"] },
+        { name: "quasar-archive", cases: ["getNetwork", "getLedgers-cursor-lagging"] }
+      ])((rpc) =>
+        Effect.all([
+          Effect.flip(rpc.getLedgers({ cursor: ledgersCursor("quasar", "55000004"), limit: 1 })),
+          Effect.flip(rpc.getLedgers({ cursor: ledgersCursor("quasar-archive", "999999990"), limit: 1 }))
+        ])
+      )
+      expect(errors).toMatchObject([
+        { reason: { _tag: "Pruned" }, code: -32602, endpoint: "quasar" },
+        { reason: { _tag: "Lagging", head: BigInt(65528603), toBlock: BigInt(999999991) }, endpoint: "quasar-archive" }
+      ])
+    }))
+
+  it.effect("fixture: quasar-archive getLedgers pages by cursor, skipping the regular endpoint", () =>
+    Effect.gen(function*() {
+      const { run, served } = archive(["getLedgers-v0-page", "getLedgers-v0-page-next"])
+      const [first, next] = yield* run((rpc) =>
+        Effect.flatMap(
+          rpc.getLedgers({ startLedger: BigInt(30000003), limit: 2, archive: true }),
+          (first) => Effect.map(rpc.getLedgers({ cursor: first.cursor, limit: 2 }), (next) => [first, next] as const)
+        )
+      )
+      assert.deepStrictEqual(first.ledgers.map(({ closeTime, sequence }) => [sequence, closeTime]), [
+        [BigInt(30000003), 1591454448],
+        [BigInt(30000004), 1591454453]
+      ])
+      assert.deepStrictEqual(first.cursor, ledgersCursor("quasar-archive", "30000004"))
+      assert.deepStrictEqual(next.ledgers.map(({ sequence }) => sequence), [BigInt(30000005), BigInt(30000006)])
+      assert.deepStrictEqual(next.cursor, ledgersCursor("quasar-archive", "30000006"))
+      // the archive endpoint retains far less than it serves
+      assert.strictEqual(next.oldestLedger, BigInt(65528540))
+      assert.deepStrictEqual(served, [
+        "quasar-archive getNetwork",
+        "quasar-archive getLedgers-v0-page",
+        "quasar-archive getLedgers-v0-page-next"
+      ])
+    }))
+
+  // ledgers with contract events of Soroban transactions, before and after protocol 23
+  it.effect("fixture: quasar-archive getLedgers of a protocol 22 and a protocol 23 ledger", () =>
+    Effect.gen(function*() {
+      const { run } = archive(["getLedgers-v1-soroban", "getLedgers-v2-soroban"])
+      const pages = yield* run((rpc) =>
+        Effect.forEach(
+          [58000008, 59000000],
+          (ledger) => rpc.getLedgers({ startLedger: BigInt(ledger), limit: 1, archive: true })
+        )
+      )
+      const metas = pages.map(({ ledgers }) => xdr.LedgerCloseMeta.fromXDR(ledgers[0].metadataXdr, "base64"))
+      assert.deepStrictEqual(pages.map(({ ledgers }) => [ledgers[0].sequence, ledgers[0].closeTime]), [
+        [BigInt(58000008), 1752508309],
+        [BigInt(59000000), 1758285731]
+      ])
+      assert.deepStrictEqual(metas.map((meta) => meta.switch()), [1, 2])
+      assert.deepStrictEqual([
+        metas[0].v1().ledgerHeader().header().ledgerVersion(),
+        metas[1].v2().ledgerHeader().header().ledgerVersion()
+      ], [22, 23])
     }))
 
   it.effect("fixture: quasar getTransaction of a successful, a failed and an unknown transaction", () =>

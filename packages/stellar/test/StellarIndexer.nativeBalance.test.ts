@@ -53,18 +53,23 @@ const fakeRpc = (
   const layer = Layer.mock(StellarRpc.StellarRpc)({
     network: "Stellar",
     getLatestLedger: Effect.suspend(() => Effect.succeed({ sequence: state.head, id: "ab", protocolVersion: 23 })),
-    getLedgers: ({ limit, startLedger }) =>
+    getLedgers: (page) =>
       Effect.suspend(() => {
+        if ("cursor" in page) return Effect.die("unused")
+        const { limit, startLedger } = page
         state.pages.push([startLedger, limit])
         const reason = options.failAt?.get(state.pages.length)
         if (reason !== undefined) return fail(reason, "getLedgers")
         const end = BigInt_.min(startLedger + b(limit ?? 5) - b(1), state.head)
-        return Effect.succeed(
-          Arr.makeBy(Number(end - startLedger) + 1, (i) => {
+        return Effect.succeed({
+          ledgers: Arr.makeBy(Number(end - startLedger) + 1, (i) => {
             const sequence = startLedger + b(i)
             return { sequence, closeTime: 1700000000 + i, metadataXdr: meta(sequence) }
-          })
-        )
+          }),
+          cursor: StellarRpc.StellarLedgersCursor.make({ endpoint: "fake", cursor: String(end) }),
+          latestLedger: state.head,
+          oldestLedger: b(1)
+        })
       }),
     getLedgerEntries: ({ keys, minLedger }) =>
       Effect.suspend(() => {

@@ -609,6 +609,17 @@ describe("JsonRpc reasons", () => {
       expect(error.cause).not.toBeInstanceOf(AggregateError)
     })))
 
+  it.effect("withFallback only tries the endpoints it is given", () => {
+    const { calls, run } = setup({ a: { blockNumber: head(1) }, b: { blockNumber: down }, c: { blockNumber: head(3) } })
+    return run(({ engine }) => {
+      const [, b, c] = engine.endpoints
+      return engine.withFallback((endpoint) => engine.call(endpoint, blockNumberMethod, []), [b, c])
+    }).pipe(Effect.map((block) => {
+      expect(block).toBe(3)
+      expect(calls).toStrictEqual(["b:chainId", "b:blockNumber", "c:chainId", "c:blockNumber"])
+    }))
+  })
+
   it.effect("withFallback stops on WrongNetwork without an aggregate", () => {
     const { calls, run } = setup({ a: { chainId: () => ({ result: "fake-2" }) }, b: { blockNumber: head(1) } })
     return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
