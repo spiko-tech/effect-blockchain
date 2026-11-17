@@ -1,24 +1,12 @@
 /**
- * Starknet transaction relaying on top of {@link StarknetRpc.StarknetRpc}: signing a transaction, broadcasting it and
- * following it until it is final.
+ * Signs V3 `INVOKE` and `DEPLOY_ACCOUNT` transactions of a Cairo 1 account (SNIP-6), broadcasts them and follows them
+ * until they are final, on top of {@link StarknetRpc.StarknetRpc}. The relayer keeps no state and `broadcast` is
+ * idempotent, as described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#stateless-relayer).
  *
- * A relayer here sends an account's own transactions and manages their nonces and fees, as OpenZeppelin Relayer does.
- * It is not a meta-transaction relayer (a paymaster, SNIP-9 outside execution) paying for someone else's transaction.
- * It keeps no state: storing hashes and nonces, deciding when to resend and holding keys belong to the application.
- * Senders sharing an account must each pass their own nonce, as the node's nonce does not count a transaction that is
- * signed and not yet in a pre-confirmed block, and two concurrent `sign` calls read the same one.
- *
- * Only V3 transactions are sent: an `INVOKE` running calls through the `__execute__` entrypoint of a Cairo 1 account
- * (SNIP-6), and the `DEPLOY_ACCOUNT` of the signer's own account. `sign` and `signDeployAccount` return the
- * transaction hash before anything is broadcast, so it can be stored first, and `broadcast` can be repeated with the
- * same transaction.
- *
- * Fees come from `starknet_estimateFee` (see {@link defaultFees}) unless `sign` receives them. The transaction is
- * estimated unsigned, with `SKIP_VALIDATE`, so that a custody signer signs once: the estimate leaves out the
- * account's validation, which the default strategy adds back. The account must hold the bounds in STRK, each
- * `maxAmount` times its `maxPricePerUnit`, though it only pays what the transaction uses.
- *
- * A transaction is in one {@link StarknetTransactionStatus}:
+ * Fees come from `starknet_estimateFee`, run unsigned with `SKIP_VALIDATE` so that a custody signer signs once. That
+ * estimate leaves out the gas of the account's validation, which {@link defaultFees} adds back. The account must hold
+ * each `maxAmount` times its `maxPricePerUnit` in STRK, and pays what the transaction uses.
  *
  * | status | meaning | final |
  * |---|---|---|
@@ -28,16 +16,20 @@
  * | `Failed` | reverted in `block`, at or below the last confirmed block | yes |
  * | `NotFound` | unknown to the node: dropped, not propagated yet, or never sent | no |
  *
- * The last confirmed block is the one of `StarknetIndexer`: with the default of 0 confirmations, a transaction is
- * final as soon as its block is accepted on L2, and `Included` only shows while the head read is behind that block.
+ * With the default of 0 confirmations, a transaction is final once its block is accepted on L2, and `Included` only
+ * shows while the head read is behind that block.
  *
  * @example
  * ```ts
  * import type { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
- * import { StarknetRelayer } from "@effect-blockchain/starknet/StarknetRelayer"
+ * import * as StarknetRelayer from "@effect-blockchain/starknet/StarknetRelayer"
+ * import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
  * import type { StarknetSigner } from "@effect-blockchain/starknet/StarknetSigner"
  * import type { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  *
  * declare const signer: StarknetSigner
  * declare const token: StarknetAddress
@@ -45,19 +37,24 @@
  * declare const store: (hash: StarknetTransactionHash, nonce: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const relayer = yield* StarknetRelayer
+ *   const relayer = yield* StarknetRelayer.StarknetRelayer
  *   // an ERC-20 `transfer(recipient, amount)`, the amount being a u256 as two felts
  *   const calls = [{ contractAddress: token, entrypoint: "transfer", calldata: [to, "0x1", "0x0"] }] as const
  *   const { hash, nonce, signed } = yield* relayer.sign({ signer, calls })
- *   // stored before the broadcast: a crash in between leaves a hash to look up, never an unknown transaction
  *   yield* store(hash, nonce)
  *   yield* relayer.broadcast({ signed })
- *   // a transaction the node never sees stays `NotFound`: the timeout bounds the wait
- *   const status = yield* relayer.awaitConfirmation({ hash }).pipe(Effect.timeout("10 minutes"))
- *   if (status._tag === "Failed") {
- *     yield* Effect.logError(`reverted in block ${status.block}: ${status.reason}`)
- *   }
+ *   // `NotFound` keeps polling: the timeout bounds the wait
+ *   return yield* relayer.awaitConfirmation({ hash }).pipe(Effect.timeout("10 minutes"))
  * })
+ *
+ * const RpcLive = StarknetRpc.layerConfig({
+ *   network: Config.succeed("Starknet"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STARKNET_RPC_URL") })])
+ * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(StarknetRelayer.layer().pipe(Layer.provide(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.2.0
@@ -292,10 +289,9 @@ export class StarknetRelayer extends Context.Service<StarknetRelayer, {
     options: StarknetTransactionStatusOptions
   ) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
-   * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
-   * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
-   * that ends first returns the last read.
+   * Reads {@link fetchTransactionStatus} on `poll` until it is `Confirmed` or `Failed`, and returns it. `NotFound`
+   * keeps polling, so bound the wait with a timeout. `poll` and errors work as in
+   * {@link Confirmations.awaitConfirmation}.
    */
   readonly awaitConfirmation: (
     options: StarknetTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }

@@ -1,11 +1,8 @@
 /**
- * Typed Starknet JSON-RPC methods over an ordered list of endpoints with fallback.
- *
- * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`starknet_chainId`). Every method but `addInvokeTransaction`
- * and `addDeployAccountTransaction` is a read, so retries and fallback are safe; these two document their own case.
- * Methods are named after the JSON-RPC method without its namespace (`starknet_getEvents` is `getEvents`). A
- * `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
+ * The Starknet JSON-RPC methods over an ordered list of endpoints with fallback, one request per call. Methods are
+ * named after the JSON-RPC method without its namespace (`starknet_getEvents` is `getEvents`). The fallback rules,
+ * the error reasons and the routing of a `getEvents` cursor are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#endpoint-fallback).
  *
  * @example
  * ```ts
@@ -57,7 +54,8 @@ import type {
 import type { StarknetTransactionHash } from "./StarknetTransactionHash.ts"
 
 /**
- * A JSON-RPC endpoint. The `name` is shown in errors and spans, the `url` is never logged.
+ * A JSON-RPC endpoint. The `name` is shown in errors and spans, and a `getEvents` cursor goes to the first endpoint
+ * with the name of the one that issued it. The `url` is never logged.
  *
  * @since 0.1.0
  * @category models
@@ -68,9 +66,7 @@ export interface StarknetRpcEndpoint {
 }
 
 /**
- * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
- * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
- * and `cause` is an `AggregateError` of each endpoint's error, in order.
+ * A failed call, with a {@link JsonRpc.Reason} as `reason`.
  *
  * On Starknet, `Unavailable` includes the codes 63 (`UNEXPECTED_ERROR`), -32603, -32005 and 429, `InvalidResponse` an
  * event outside the `getEvents` filter, and `Lagging` a head below the requested block, `BLOCK_NOT_FOUND` (24) and
@@ -506,7 +502,7 @@ export const layer = (options: {
   )
 
 /**
- * Builds an {@link StarknetRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ * Builds a {@link StarknetRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
  *
  * @example
  * ```ts

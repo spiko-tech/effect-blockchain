@@ -1,12 +1,10 @@
 /**
- * Signers of Starknet transactions: a local private key, or a custody API that only signs a hash.
+ * Signers of V3 `INVOKE` and `DEPLOY_ACCOUNT` transactions: a private key held in memory, or a custody API that only
+ * signs a hash. The reason a signer receives the whole transaction is described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#signers).
  *
- * A signer is a value and receives the whole transaction, never a hash chosen by its caller: signing an opaque hash
- * hides what is being authorised, and custody policy engines and hardware wallets refuse it. Only V3 `INVOKE` and
- * `DEPLOY_ACCOUNT` transactions are signed.
- *
- * A Starknet signature is whatever the account contract at `address` validates, so a signer returns felts and the
- * address is given, not derived from the key: `[r, s]` on the Stark curve for OpenZeppelin and Argent accounts.
+ * A Starknet signature is whatever the account contract at `address` validates, so a signer returns felts and its
+ * address is given, not derived from the key. OpenZeppelin and Argent accounts validate `[r, s]` on the Stark curve.
  *
  * @since 0.2.0
  */
