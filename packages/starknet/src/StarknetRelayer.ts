@@ -62,16 +62,17 @@
  *
  * @since 0.2.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Context from "effect/Context"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as Schedule from "effect/Schedule"
+import type * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import { hash as starknetHash } from "starknet"
-import * as Confirmations from "./internal/confirmations.ts"
 import { deployAddress, transactionHash } from "./internal/transactionHash.ts"
 import type { StarknetAddress } from "./StarknetAddress.ts"
-import { DEFAULT_POLL_INTERVAL } from "./StarknetIndexer.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
 import * as StarknetRpc from "./StarknetRpc.ts"
 import { type StarknetSigner, StarknetSignerError, type StarknetUnsignedTransaction } from "./StarknetSigner.ts"
@@ -241,9 +242,10 @@ export class StarknetRelayer extends Context.Service<StarknetRelayer, {
     readonly hash: StarknetTransactionHash
   }) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(StarknetIndexer.DEFAULT_POLL_INTERVAL)` by
-   * default) until it is `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a
-   * timeout. A `poll` that ends first returns the last status read.
+   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
+   * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
+   * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
+   * that ends first returns the last read.
    */
   readonly awaitConfirmation: (options: {
     readonly hash: StarknetTransactionHash
@@ -273,6 +275,14 @@ export const defaultFees = (estimate: StarknetRpc.StarknetFeeEstimate): Starknet
     maxPricePerUnit: margin(estimate.l2GasPrice)
   }
 })
+
+/**
+ * The default `poll` spacing of {@link StarknetRelayer.Service.awaitConfirmation}: 10 seconds.
+ *
+ * @since 0.3.0
+ * @category constants
+ */
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 const NO_BOUND = { maxAmount: BigInt(0), maxPricePerUnit: BigInt(0) }
 
@@ -304,11 +314,9 @@ const refusals: ReadonlyMap<number | undefined, () => StarknetBroadcastReason> =
   [65, () => new InsufficientResources()]
 ])
 
-// after a fallback, the error holds each endpoint's error
+// after a fallback, each endpoint's code in order
 const codesOf = (error: StarknetRpc.StarknetRpcError): ReadonlyArray<number | undefined> =>
-  error.cause instanceof AggregateError
-    ? error.cause.errors.map((each) => each instanceof StarknetRpc.StarknetRpcError ? each.code : undefined)
-    : [error.code]
+  JsonRpc.errorsOf(error).map((each) => each instanceof StarknetRpc.StarknetRpcError ? each.code : undefined)
 
 const toSignerError = (cause: unknown) => new StarknetSignerError({ cause })
 
@@ -328,6 +336,7 @@ export const layer = (options: {
     StarknetRelayer,
     Effect.gen(function*() {
       const rpc = yield* StarknetRpc.StarknetRpc
+      const confirmations = options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network)
       const chainId = StarknetNetwork.toChainId(rpc.network)
       const finish = Effect.fnUntraced(function*(
         signer: StarknetSigner,
@@ -415,7 +424,7 @@ export const layer = (options: {
           // the status does not carry the block number
           const { blockNumber: block } = yield* rpc.getTransactionReceipt({ transactionHash: hash })
           // read after the receipt: a head older than the receipt's block could only delay `Confirmed`
-          const confirmed = yield* Confirmations.lastConfirmedBlock(rpc, options.confirmations)
+          const confirmed = Confirmations.lastConfirmedBlock(yield* rpc.blockNumber, confirmations)
           if (block > confirmed) return { _tag: "Included", block } as const
           return status.executionStatus === "REVERTED"
             ? { _tag: "Failed", block, reason: status.failureReason } as const
@@ -427,11 +436,12 @@ export const layer = (options: {
         signDeployAccount,
         broadcast,
         fetchTransactionStatus,
-        awaitConfirmation: ({ hash, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL) }) =>
-          fetchTransactionStatus({ hash }).pipe(
-            Effect.repeat({ schedule: poll, until: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" }),
-            Effect.withSpan("StarknetRelayer.awaitConfirmation")
-          )
+        awaitConfirmation: ({ hash, poll }) =>
+          Confirmations.awaitConfirmation({
+            fetch: fetchTransactionStatus({ hash }),
+            isFinal: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed",
+            poll
+          }).pipe(Effect.withSpan("StarknetRelayer.awaitConfirmation"))
       })
     })
   )

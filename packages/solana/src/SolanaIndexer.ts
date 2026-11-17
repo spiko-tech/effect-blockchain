@@ -43,20 +43,21 @@
  *
  * @since 0.1.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schedule from "effect/Schedule"
 import type * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
-import * as Confirmations from "./internal/confirmations.ts"
 import type { SolanaAddress } from "./SolanaAddress.ts"
+import * as SolanaNetwork from "./SolanaNetwork.ts"
 import type { SolanaSignatureInfo, SolanaTransactionEncoding, SolanaTransactionInfo } from "./SolanaRpc.ts"
 import { SolanaRpc, SolanaRpcError } from "./SolanaRpc.ts"
 import type { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
@@ -229,7 +230,7 @@ export const DEFAULT_MAX_BATCH_SIZE = 100
  * @since 0.1.0
  * @category constants
  */
-export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 // consecutive groups of at most `max` signatures, a slot never split: a full group still takes its last slot's others
 const groupBySlot = (
@@ -308,7 +309,9 @@ export const layer = (options: {
       if (!Number.isSafeInteger(maxBatchSize) || maxBatchSize < 1) {
         return yield* Effect.die(new RangeError(`maxBatchSize must be a positive integer, got ${maxBatchSize}`))
       }
-      const lastConfirmedBlock = Confirmations.lastConfirmedBlock(rpc, options.confirmations).pipe(
+      const confirmations = options.confirmations ?? SolanaNetwork.defaultConfirmations(rpc.network)
+      const lastConfirmedBlock = rpc.getSlot({ commitment: "finalized" }).pipe(
+        Effect.map((slot) => Confirmations.lastConfirmedBlock(slot, confirmations)),
         Effect.withSpan("SolanaIndexer.lastConfirmedBlock")
       )
       // the signatures of `address`, newest first, a page read only when the previous one is consumed

@@ -11,7 +11,6 @@
  * import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
  * import * as Effect from "effect/Effect"
  * import * as Schema from "effect/Schema"
-import * as SchemaTransformation from "effect/SchemaTransformation"
  *
  * // shaped like the chain errors
  * class ChainRpcError extends Schema.TaggedError<ChainRpcError>()("ChainRpcError", { reason: JsonRpc.Reason }) {}
@@ -150,6 +149,20 @@ export const isTransient = (reason: Reason): boolean =>
   reason._tag === "Unavailable" || reason._tag === "InvalidResponse" || reason._tag === "Lagging"
 
 /**
+ * Every error under `error`: each endpoint's error of an `AggregateError` in order, and each error after its `cause`.
+ *
+ * @since 0.2.0
+ * @category errors
+ * @internal
+ */
+export const errorsOf = (error: unknown): ReadonlyArray<Error> =>
+  error instanceof AggregateError
+    ? error.errors.flatMap(errorsOf)
+    : error instanceof Error
+    ? [...errorsOf(error.cause), error]
+    : []
+
+/**
  * What `makeError` receives. `cause` never contains the endpoint URL.
  *
  * @since 0.1.0
@@ -210,6 +223,15 @@ export interface Method<Params, A, J = Schema.Json> {
   readonly params: Schema.Codec<Params, Schema.Json | undefined>
   readonly result: Schema.Codec<A, J>
 }
+
+/**
+ * Types a {@link Method} literal, inferring `Params` and `A` from its codecs.
+ *
+ * @since 0.2.0
+ * @category constructors
+ * @internal
+ */
+export const method = <Params, A, J = Schema.Json>(method: Method<Params, A, J>): Method<Params, A, J> => method
 
 /**
  * Sends one request to one endpoint, with no network check.
@@ -436,6 +458,9 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     return { reason: new Unavailable() }
   }
 
+  // `execute` only returns the response: the body parsed inside the retried and timed attempt is read back from here
+  const bodies = new WeakMap<HttpClientResponse.HttpClientResponse, J>()
+
   const client = (yield* HttpClient.HttpClient).pipe(
     HttpClient.transformResponse((response) =>
       response.pipe(
@@ -444,7 +469,11 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
             // a JSON-RPC error in a 2xx reply: lift it into the error channel so that it can be retried
             ? Effect.flatMap(
               bodyOf(response),
-              (json) => Option.match(jsonRpcErrorOf(json), { onNone: () => Effect.void, onSome: Effect.fail })
+              (json) =>
+                Option.match(jsonRpcErrorOf(json), {
+                  onNone: () => Effect.sync(() => bodies.set(response, json)),
+                  onSome: Effect.fail
+                })
             )
             // any other status: a status error, which `retryTransient` reads (transient statuses, `Retry-After`),
             // with the JSON-RPC error of its body, if any, as its cause
@@ -523,7 +552,7 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
           ...(encoded === undefined ? {} : { params: encoded })
         }),
         client.execute,
-        Effect.flatMap(bodyOf),
+        Effect.map((response) => bodies.get(response) as J),
         Effect.mapError((error) =>
           makeError({ ...classify(error), method: method.name, endpoint: endpoint.name, cause: withoutUrl(error) })
         ),

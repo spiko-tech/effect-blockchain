@@ -92,6 +92,7 @@
  *
  * @since 0.2.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import {
   Account,
   decodeAddressToMuxedAccount,
@@ -104,13 +105,12 @@ import {
 import type * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as Schedule from "effect/Schedule"
+import type * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
-import * as Confirmations from "./internal/confirmations.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
-import { DEFAULT_POLL_INTERVAL } from "./StellarIndexer.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
 import * as StellarRpc from "./StellarRpc.ts"
 import { type StellarSigner, StellarSignerError } from "./StellarSigner.ts"
@@ -231,9 +231,10 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
     readonly maxLedger?: bigint | undefined
   }) => Effect.Effect<StellarTransactionStatus, StellarRpc.StellarRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(StellarIndexer.DEFAULT_POLL_INTERVAL)` by
-   * default) until it is `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so pass
-   * `maxLedger` or bound the wait with a timeout. A `poll` that ends first returns the last status read.
+   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
+   * `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so pass `maxLedger` or bound the wait
+   * with a timeout. A read failing with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other
+   * error fails the wait. A `poll` that ends first returns the last read.
    */
   readonly awaitConfirmation: (options: {
     readonly hash: StellarTransactionHash
@@ -259,6 +260,14 @@ const failureOf = (resultXdr: string): StellarTransactionFailure | undefined => 
 }
 
 // the network's minimum base fee: https://developers.stellar.org/docs/learn/fundamentals/fees-resource-limits-metering
+/**
+ * The default `poll` spacing of {@link StellarRelayer.Service.awaitConfirmation}: 10 seconds.
+ *
+ * @since 0.3.0
+ * @category constants
+ */
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
+
 const MIN_FEE = BigInt(100)
 
 /**
@@ -313,6 +322,7 @@ export const layer = (options: {
     StellarRelayer,
     Effect.gen(function*() {
       const rpc = yield* StellarRpc.StellarRpc
+      const confirmations = options.confirmations ?? StellarNetwork.defaultConfirmations(rpc.network)
       const networkPassphrase = StellarNetwork.toPassphrase(rpc.network)
       // Soroban and classic transactions compete for separate ledger space, each with its own fees
       const estimateFee = (soroban: boolean) =>
@@ -459,7 +469,7 @@ export const layer = (options: {
             const block = transaction.ledger
             // the latest ledger of the same reply: the endpoint that holds the transaction also sets the head
             if (
-              block > Confirmations.lastConfirmedBlock(rpc.network, options.confirmations, transaction.latestLedger)
+              block > Confirmations.lastConfirmedBlock(transaction.latestLedger, confirmations)
             ) return { _tag: "Included", block }
             return transaction.status === "SUCCESS"
               ? { _tag: "Confirmed", block }
@@ -471,14 +481,12 @@ export const layer = (options: {
         feeBump,
         broadcast,
         fetchTransactionStatus,
-        awaitConfirmation: ({ poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), ...transaction }) =>
-          fetchTransactionStatus(transaction).pipe(
-            Effect.repeat({
-              schedule: poll,
-              until: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" || _tag === "Expired"
-            }),
-            Effect.withSpan("StellarRelayer.awaitConfirmation")
-          )
+        awaitConfirmation: ({ poll, ...transaction }) =>
+          Confirmations.awaitConfirmation({
+            fetch: fetchTransactionStatus(transaction),
+            isFinal: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" || _tag === "Expired",
+            poll
+          }).pipe(Effect.withSpan("StellarRelayer.awaitConfirmation"))
       })
     })
   )

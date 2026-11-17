@@ -631,4 +631,28 @@ describe("JsonRpc reasons", () => {
       expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId"])
     }))
   })
+
+  it.effect("parses each reply once", () => {
+    const parsed: Array<string> = []
+    const parseBody = (text: string): Schema.Json => {
+      parsed.push(text)
+      return JSON.parse(text)
+    }
+    const { calls, run } = setup({ a: { blockNumber: head(7) } }, { parseBody })
+    return run((rpc) => rpc.blockNumber).pipe(Effect.map((block) => {
+      expect(block).toBe(7)
+      expect(parsed).toHaveLength(calls.length)
+    }))
+  })
+
+  it("method returns its method", () => {
+    expect(JsonRpc.method(blockNumberMethod)).toBe(blockNumberMethod)
+  })
+
+  it("errorsOf lists each endpoint's error in order, each after its cause", () => {
+    const [a, b, c] = [new Error("a"), new Error("b", { cause: new Error("c") }), "not an error"]
+    const last = new Error("last", { cause: new AggregateError([a, b, c]) })
+    expect(JsonRpc.errorsOf(last).map((error) => error.message)).toStrictEqual(["a", "c", "b", "last"])
+    expect(JsonRpc.errorsOf(undefined)).toStrictEqual([])
+  })
 })

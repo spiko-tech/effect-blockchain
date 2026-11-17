@@ -1,11 +1,9 @@
-import type * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Schema from "effect/Schema"
 import { StellarContractAddress } from "../StellarAddress.ts"
 import { StellarContractEvent } from "../StellarContractEvent.ts"
 import { StellarTransactionHash } from "../StellarTransactionHash.ts"
 import { LedgerFromNumber } from "./LedgerFromNumber.ts"
-
-const make = <Params, A>(method: JsonRpc.Method<Params, A>): JsonRpc.Method<Params, A> => method
 
 const NoParams = Schema.Undefined
 
@@ -17,28 +15,28 @@ const NoParams = Schema.Undefined
 export const Cursor = Schema.String.check(Schema.isPattern(/^\d{19}-\d{10}$/u))
 
 /** @internal */
-export const getNetwork = make({
+export const getNetwork = JsonRpc.method({
   name: "getNetwork",
   params: NoParams,
   result: Schema.Struct({ passphrase: Schema.String, protocolVersion: Schema.Int })
 })
 
 /** @internal */
-export const getLatestLedger = make({
+export const getLatestLedger = JsonRpc.method({
   name: "getLatestLedger",
   params: NoParams,
   result: Schema.Struct({ id: Schema.String, protocolVersion: Schema.Int, sequence: LedgerFromNumber })
 })
 
 /** @internal */
-export const getHealth = make({
+export const getHealth = JsonRpc.method({
   name: "getHealth",
   params: NoParams,
   result: Schema.Struct({ latestLedger: LedgerFromNumber, oldestLedger: LedgerFromNumber })
 })
 
 /** @internal */
-export const getEvents = make({
+export const getEvents = JsonRpc.method({
   name: "getEvents",
   params: Schema.Struct({
     // `endLedger` is exclusive, and both bounds must be left out when paging with a cursor
@@ -55,7 +53,7 @@ export const getEvents = make({
 })
 
 /** @internal */
-export const getLedgers = make({
+export const getLedgers = JsonRpc.method({
   name: "getLedgers",
   params: Schema.Struct({
     startLedger: LedgerFromNumber,
@@ -73,7 +71,7 @@ export const getLedgers = make({
 })
 
 /** @internal */
-export const getLedgerEntries = make({
+export const getLedgerEntries = JsonRpc.method({
   name: "getLedgerEntries",
   params: Schema.Struct({ keys: Schema.Array(Schema.String) }),
   result: Schema.Struct({
@@ -112,7 +110,7 @@ const feeDistribution = Schema.Struct({
 })
 
 /** @internal */
-export const getFeeStats = make({
+export const getFeeStats = JsonRpc.method({
   name: "getFeeStats",
   params: NoParams,
   result: Schema.Struct({
@@ -123,7 +121,7 @@ export const getFeeStats = make({
 })
 
 /** @internal */
-export const sendTransaction = make({
+export const sendTransaction = JsonRpc.method({
   name: "sendTransaction",
   params: Schema.Struct({ transaction: Schema.String }),
   result: Schema.Struct({
@@ -135,7 +133,7 @@ export const sendTransaction = make({
 })
 
 /** @internal */
-export const simulateTransaction = make({
+export const simulateTransaction = JsonRpc.method({
   name: "simulateTransaction",
   params: Schema.Struct({ transaction: Schema.String }),
   result: Schema.Union([
@@ -155,7 +153,7 @@ export const simulateTransaction = make({
 const ledgerRange = { latestLedger: LedgerFromNumber, oldestLedger: LedgerFromNumber }
 
 /** @internal */
-export const getTransaction = make({
+export const getTransaction = JsonRpc.method({
   name: "getTransaction",
   // 64 hexadecimal characters: the RPC refuses a `0x` prefix
   params: Schema.Struct({ hash: Schema.String }),
