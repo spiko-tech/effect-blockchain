@@ -61,7 +61,7 @@ describe("SolanaSigner", () => {
   it.effect("fromPrivateKey signs a transaction message as @solana/kit does", () =>
     Effect.gen(function*() {
       const { message, owner, secret, signature } = yield* setup
-      const signer = yield* SolanaSigner.fromPrivateKey(Redacted.make(secret))
+      const signer = yield* SolanaSigner.fromPrivateKey({ key: Redacted.make(secret) })
       expect(signer.address).toBe(owner)
       expect(signature).toHaveLength(64)
       expect(yield* signer.signTransactionMessage(message)).toStrictEqual(signature)
@@ -72,7 +72,7 @@ describe("SolanaSigner", () => {
       const { other, secret } = yield* setup
       const mismatched = secret.slice(0, -4) + getBase58Decoder().decode(other.signature).slice(0, 4)
       for (const key of ["not base58 0OIl", secret.slice(0, 40), mismatched]) {
-        const error = yield* Effect.flip(SolanaSigner.fromPrivateKey(Redacted.make(key)))
+        const error = yield* Effect.flip(SolanaSigner.fromPrivateKey({ key: Redacted.make(key) }))
         expect(error._tag).toBe("SolanaSignerError")
         expect(error.cause).toStrictEqual(new Error("invalid private key"))
       }

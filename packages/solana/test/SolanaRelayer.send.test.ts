@@ -15,6 +15,7 @@ import {
   getTransactionDecoder,
   signBytes
 } from "@solana/kit"
+import * as Config from "effect/Config"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
@@ -33,7 +34,7 @@ const signerOf = (seed: number) =>
     const keyPair = yield* Effect.promise(() => createKeyPairFromPrivateKeyBytes(privateKey))
     const publicKey = getBase58Encoder().encode(yield* Effect.promise(() => getAddressFromPublicKey(keyPair.publicKey)))
     const secret = getBase58Decoder().decode(Uint8Array.from([...privateKey, ...publicKey]))
-    return { keyPair, signer: yield* SolanaSigner.fromPrivateKey(Redacted.make(secret)) }
+    return { keyPair, signer: yield* SolanaSigner.fromPrivateKey({ key: Redacted.make(secret) }) }
   })
 
 const transfer = (from: SolanaAddress, to: SolanaAddress): SolanaRelayer.SolanaInstruction => ({
@@ -91,6 +92,7 @@ const setup = (node: Node = {}, options?: Parameters<typeof SolanaRelayer.layer>
       getGenesisHash: Effect.die("unused"),
       getSlot: () => Effect.die("unused"),
       getBlockHeight: () => Effect.die("unused"),
+      getEpochInfo: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: () => Effect.die("unused"),
       getSignaturesForAddress: () => Effect.die("unused"),
@@ -123,19 +125,21 @@ const setup = (node: Node = {}, options?: Parameters<typeof SolanaRelayer.layer>
     Effect.gen(function*() {
       return yield* f(yield* SolanaRelayer.SolanaRelayer)
     }).pipe(Effect.provide(SolanaRelayer.layer(options).pipe(Layer.provide(rpc))))
-  return { state, run }
+  return { state, run, rpc }
 }
 
 const explicit = {
   blockhash: { blockhash: BLOCKHASH, lastValidBlockHeight: BigInt(42) },
   computeUnitLimit: 5000,
-  computeUnitPrice: BigInt(7)
+  fees: { computeUnitPrice: BigInt(7) }
 }
 
 describe("SolanaRelayer sign and broadcast", () => {
   it("defaultFees takes the 75th percentile, at least 1 micro-lamport", () => {
     const fees = (values: ReadonlyArray<number>) =>
-      SolanaRelayer.defaultFees(values.map((fee, slot) => ({ slot: BigInt(slot), prioritizationFee: BigInt(fee) })))
+      SolanaRelayer.defaultFees({
+        prioritizationFees: values.map((fee, slot) => ({ slot: BigInt(slot), prioritizationFee: BigInt(fee) }))
+      }).computeUnitPrice
     expect(fees([40, 0, 30, 0, 20, 0, 10, 5])).toBe(BigInt(30))
     expect(fees([0, 0, 0, 500])).toBe(BigInt(500))
     expect(fees([0, 0, 0, 0])).toBe(BigInt(1))
@@ -147,7 +151,7 @@ describe("SolanaRelayer sign and broadcast", () => {
     return run((relayer) =>
       Effect.gen(function*() {
         const { keyPair, signer } = yield* signerOf(1)
-        const sent = yield* relayer.sign({ feePayer: signer, instructions: [transfer(signer.address, TO)] })
+        const sent = yield* relayer.sign({ signer, instructions: [transfer(signer.address, TO)] })
         const { blockhash, instructions, messageBytes, signatures } = decode(sent.signed)
         expect(sent.lastValidBlockHeight).toBe(BigInt(900))
         expect(blockhash).toBe(BLOCKHASH)
@@ -188,7 +192,7 @@ describe("SolanaRelayer sign and broadcast", () => {
       Effect.gen(function*() {
         const { signer } = yield* signerOf(1)
         const sent = yield* relayer.sign({
-          feePayer: signer,
+          signer,
           instructions: [transfer(signer.address, TO)],
           ...explicit
         })
@@ -204,9 +208,9 @@ describe("SolanaRelayer sign and broadcast", () => {
   it.effect("uses the layer's fee strategy and multiplier, and caps the compute unit limit", () =>
     Effect.gen(function*() {
       const { signer } = yield* signerOf(1)
-      const options = { feePayer: signer, instructions: [transfer(signer.address, TO)] }
+      const options = { signer, instructions: [transfer(signer.address, TO)] as const }
       const custom = setup({ fees: [5, 6] }, {
-        fees: (fees) => BigInt(fees.length * 1000),
+        fees: ({ prioritizationFees }) => ({ computeUnitPrice: BigInt(prioritizationFees.length * 1000) }),
         computeUnitMultiplier: 2
       })
       const { instructions } = decode((yield* custom.run((relayer) => relayer.sign(options))).signed)
@@ -220,31 +224,90 @@ describe("SolanaRelayer sign and broadcast", () => {
       }
     }))
 
-  it.effect("fails SimulationFailed when the simulation fails", () => {
+  it.effect("fails with a SimulationFailed reason when the simulation fails", () => {
     const error = { InstructionError: [2, { Custom: 1 }] } as const
     const { run } = setup({ simulation: { err: error, logs: ["log"] } })
     return Effect.gen(function*() {
       const { signer } = yield* signerOf(1)
-      const options = { feePayer: signer, instructions: [transfer(signer.address, TO)] }
+      const options = { signer, instructions: [transfer(signer.address, TO)] as const }
       const failed = yield* Effect.flip(run((relayer) => relayer.sign(options)))
-      expect(failed).toMatchObject({ _tag: "SimulationFailed", error, logs: ["log"] })
+      expect(failed).toMatchObject({
+        _tag: "SolanaSimulationError",
+        reason: { _tag: "SimulationFailed", error, logs: ["log"] }
+      })
       const silent = setup({ simulation: { err: "AccountNotFound" } })
       expect(yield* Effect.flip(silent.run((relayer) => relayer.sign(options)))).toMatchObject({
-        _tag: "SimulationFailed",
-        error: "AccountNotFound",
-        logs: []
+        _tag: "SolanaSimulationError",
+        reason: { _tag: "SimulationFailed", error: "AccountNotFound", logs: [] }
       })
     })
   })
 
-  it.effect("collects one signature per signer account, the fee payer's first", () => {
+  it.effect("refuses a compute unit limit or price the Compute Budget instructions cannot hold", () =>
+    Effect.gen(function*() {
+      const { signer } = yield* signerOf(1)
+      const options = { signer, instructions: [transfer(signer.address, TO)] as const, ...explicit }
+      const { run, state } = setup()
+      for (const computeUnitLimit of [-1, 1.5, 1_400_001, 2 ** 32, Number.NaN]) {
+        const error = yield* Effect.flip(run((relayer) => relayer.sign({ ...options, computeUnitLimit })))
+        expect(error).toMatchObject({
+          _tag: "SolanaSignerError",
+          cause: new Error(`computeUnitLimit ${computeUnitLimit} is not an integer from 0 to 1400000`)
+        })
+      }
+      for (const computeUnitPrice of [BigInt(-1), BigInt(2) ** BigInt(64)]) {
+        const error = yield* Effect.flip(run((relayer) => relayer.sign({ ...options, fees: { computeUnitPrice } })))
+        expect(error).toMatchObject({
+          _tag: "SolanaSignerError",
+          cause: new Error(`computeUnitPrice ${computeUnitPrice} is not a u64`)
+        })
+      }
+      expect(state.calls).toStrictEqual([])
+      // the bounds themselves are valid
+      const bounds = { computeUnitLimit: 1_400_000, fees: { computeUnitPrice: BigInt(2) ** BigInt(64) - BigInt(1) } }
+      const { instructions } = decode((yield* run((relayer) => relayer.sign({ ...options, ...bounds }))).signed)
+      expect(instructions[0]?.data).toStrictEqual([2, ...u32(1_400_000)])
+      expect(instructions[1]?.data).toStrictEqual([3, ...u64(bounds.fees.computeUnitPrice)])
+      expect(
+        decode((yield* run((relayer) => relayer.sign({ ...options, computeUnitLimit: 0 }))).signed).instructions[0]
+          ?.data
+      )
+        .toStrictEqual([2, ...u32(0)])
+      // a fee strategy or a multiplier giving an invalid value fails the same way
+      const strategy = setup({}, { fees: () => ({ computeUnitPrice: BigInt(-1) }) })
+      const { fees: _, ...withoutFees } = options
+      expect(yield* Effect.flip(strategy.run((relayer) => relayer.sign(withoutFees)))).toMatchObject({
+        _tag: "SolanaSignerError"
+      })
+      const multiplier = setup({}, { computeUnitMultiplier: Number.NaN })
+      const { computeUnitLimit: __, ...withoutLimit } = options
+      expect(yield* Effect.flip(multiplier.run((relayer) => relayer.sign(withoutLimit)))).toMatchObject({
+        _tag: "SolanaSignerError"
+      })
+    }))
+
+  it.effect("layerConfig reads the confirmations and the multiplier from Config", () =>
+    Effect.gen(function*() {
+      const { signer } = yield* signerOf(1)
+      const sent = yield* Effect.gen(function*() {
+        const relayer = yield* SolanaRelayer.SolanaRelayer
+        return yield* relayer.sign({ signer, instructions: [transfer(signer.address, TO)] })
+      }).pipe(
+        Effect.provide(
+          SolanaRelayer.layerConfig({ computeUnitMultiplier: Config.succeed(3) }).pipe(Layer.provide(setup().rpc))
+        )
+      )
+      expect(decode(sent.signed).instructions[0]?.data).toStrictEqual([2, ...u32(3000)])
+    }))
+
+  it.effect("collects one signature per signer account, the signer's first", () => {
     const { run } = setup()
     return run((relayer) =>
       Effect.gen(function*() {
         const payer = yield* signerOf(1)
         const owner = yield* signerOf(2)
-        const instructions = [transfer(owner.signer.address, TO)]
-        const sent = yield* relayer.sign({ feePayer: payer.signer, signers: [owner.signer], instructions, ...explicit })
+        const instructions = [transfer(owner.signer.address, TO)] as const
+        const sent = yield* relayer.sign({ signer: payer.signer, cosigners: [owner.signer], instructions, ...explicit })
         const { messageBytes, signatures } = decode(sent.signed)
         expect(signatures).toStrictEqual([
           [payer.signer.address, yield* Effect.promise(() => signBytes(payer.keyPair.privateKey, messageBytes))],
@@ -252,19 +315,19 @@ describe("SolanaRelayer sign and broadcast", () => {
         ])
         expect(sent.hash).toBe(getBase58Decoder().decode(signatures[0]?.[1] ?? new Uint8Array()))
 
-        const missing = yield* Effect.flip(relayer.sign({ feePayer: payer.signer, instructions, ...explicit }))
+        const missing = yield* Effect.flip(relayer.sign({ signer: payer.signer, instructions, ...explicit }))
         expect(missing).toMatchObject({
           _tag: "SolanaSignerError",
           cause: new Error(`no signer for ${owner.signer.address}`)
         })
         const short = { ...owner.signer, signTransactionMessage: () => Effect.succeed(new Uint8Array(63)) }
         const malformed = yield* Effect.flip(
-          relayer.sign({ feePayer: payer.signer, signers: [short], instructions, ...explicit })
+          relayer.sign({ signer: payer.signer, cosigners: [short], instructions, ...explicit })
         )
         expect(malformed._tag).toBe("SolanaSignerError")
         const invalid = yield* Effect.flip(relayer.sign({
-          feePayer: payer.signer,
-          signers: [owner.signer],
+          signer: payer.signer,
+          cosigners: [owner.signer],
           instructions,
           ...explicit,
           blockhash: { blockhash: "not a blockhash", lastValidBlockHeight: BigInt(1) }
@@ -298,7 +361,7 @@ describe("SolanaRelayer sign and broadcast", () => {
     Effect.gen(function*() {
       const { signer } = yield* signerOf(1)
       const sign = (relayer: SolanaRelayer.SolanaRelayer["Service"]) =>
-        relayer.sign({ feePayer: signer, instructions: [transfer(signer.address, TO)], ...explicit })
+        relayer.sign({ signer, instructions: [transfer(signer.address, TO)], ...explicit })
       const refuse = (simulation: Partial<SolanaRpc.SolanaSimulation>) => {
         const { run, state } = setup({ send: Effect.fail(preflight), simulation })
         return run((relayer) =>
@@ -318,8 +381,8 @@ describe("SolanaRelayer sign and broadcast", () => {
       expect(known.result).toMatchObject({ _tag: "Success", success: known.sent.hash })
       const reasons = [
         ["BlockhashNotFound", { _tag: "BlockhashNotFound" }],
-        ["InsufficientFundsForFee", { _tag: "InsufficientFundsForFee" }],
-        ["AccountNotFound", { _tag: "InsufficientFundsForFee" }],
+        ["InsufficientFundsForFee", { _tag: "InsufficientFunds" }],
+        ["AccountNotFound", { _tag: "InsufficientFunds" }],
         ["AccountInUse", { _tag: "SimulationFailed", error: "AccountInUse", logs: [] }]
       ] as const
       for (const [err, reason] of reasons) {

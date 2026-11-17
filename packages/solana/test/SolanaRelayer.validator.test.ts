@@ -54,15 +54,15 @@ const generate = Effect.promise(async () => {
   const keyPair = await createKeyPairFromPrivateKeyBytes(privateKey)
   const publicKey = getBase58Encoder().encode(await getAddressFromPublicKey(keyPair.publicKey))
   return getBase58Decoder().decode(Uint8Array.from([...privateKey, ...publicKey]))
-}).pipe(Effect.flatMap((secret) => SolanaSigner.fromPrivateKey(Redacted.make(secret))))
+}).pipe(Effect.flatMap((secret) => SolanaSigner.fromPrivateKey({ key: Redacted.make(secret) })))
 
 // the blockhash, the fees and the preflight are read at `confirmed`: the airdrop is waited for at that commitment
 const funded = Effect.gen(function*() {
   const rpc = yield* SolanaRpc.SolanaRpc
   const signer = yield* generate
   const airdrop = SolanaTransactionHash.make(yield* call("requestAirdrop", [signer.address, Number(SOL)]))
-  // Agave refuses a config without `searchTransactionHistory`
-  yield* rpc.getSignatureStatuses({ signatures: [airdrop], searchTransactionHistory: false }).pipe(
+  // Agave refuses a config without `searchTransactionHistory`: left out here, it is sent as `false`
+  yield* rpc.getSignatureStatuses({ signatures: [airdrop] }).pipe(
     Effect.repeat({
       schedule: poll,
       until: ({ value }) => value[0] !== null && value[0]?.confirmationStatus !== "processed"
@@ -91,7 +91,7 @@ describe.skipIf(url === "")("SolanaRelayer on solana-test-validator", { timeout:
       const payer = yield* funded
       const other = yield* generate
       const sent = yield* relayer.sign({
-        feePayer: payer,
+        signer: payer,
         instructions: [transfer(payer.address, other.address, SOL / BigInt(10))]
       })
       expect(yield* relayer.fetchTransactionStatus(sent)).toStrictEqual({ _tag: "NotFound" })
@@ -103,13 +103,39 @@ describe.skipIf(url === "")("SolanaRelayer on solana-test-validator", { timeout:
       expect(yield* relayer.broadcast(sent)).toBe(sent.hash)
 
       const back = yield* relayer.sign({
-        feePayer: payer,
-        signers: [other],
+        signer: payer,
+        cosigners: [other],
         instructions: [transfer(other.address, payer.address, SOL / BigInt(20))]
       })
       yield* relayer.broadcast(back)
       expect(yield* relayer.awaitConfirmation({ ...back, poll })).toMatchObject({ _tag: "Confirmed" })
       expect((yield* rpc.getBalance({ address: other.address })).value).toBe(SOL / BigInt(20))
+    }).pipe(Effect.provide(layer)))
+
+  it.live("reads the status of a transaction the validator knows, with and without its history", () =>
+    Effect.gen(function*() {
+      const relayer = yield* SolanaRelayer.SolanaRelayer
+      const rpc = yield* SolanaRpc.SolanaRpc
+      const payer = yield* funded
+      const sent = yield* relayer.sign({
+        signer: payer,
+        instructions: [transfer(payer.address, (yield* generate).address, SOL / BigInt(10))]
+      })
+      yield* relayer.broadcast(sent)
+      const { block } = yield* relayer.awaitConfirmation({ ...sent, poll }).pipe(
+        Effect.filterOrFail((status) => status._tag === "Confirmed")
+      )
+      for (const searchTransactionHistory of [undefined, false, true]) {
+        const { slot, value } = yield* rpc.getSignatureStatuses({ signatures: [sent.hash], searchTransactionHistory })
+        expect(value).toMatchObject([{ slot: block, err: null, confirmationStatus: "finalized" }])
+        expect(slot >= block).toBe(true)
+      }
+      const finalized = yield* rpc.getEpochInfo({ commitment: "finalized" })
+      expect(finalized.absoluteSlot >= block).toBe(true)
+      expect(finalized.blockHeight <= finalized.absoluteSlot).toBe(true)
+      // a status read after a finalized block is answered at that block's slot or later: what `Expired` relies on
+      const { slot } = yield* rpc.getSignatureStatuses({ signatures: [sent.hash] })
+      expect(slot >= finalized.absoluteSlot).toBe(true)
     }).pipe(Effect.provide(layer)))
 
   it.live("reports a failing instruction as Failed", () =>
@@ -118,15 +144,15 @@ describe.skipIf(url === "")("SolanaRelayer on solana-test-validator", { timeout:
       const rpc = yield* SolanaRpc.SolanaRpc
       const payer = yield* funded
       // more than the payer holds: the System program fails with its `ResultWithNegativeLamports` (1)
-      const instructions = [transfer(payer.address, (yield* generate).address, SOL * BigInt(10))]
+      const instructions = [transfer(payer.address, (yield* generate).address, SOL * BigInt(10))] as const
       const error = { InstructionError: [2, { Custom: 1 }] }
-      const estimated = yield* Effect.flip(relayer.sign({ feePayer: payer, instructions }))
-      expect(estimated).toMatchObject({ _tag: "SimulationFailed", error })
+      const estimated = yield* Effect.flip(relayer.sign({ signer: payer, instructions }))
+      expect(estimated).toMatchObject({ _tag: "SolanaSimulationError", reason: { _tag: "SimulationFailed", error } })
       const sent = yield* relayer.sign({
-        feePayer: payer,
+        signer: payer,
         instructions,
         computeUnitLimit: 10_000,
-        computeUnitPrice: BigInt(1)
+        fees: { computeUnitPrice: BigInt(1) }
       })
       const refused = yield* Effect.flip(relayer.broadcast(sent))
       expect(refused).toMatchObject({ _tag: "SolanaBroadcastError", reason: { _tag: "SimulationFailed", error } })
@@ -141,19 +167,19 @@ describe.skipIf(url === "")("SolanaRelayer on solana-test-validator", { timeout:
       const relayer = yield* SolanaRelayer.SolanaRelayer
       const payer = yield* funded
       const poor = yield* generate
-      const budget = { computeUnitLimit: 10_000, computeUnitPrice: BigInt(1) }
+      const budget = { computeUnitLimit: 10_000, fees: { computeUnitPrice: BigInt(1) } }
       const unfunded = yield* relayer.sign({
-        feePayer: poor,
+        signer: poor,
         instructions: [transfer(poor.address, payer.address, BigInt(1))],
         ...budget
       })
       expect(yield* Effect.flip(relayer.broadcast(unfunded))).toMatchObject({
         _tag: "SolanaBroadcastError",
-        reason: { _tag: "InsufficientFundsForFee" }
+        reason: { _tag: "InsufficientFunds" }
       })
 
       const stale = yield* relayer.sign({
-        feePayer: payer,
+        signer: payer,
         instructions: [transfer(payer.address, poor.address, SOL / BigInt(10))],
         // a hash no block ever had, so that the test does not wait 150 blocks for a real one to expire
         blockhash: { blockhash: SYSTEM_PROGRAM_ADDRESS, lastValidBlockHeight: BigInt(0) },

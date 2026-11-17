@@ -103,6 +103,7 @@ const fakeRpc = (options: {
       getGenesisHash: Effect.die("unused"),
       getSlot: () => call("getSlot", () => state.head),
       getBlockHeight: () => Effect.die("unused"),
+      getEpochInfo: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: ({ address }) =>
         call("getBalance", () => {
