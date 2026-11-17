@@ -24,15 +24,24 @@ const b = (n: number) => BigInt(n)
 // A fake `StellarRpc` over the history of `A`: `changes` maps a ledger to the balance `A` ends it with, the first one
 // creating it. `getLatestLedger` and `getLedgerEntries` answer at `state.head`, `getLedgers` builds the ledgers' metas. The
 // n-th `getLedgers` call (1-based) fails with `failAt.get(n)` when set. `entry` overrides the account entry at the head.
+// A regular page starting below `oldest` fails `Pruned`; an `archive` page goes to `archivePages`, and fails `Rejected`
+// as `StellarRpc` does when no endpoint is flagged `archive`.
 const fakeRpc = (
   head: bigint,
   changes: ReadonlyMap<bigint, number>,
   options: {
     readonly failAt?: ReadonlyMap<number, JsonRpc.Reason>
     readonly entry?: StellarRpc.StellarLedgerEntry
+    readonly oldest?: bigint
+    readonly archive?: boolean
   } = {}
 ) => {
-  const state = { head, pages: new Array<readonly [bigint, number | undefined]>(), accounts: 0 }
+  const state = {
+    head,
+    pages: new Array<readonly [bigint, number | undefined]>(),
+    archivePages: new Array<readonly [bigint, number | undefined]>(),
+    accounts: 0
+  }
   const fail = (reason: JsonRpc.Reason, method: string) =>
     Effect.fail(new StellarRpc.StellarRpcError({ reason, method, endpoint: "fake", cause: new Error(reason._tag) }))
   const lastChange = (ledger: bigint) =>
@@ -57,9 +66,26 @@ const fakeRpc = (
       Effect.suspend(() => {
         if ("cursor" in page) return Effect.die("unused")
         const { limit, startLedger } = page
-        state.pages.push([startLedger, limit])
-        const reason = options.failAt?.get(state.pages.length)
-        if (reason !== undefined) return fail(reason, "getLedgers")
+        if (page.archive === true) {
+          if (options.archive !== true) {
+            return Effect.fail(
+              new StellarRpc.StellarRpcError({
+                reason: new JsonRpc.Rejected(),
+                method: "getLedgers",
+                endpoint: "archive",
+                cause: new Error("no endpoint is flagged archive")
+              })
+            )
+          }
+          state.archivePages.push([startLedger, limit])
+        } else {
+          state.pages.push([startLedger, limit])
+          const reason = options.failAt?.get(state.pages.length)
+          if (reason !== undefined) return fail(reason, "getLedgers")
+          if (options.oldest !== undefined && startLedger < options.oldest) {
+            return fail(new JsonRpc.Pruned(), "getLedgers")
+          }
+        }
         const end = BigInt_.min(startLedger + b(limit ?? 5) - b(1), state.head)
         return Effect.succeed({
           ledgers: Arr.makeBy(Number(end - startLedger) + 1, (i) => {
@@ -141,10 +167,12 @@ describe("StellarIndexer.fetchNativeBalance", () => {
     }))
 
   it.effect("reads the balance before the first change after the block, 0 before the account existed", () => {
-    const { layer, state } = fakeRpc(b(200), history)
+    const { layer, state } = fakeRpc(b(200), history, { archive: true })
     return provide(Effect.all([fetchAt(100), fetchAt(106), fetchAt(118)]), layer).pipe(Effect.map((balances) => {
       assert.deepStrictEqual(balances, [b(0), b(50), b(60)])
       assert.deepStrictEqual(state.pages, [[b(101), 10], [b(107), 10]])
+      // pages the regular endpoints hold never reach the archive ones
+      assert.deepStrictEqual(state.archivePages, [])
     }))
   })
 
@@ -173,6 +201,24 @@ describe("StellarIndexer.fetchNativeBalance", () => {
       }
     }))
 
+  it.effect("reads a pruned page again from the archive endpoints", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(150), archive: true })
+    return provide(fetchAt(106), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(50))
+      assert.deepStrictEqual(state.pages, [[b(107), 10]])
+      assert.deepStrictEqual(state.archivePages, [[b(107), 10]])
+    }))
+  })
+
+  it.effect("fails Pruned on a pruned page when no endpoint is flagged archive", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(150) })
+    return provide(Effect.flip(fetchAt(106)), layer).pipe(Effect.map((error) => {
+      assert.strictEqual(error.reason._tag, "Pruned")
+      assert.strictEqual(error.endpoint, "fake")
+      assert.deepStrictEqual(state.archivePages, [])
+    }))
+  })
+
   it.effect("fails Lagging above the head", () =>
     provide(Effect.flip(fetchAt(201)), fakeRpc(b(200), history).layer).pipe(
       Effect.map((error) => expect(error.reason).toMatchObject({ _tag: "Lagging", head: b(200), toBlock: b(201) }))
@@ -193,6 +239,22 @@ describe("StellarIndexer.streamNativeBalance", () => {
         // account entry covers the sample (lastModifiedLedger 118 <= 120)
         assert.deepStrictEqual(state.pages, [[b(101), 10], [b(105), 1], [b(106), 5], [b(111), 5]])
         assert.strictEqual(state.accounts, 5)
+      })
+    )
+  })
+
+  it.effect("reads only the pages past the regular endpoints' retention from the archive endpoints", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(108), archive: true })
+    return provide(collect({ address: A, fromBlock: b(100), toBlock: b(120), step: 5 }), layer).pipe(
+      Effect.map(({ exit, samples }) => {
+        assert.isTrue(Exit.isSuccess(exit))
+        assert.deepStrictEqual(samples, [[b(100), b(0)], [b(105), b(50)], [b(110), b(50)], [b(115), b(70)], [
+          b(120),
+          b(60)
+        ]])
+        // the pages starting below 108 are read on both, the later ones on the regular endpoints only
+        assert.deepStrictEqual(state.pages, [[b(101), 10], [b(105), 1], [b(106), 5], [b(111), 5]])
+        assert.deepStrictEqual(state.archivePages, [[b(101), 10], [b(105), 1], [b(106), 5]])
       })
     )
   })
@@ -259,9 +321,14 @@ describe("StellarIndexer.streamNativeBalance", () => {
   })
 
   it.effect("fails on the first failure without retry", () => {
-    const { layer } = fakeRpc(b(200), history, { failAt: new Map([[1, new JsonRpc.Unavailable()]]) })
+    const { layer, state } = fakeRpc(b(200), history, {
+      failAt: new Map([[1, new JsonRpc.Unavailable()]]),
+      archive: true
+    })
     return provide(collect({ address: A, fromBlock: b(100), step: 5 }), layer).pipe(Effect.map(({ exit, samples }) => {
       assert.deepStrictEqual(samples, [])
+      // only `Pruned` sends a page to the archive endpoints
+      assert.deepStrictEqual(state.archivePages, [])
       assert.strictEqual(Option.getOrUndefined(Exit.findErrorOption(exit))?.reason._tag, "Unavailable")
     }))
   })
