@@ -234,8 +234,8 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
     options: { readonly transactionHash: StarknetTransactionHash }
   ) => Effect.Effect<StarknetTransactionReceipt, StarknetRpcError>
   /**
-   * `starknet_getTransactionStatus`, `null` when the last endpoint tried answers `TXN_HASH_NOT_FOUND` (29): an endpoint
-   * that does not know the transaction falls back to the next one first.
+   * `starknet_getTransactionStatus`, `null` when no endpoint knows the transaction: at least one answered
+   * `TXN_HASH_NOT_FOUND` (29) and every other one failed with a transient reason (`JsonRpc.isTransient`).
    */
   readonly getTransactionStatus: (
     options: { readonly transactionHash: StarknetTransactionHash }
@@ -470,7 +470,11 @@ export const layer = (options: {
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getTransactionStatus, { transaction_hash: transactionHash })
           ).pipe(
-            Effect.catchIf((error) => error.code === TXN_HASH_NOT_FOUND, () => Effect.succeed(null))
+            Effect.catchIf((error) => {
+              const errors = JsonRpc.errorsOf(error).filter((each) => each instanceof StarknetRpcError)
+              return errors.some((each) => each.code === TXN_HASH_NOT_FOUND) &&
+                errors.every((each) => JsonRpc.isTransient(each.reason))
+            }, () => Effect.succeed(null))
           ),
         getNonce: ({ address, blockTag }) =>
           rpc.withFallback((endpoint) =>

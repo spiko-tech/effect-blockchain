@@ -69,15 +69,15 @@ describe.skipIf(url === "")("StarknetRelayer on starknet-devnet", { concurrent: 
       const relayer = yield* StarknetRelayer.StarknetRelayer
       const signer = yield* StarknetSigner.fromPrivateKey({ address: ADDRESS, key: Redacted.make(KEY) })
       // more STRK than the account holds
-      const calls = [transfer(TO, STRK * STRK)]
+      const calls = [transfer(TO, STRK * STRK)] as const
       // the estimate runs the calls: it refuses the ones that revert
       expect(yield* Effect.flip(relayer.sign({ signer, calls }))).toMatchObject({
-        _tag: "StarknetRpcError",
-        reason: { _tag: "Rejected" },
-        code: 41
+        _tag: "StarknetSimulationError",
+        reason: { _tag: "SimulationFailed", error: expect.any(String) },
+        cause: { reason: { _tag: "Rejected" }, code: 41 }
       })
-      const { signed: { resourceBounds } } = yield* relayer.sign({ signer, calls: [transfer(TO, BigInt(1))] })
-      const { hash, signed } = yield* relayer.sign({ signer, calls, resourceBounds })
+      const { signed: fees } = yield* relayer.sign({ signer, calls: [transfer(TO, BigInt(1))] })
+      const { hash, signed } = yield* relayer.sign({ signer, calls, fees })
       yield* relayer.broadcast({ signed })
       const status = yield* relayer.awaitConfirmation({ hash, poll })
       expect(status).toMatchObject({ _tag: "Failed", reason: expect.any(String) })
@@ -87,26 +87,25 @@ describe.skipIf(url === "")("StarknetRelayer on starknet-devnet", { concurrent: 
     Effect.gen(function*() {
       const relayer = yield* StarknetRelayer.StarknetRelayer
       const signer = yield* StarknetSigner.fromPrivateKey({ address: ADDRESS, key: Redacted.make(KEY) })
-      const calls = [transfer(TO, BigInt(1))]
+      const calls = [transfer(TO, BigInt(1))] as const
       const refusal = (signed: StarknetRelayer.StarknetSignedTransaction) =>
         Effect.map(Effect.flip(relayer.broadcast(signed)), (error) => "reason" in error ? error.reason._tag : error)
 
       // explicit bounds: the estimate refuses a nonce that is not the next one
-      const { signed: { resourceBounds } } = yield* relayer.sign({ signer, calls })
-      const used = yield* relayer.sign({
-        signer,
-        calls: [transfer(TO, BigInt(2))],
-        resourceBounds,
-        nonce: BigInt(0)
-      })
+      const { signed: fees } = yield* relayer.sign({ signer, calls })
+      const { resourceBounds } = fees
+      const used = yield* relayer.sign({ signer, calls: [transfer(TO, BigInt(2))], fees, nonce: BigInt(0) })
       expect(yield* refusal(used)).toBe("InvalidNonce")
 
       const unaffordable = yield* relayer.sign({
         signer,
         calls,
-        resourceBounds: { ...resourceBounds, l2Gas: { ...resourceBounds.l2Gas, maxPricePerUnit: STRK } }
+        fees: {
+          resourceBounds: { ...resourceBounds, l2Gas: { ...resourceBounds.l2Gas, maxPricePerUnit: STRK } },
+          tip: BigInt(0)
+        }
       })
-      expect(yield* refusal(unaffordable)).toBe("InsufficientBalance")
+      expect(yield* refusal(unaffordable)).toBe("InsufficientFunds")
 
       const stranger = yield* StarknetSigner.fromPrivateKey({ address: ADDRESS, key: Redacted.make(OTHER_KEY) })
       const forged = yield* relayer.sign({ signer: stranger, calls })

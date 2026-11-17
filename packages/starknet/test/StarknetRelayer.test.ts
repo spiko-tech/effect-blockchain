@@ -7,6 +7,9 @@ import * as StarknetSigner from "@effect-blockchain/starknet/StarknetSigner"
 import type { StarknetTransaction } from "@effect-blockchain/starknet/StarknetTransaction"
 import { StarknetTransactionHash } from "@effect-blockchain/starknet/StarknetTransactionHash"
 import { describe, expect, it } from "@effect/vitest"
+import * as Arr from "effect/Array"
+import * as Config from "effect/Config"
+import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import * as Layer from "effect/Layer"
@@ -185,7 +188,8 @@ const BOUNDS = {
   l2Gas: { maxAmount: BigInt(1_800_000), maxPricePerUnit: BigInt(4500) }
 }
 const NO_BOUND = { maxAmount: BigInt(0), maxPricePerUnit: BigInt(0) }
-const calls = [{ contractAddress: STRK_TOKEN_ADDRESS, entrypoint: "transfer", calldata: [TO, "0x1", "0x0"] }]
+const FEES = { resourceBounds: BOUNDS, tip: BigInt(0) }
+const calls = Arr.of({ contractAddress: STRK_TOKEN_ADDRESS, entrypoint: "transfer", calldata: [TO, "0x1", "0x0"] })
 
 const refused = (code?: number, reason: JsonRpc.Reason = new JsonRpc.Rejected(), cause: unknown = new Error("no")) =>
   new StarknetRpc.StarknetRpcError({ reason, method: "starknet_addInvokeTransaction", endpoint: "fake", code, cause })
@@ -195,6 +199,7 @@ const sender = (
   node: {
     readonly add?: Effect.Effect<StarknetTransactionHash, StarknetRpc.StarknetRpcError> | undefined
     readonly known?: boolean | undefined
+    readonly estimate?: StarknetRpc.StarknetRpcError | undefined
   } = {},
   options?: Parameters<typeof StarknetRelayer.layer>[0]
 ) => {
@@ -219,7 +224,11 @@ const sender = (
       call: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
       getNonce: (options) => Effect.sync(() => (seen.nonces.push(options), BigInt(7))),
-      estimateFee: (options) => Effect.sync(() => (seen.estimates.push(options), [ESTIMATE])),
+      estimateFee: (options) =>
+        Effect.suspend(() => {
+          seen.estimates.push(options)
+          return node.estimate === undefined ? Effect.succeed(Arr.of(ESTIMATE)) : Effect.fail(node.estimate)
+        }),
       addInvokeTransaction: ({ transaction }) => add(transaction),
       addDeployAccountTransaction: ({ transaction }) =>
         Effect.map(add(transaction), (transactionHash) => ({ transactionHash, contractAddress: DEPLOYED })),
@@ -246,7 +255,73 @@ const hashSigner = (address = ADDRESS) => {
 
 describe("StarknetRelayer sending", () => {
   it("defaultFees bounds each resource by 1.5 times its amount and price, after the validation allowance", () => {
-    expect(StarknetRelayer.defaultFees(ESTIMATE)).toStrictEqual(BOUNDS)
+    expect(StarknetRelayer.defaultFees(ESTIMATE)).toStrictEqual(FEES)
+  })
+
+  it.effect("the layer's feeMultiplier replaces the 1.5 margin, also read from config", () => {
+    const { signer } = hashSigner()
+    const doubled = {
+      l1Gas: { maxAmount: BigInt(0), maxPricePerUnit: BigInt(2000) },
+      l1DataGas: { maxAmount: BigInt(384), maxPricePerUnit: BigInt(4000) },
+      l2Gas: { maxAmount: BigInt(2_400_000), maxPricePerUnit: BigInt(6000) }
+    }
+    return Effect.gen(function*() {
+      const { signed } = yield* sender({}, { feeMultiplier: 2 }).run((relayer) => relayer.sign({ signer, calls }))
+      expect(signed.resourceBounds).toStrictEqual(doubled)
+      const relayer = yield* StarknetRelayer.StarknetRelayer
+      expect(yield* relayer.fetchTransactionStatus({ hash: HASH })).toStrictEqual({
+        _tag: "Included",
+        block: BigInt(100)
+      })
+    }).pipe(
+      Effect.provide(
+        StarknetRelayer.layerConfig({ confirmations: Config.Int("STARKNET_CONFIRMATIONS") }).pipe(
+          Layer.provide(
+            Layer.mock(StarknetRpc.StarknetRpc)({
+              network: "Starknet",
+              blockNumber: Effect.succeed(BigInt(101)),
+              getTransactionStatus: () => Effect.succeed({ finalityStatus: "ACCEPTED_ON_L2" }),
+              getTransactionReceipt: ({ transactionHash }) =>
+                Effect.succeed({ transactionHash, blockNumber: BigInt(100), blockHash: "0x1", events: [] })
+            })
+          ),
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ STARKNET_CONFIRMATIONS: "2" })))
+        )
+      )
+    )
+  })
+
+  it.effect("sign fails with a StarknetSimulationError when any endpoint's estimate refuses the transaction", () => {
+    const { signer } = hashSigner()
+    const reverted = refused(41, new JsonRpc.Rejected(), new Error("Transaction execution error"))
+    const unavailable = new JsonRpc.Unavailable({})
+    const fallback = refused(undefined, unavailable, new AggregateError([reverted, refused(undefined, unavailable)]))
+    return Effect.gen(function*() {
+      for (const cause of [reverted, fallback]) {
+        const error = yield* Effect.flip(sender({ estimate: cause }).run((relayer) => relayer.sign({ signer, calls })))
+        expect(error).toMatchObject({
+          _tag: "StarknetSimulationError",
+          reason: { _tag: "SimulationFailed", error: "Transaction execution error" },
+          cause
+        })
+      }
+      const opaque = yield* Effect.flip(
+        sender({ estimate: refused(41, new JsonRpc.Rejected(), "no") }).run((relayer) =>
+          relayer.signDeployAccount({
+            signer: hashSigner(DEPLOYED).signer,
+            classHash: CLASS_HASH,
+            salt: PUBLIC_KEY,
+            constructorCalldata: [PUBLIC_KEY]
+          })
+        )
+      )
+      expect(opaque).toMatchObject({ reason: { error: "starknet_addInvokeTransaction failed on fake: Rejected (41)" } })
+      // an endpoint that is down is not a refusal
+      const down = refused(undefined, unavailable)
+      expect(yield* Effect.flip(sender({ estimate: down }).run((relayer) => relayer.sign({ signer, calls })))).toBe(
+        down
+      )
+    })
   })
 
   it.effect("sign reads the nonce at the pre-confirmed block and bounds the estimated resources", () => {
@@ -286,16 +361,19 @@ describe("StarknetRelayer sending", () => {
     }))
   })
 
-  it.effect("sign uses the given nonce, resource bounds and tip, and the layer's fee strategy", () => {
+  it.effect("sign uses the given nonce and fees, and the layer's fee strategy", () => {
     const given = sender()
     const custom = { ...BOUNDS, l2Gas: { maxAmount: BigInt(5), maxPricePerUnit: BigInt(6) } }
     const strategy = sender({}, {
-      fees: (estimate) => ({ ...BOUNDS, l1Gas: { maxAmount: estimate.l2GasPrice, maxPricePerUnit: BigInt(1) } })
+      fees: (estimate) => ({
+        resourceBounds: { ...BOUNDS, l1Gas: { maxAmount: estimate.l2GasPrice, maxPricePerUnit: BigInt(1) } },
+        tip: BigInt(4)
+      })
     })
     const { signer } = hashSigner()
     return Effect.gen(function*() {
       const explicit = yield* given.run((relayer) =>
-        relayer.sign({ signer, calls, nonce: BigInt(3), resourceBounds: custom, tip: BigInt(9) })
+        relayer.sign({ signer, calls, nonce: BigInt(3), fees: { resourceBounds: custom, tip: BigInt(9) } })
       )
       expect(explicit).toMatchObject({
         nonce: BigInt(3),
@@ -304,6 +382,7 @@ describe("StarknetRelayer sending", () => {
       expect(given.seen).toStrictEqual({ nonces: [], estimates: [], added: [] })
       const priced = yield* strategy.run((relayer) => relayer.sign({ signer, calls }))
       expect(priced.signed.resourceBounds.l1Gas).toStrictEqual({ maxAmount: BigInt(3000), maxPricePerUnit: BigInt(1) })
+      expect(priced.signed.tip).toBe(BigInt(4))
       expect(priced.hash).not.toBe(explicit.hash)
     })
   })
@@ -314,7 +393,7 @@ describe("StarknetRelayer sending", () => {
     return Effect.gen(function*() {
       const malformed = yield* Effect.flip(
         run((relayer) =>
-          relayer.sign({ signer: failing, calls: [{ ...calls[0], calldata: ["not a felt"] }], resourceBounds: BOUNDS })
+          relayer.sign({ signer: failing, calls: [{ ...calls[0], calldata: ["not a felt"] }], fees: FEES })
         )
       )
       expect(malformed).toBeInstanceOf(StarknetSigner.StarknetSignerError)
@@ -346,7 +425,7 @@ describe("StarknetRelayer sending", () => {
       expect(seen.nonces).toStrictEqual([])
       expect(seen.estimates[0]).toMatchObject({ transactions: [{ type: "DEPLOY_ACCOUNT", signature: [] }] })
       const tipped = yield* run((relayer) =>
-        relayer.signDeployAccount({ signer, ...account, resourceBounds: BOUNDS, tip: BigInt(1) })
+        relayer.signDeployAccount({ signer, ...account, fees: { resourceBounds: BOUNDS, tip: BigInt(1) } })
       )
       expect(tipped.hash).not.toBe(hash)
       expect(seen.estimates).toHaveLength(1)
@@ -414,7 +493,7 @@ describe("StarknetRelayer sending", () => {
       const reasons = [
         [52, "InvalidNonce"],
         [53, "InsufficientResources"],
-        [54, "InsufficientBalance"],
+        [54, "InsufficientFunds"],
         [55, "ValidationFailure"],
         [64, "ReplacementUnderpriced"],
         [65, "InsufficientResources"]
@@ -451,4 +530,29 @@ describe("StarknetRelayer sending", () => {
       const retried = yield* signedBy({ add: Effect.fail(fallback) }).broadcast
       expect(retried.sent).toMatchObject({ _tag: "Success", success: retried.hash })
     }))
+
+  it.effect("broadcast checks the hash when any endpoint answers that the nonce is used", () =>
+    Effect.gen(function*() {
+      // the first endpoint reads a balance already spent by this transaction, the second one its used nonce
+      const mixed = refused(52, new JsonRpc.Rejected(), new AggregateError([refused(54), refused(52)]))
+      const included = yield* signedBy({ add: Effect.fail(mixed), known: true }).broadcast
+      expect(included.sent).toMatchObject({ _tag: "Success", success: included.hash })
+      const unknown = yield* signedBy({ add: Effect.fail(mixed) }).broadcast
+      expect(unknown.sent).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "StarknetBroadcastError", reason: { _tag: "InsufficientFunds" }, cause: mixed }
+      })
+    }))
+
+  it.effect("broadcast fails with the node's error when the transaction has no computable hash", () => {
+    const duplicate = refused(59)
+    const { run } = sender({ add: Effect.fail(duplicate) })
+    return run((relayer) =>
+      Effect.gen(function*() {
+        const { signed } = yield* relayer.sign({ signer: hashSigner().signer, calls })
+        const malformed = { ...signed, calldata: ["not a felt"] }
+        expect(yield* Effect.flip(relayer.broadcast({ signed: malformed }))).toBe(duplicate)
+      })
+    )
+  })
 })
