@@ -1,49 +1,42 @@
 /**
- * EVM indexing on top of {@link EvmRpc.EvmRpc}: the last confirmed block, the logs of a set of contracts over a block
- * range, the native balance of an address at a block, and streams of both following the confirmed head.
+ * Reads the logs of a set of contracts and the native balance of an address over confirmed blocks, on top of
+ * {@link EvmRpc.EvmRpc}, once or as a stream following the confirmed head. The stream options are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
- * A range is split into ranges of at most `maxBlockRange` blocks, one `eth_getLogs` after another. A failing range
- * fails the whole call and drops the logs already read: the caller retries the same range. A balance is one
- * `eth_getBalance` per sample.
+ * A log range is split into ranges of at most `maxBlockRange` blocks, with one `eth_getLogs` each. A failing range
+ * fails the whole call, and the caller retries the same range.
  *
  * @example
  * ```ts
- * import type { EvmIndexerFilter } from "@effect-blockchain/evm/EvmIndexer"
- * import { EvmIndexer } from "@effect-blockchain/evm/EvmIndexer"
+ * import * as EvmIndexer from "@effect-blockchain/evm/EvmIndexer"
+ * import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
- * import * as Schedule from "effect/Schedule"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  * import * as Stream from "effect/Stream"
  *
- * declare const filter: Omit<EvmIndexerFilter, "fromBlock" | "toBlock">
+ * declare const filter: Omit<EvmIndexer.EvmIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
  * declare const save: (block: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const indexer = yield* EvmIndexer
- *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
- *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
- *   yield* indexer.streamLogs({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
+ *   const rpc = yield* EvmRpc.EvmRpc
+ *   const indexer = yield* EvmIndexer.EvmIndexer
+ *   yield* Effect.log(`head: ${yield* rpc.blockNumber}`)
+ *   yield* indexer.streamLogs({ filter, fromBlock: cursor + BigInt(1) }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
- * ```
  *
- * @example
- * ```ts
- * import type { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
- * import { EvmIndexer } from "@effect-blockchain/evm/EvmIndexer"
- * import * as Effect from "effect/Effect"
- * import * as Stream from "effect/Stream"
- *
- * declare const address: EvmAddress
- *
- * // the balance in wei every 7200 blocks (about a day on Ethereum) up to the head, then every new 7200 blocks
- * const daily = Effect.gen(function*() {
- *   const indexer = yield* EvmIndexer
- *   return indexer.streamNativeBalance({ address, fromBlock: BigInt(21_000_000), step: 7200 }).pipe(
- *     Stream.tap(({ balance, block }) => Effect.log(`${block}: ${balance} wei`))
- *   )
+ * const RpcLive = EvmRpc.layerConfig({
+ *   network: Config.succeed("Ethereum"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("ETHEREUM_RPC_URL") })])
  * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(EvmIndexer.layer().pipe(Layer.provideMerge(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.1.0
@@ -91,7 +84,8 @@ export interface EvmIndexerBatch {
 }
 
 /**
- * The {@link EvmIndexer.Service.streamLogs} options.
+ * The {@link EvmIndexer.Service.streamLogs} options. `toBlock`, `poll` and `retry` are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
  * @since 0.1.0
  * @category models
@@ -99,14 +93,8 @@ export interface EvmIndexerBatch {
 export interface EvmIndexerStreamOptions {
   readonly filter: Omit<EvmIndexerFilter, "fromBlock" | "toBlock">
   readonly fromBlock: bigint
-  /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
-  /**
-   * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts after
-   * each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
-   */
   readonly poll?: Schedule.Schedule<unknown> | undefined
-  /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same block. Off by default. */
   readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
 }
 
@@ -132,7 +120,6 @@ export interface EvmNativeBalance {
 export interface EvmIndexerNativeBalanceOptions {
   readonly address: EvmAddress
   readonly fromBlock: bigint
-  /** The stream ends after the last sample not above it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
   readonly step: number
   readonly poll?: Schedule.Schedule<unknown> | undefined

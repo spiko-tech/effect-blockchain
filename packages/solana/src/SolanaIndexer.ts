@@ -1,44 +1,44 @@
 /**
- * Solana transaction indexing on top of {@link SolanaRpc}: the last confirmed slot, the transactions touching an
- * address over a slot range, its lamport balance at a slot, and streams of both following the confirmed head. Blocks
- * are slots.
+ * Reads the transactions touching an address and its lamport balance over finalized slots, on top of
+ * {@link SolanaRpc}, once or as a stream following the confirmed head. Blocks are slots. The stream options are
+ * described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
- * Everything is read at `finalized` commitment. `getSignaturesForAddress` has no slot range, so a range is paged from
- * the head backwards until it passes `fromBlock`: the cost grows with the address's history since `fromBlock`, then
- * each transaction costs one `getTransaction`. Each page sends `minContextSlot: toBlock`, so a lagging endpoint that
- * honours it falls back. Any failure fails the whole call and nothing is returned: the caller retries the same range.
+ * `getSignaturesForAddress` takes no slot range, so a range is paged from the head backwards until it passes
+ * `fromBlock`: the cost grows with the history of the address since `fromBlock`, then each transaction costs one
+ * `getTransaction`. A failure fails the whole call, and the caller retries the same range.
  *
  * @example
  * ```ts
- * import type { SolanaAddress } from "@effect-blockchain/solana/SolanaAddress"
- * import type { SolanaIndexerFilter } from "@effect-blockchain/solana/SolanaIndexer"
- * import { SolanaIndexer } from "@effect-blockchain/solana/SolanaIndexer"
+ * import * as SolanaIndexer from "@effect-blockchain/solana/SolanaIndexer"
+ * import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
- * import * as Schedule from "effect/Schedule"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  * import * as Stream from "effect/Stream"
  *
- * declare const filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
+ * declare const filter: Omit<SolanaIndexer.SolanaIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
  * declare const save: (slot: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const indexer = yield* SolanaIndexer
- *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
- *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
- *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
+ *   const rpc = yield* SolanaRpc.SolanaRpc
+ *   const indexer = yield* SolanaIndexer.SolanaIndexer
+ *   yield* Effect.log(`head: ${yield* rpc.getSlot({ commitment: "finalized" })}`)
+ *   yield* indexer.streamTransactions({ filter, fromBlock: cursor + BigInt(1) }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
  *
- * declare const address: SolanaAddress
- *
- * // the lamports of `address` every 9000 slots (about an hour) from slot 400000000
- * const balances = Effect.gen(function*() {
- *   const indexer = yield* SolanaIndexer
- *   yield* indexer.streamNativeBalance({ address, fromBlock: BigInt(400000000), step: 9000 }).pipe(
- *     Stream.runForEach(({ balance, block }) => Effect.log(`${block}: ${balance}`))
- *   )
+ * const RpcLive = SolanaRpc.layerConfig({
+ *   network: Config.succeed("Solana"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("SOLANA_RPC_URL") })])
  * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(SolanaIndexer.layer().pipe(Layer.provideMerge(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.1.0
@@ -108,7 +108,9 @@ export interface SolanaIndexerBatch<Encoding extends SolanaTransactionEncoding =
 }
 
 /**
- * The {@link SolanaIndexer.Service.streamTransactions} options, `encoding` aside.
+ * The {@link SolanaIndexer.Service.streamTransactions} options, `encoding` aside. `toBlock`, `poll` and `retry` are
+ * described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
  * @since 0.1.0
  * @category models
@@ -116,17 +118,9 @@ export interface SolanaIndexerBatch<Encoding extends SolanaTransactionEncoding =
 export interface SolanaIndexerStreamOptions {
   readonly filter: Omit<SolanaIndexerFilter, "fromBlock" | "toBlock">
   readonly fromBlock: bigint
-  /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
-  /**
-   * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts after
-   * each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
-   */
   readonly poll?: Schedule.Schedule<unknown> | undefined
-  /**
-   * Retries a step (the signature paging or one batch's transactions) failing with a transient reason
-   * ({@link JsonRpc.isTransient}) at the same position. Off by default.
-   */
+  /** A step is the signature paging of a range, or the transactions of one batch. */
   readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
 }
 
@@ -151,7 +145,6 @@ export interface SolanaNativeBalance {
 export interface SolanaIndexerNativeBalanceOptions {
   readonly address: SolanaAddress
   readonly fromBlock: bigint
-  /** The stream ends after the last sample not above it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
   /** The slots between two samples, a positive safe integer. */
   readonly step: number
@@ -537,7 +530,7 @@ export const layer = (options: {
   )
 
 /**
- * Builds an {@link SolanaIndexer} like {@link layer}, reading the options from `Config`.
+ * Builds a {@link SolanaIndexer} like {@link layer}, reading the options from `Config`.
  *
  * @example
  * ```ts

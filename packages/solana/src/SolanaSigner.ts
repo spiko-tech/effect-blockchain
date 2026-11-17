@@ -1,9 +1,8 @@
 /**
- * Signers of Solana transactions: a local private key, or a custody API that signs raw bytes.
- *
- * A signer is a value and receives the whole serialized transaction message. Solana signs these bytes themselves,
- * without hashing them first, so what is being authorised can always be decoded from them. A transaction carries one
- * signature per signer account of its message, the fee payer's first.
+ * Signers of Solana transactions: a private key held in memory, or a custody API that signs raw bytes. Solana signs
+ * the serialized transaction message itself, without hashing it first, so a signer receives these bytes. The signer
+ * model is described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#signers).
  *
  * @since 0.2.0
  */

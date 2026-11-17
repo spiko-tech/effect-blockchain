@@ -1,94 +1,57 @@
 /**
- * Stellar transaction relaying on top of {@link StellarRpc.StellarRpc}: signing a transaction, broadcasting it and
- * following it until it is final.
+ * Signs transactions of classic operations or of one Soroban invocation, broadcasts them and follows them until they
+ * are final, on top of {@link StellarRpc.StellarRpc}. The relayer keeps no state and `broadcast` is idempotent, as described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#stateless-relayer).
  *
- * A relayer here sends an account's own transactions and manages their sequence numbers and fees, as OpenZeppelin
- * Relayer does. It is not a relayer paying for someone else's transaction. It keeps no state: storing hashes and
- * sequence numbers, deciding when to resend and holding keys belong to the application. Senders sharing an account
- * must each pass their own sequence number, as the account's sequence number does not move until a transaction is in
- * a ledger, and two concurrent `sign` calls read the same one.
- *
- * A transaction holds classic operations, or one Soroban invocation, which `sign` simulates first for its footprint,
- * its resource fee and its authorization entries. Contract upload and deployment and entries another account must
- * sign are not handled, and an invocation touching an archived entry fails with `RestoreRequired` before anything is
- * signed. `sign` returns the transaction hash before anything is broadcast, so it can be stored first, and `broadcast`
- * can be repeated with the same envelope. A signed transaction can only enter a ledger up to its `maxLedger`: past it,
- * signing again with the same sequence number is safe.
- *
- * The fee per operation comes from `getFeeStats` (see {@link defaultFees}) unless `sign` receives `fees`. It is a
- * maximum: a ledger charges what its inclusion needed, 100 stroops per operation outside of surge pricing.
- *
- * To send several transactions of one account at once, sign each with a different `channel`: an account of its own,
- * whose sequence number the transaction uses, while the operations still act for `signer`. Choosing a free channel
- * and holding it until its transaction is final belong to the application. A channel pays the fee of its
- * transaction, so each one needs a balance, unless the transaction is wrapped with `feeBump`: one funded account
- * then pays for every channel, which only keeps its minimum balance.
- *
- * ```ts
- * import { StellarRelayer } from "@effect-blockchain/stellar/StellarRelayer"
- * import type { StellarSigner } from "@effect-blockchain/stellar/StellarSigner"
- * import * as Effect from "effect/Effect"
- *
- * declare const signer: StellarSigner
- * declare const channel: StellarSigner
- * declare const operations: readonly [string, ...Array<string>]
- *
- * const program = Effect.gen(function*() {
- *   const relayer = yield* StellarRelayer
- *   // paid by the channel
- *   const direct = yield* relayer.sign({ signer, channel, operations })
- *   // or paid by `signer`: the fee bump has its own hash, and the `maxLedger` of the transaction it wraps
- *   const bumped = yield* relayer.feeBump({ signer, signed: direct.signed })
- *   const status = yield* relayer.awaitConfirmation(bumped)
- *   return { direct, bumped, status }
- * })
- * ```
- *
- * A transaction is in one {@link StellarTransactionStatus}:
+ * The fee per operation is a maximum: a ledger charges what its inclusion needed, at least the network minimum of 100
+ * stroops per operation. A signed transaction can only enter a ledger up to its `maxLedger`: past it, signing again
+ * with the same sequence number is safe. A node holds the transactions of the ledgers it retains, about 7 days by
+ * default: past that, a transaction that succeeded reads `NotFound`, so store its final status.
  *
  * | status | meaning | final |
  * |---|---|---|
- * | `Pending` | never reported: Stellar RPC only knows the transactions of closed ledgers | no |
+ * | `Pending` | never returned: Stellar RPC only knows the transactions of closed ledgers | no |
  * | `Included` | in ledger `block`, above the last confirmed ledger: only with a `confirmations` above 0 | no |
  * | `Confirmed` | succeeded in ledger `block`, at or below the last confirmed ledger | yes |
- * | `Failed` | failed in ledger `block`, at or below the last confirmed ledger | yes |
+ * | `Failed` | failed in ledger `block`, at or below the last confirmed ledger: it paid its fee | yes |
  * | `Expired` | unknown to the node, whose latest ledger is above the transaction's `maxLedger` | yes |
  * | `NotFound` | unknown to the node: not in a ledger yet, never sent, or older than the node retains | no |
- *
- * Stellar closes a ledger about every 5 seconds and never reverts one, so a transaction is `NotFound` until its ledger
- * closes, then `Confirmed` or `Failed`. A failed transaction is in a ledger like a successful one: it has consumed
- * its sequence number and paid its fee, so sending it again needs a new sequence number.
- *
- * An RPC node only holds the transactions of the ledgers it retains (about 7 days by default, less on some
- * providers): past that, a transaction that succeeded reads `NotFound`. Read a status while the transaction is
- * recent, and store the final one.
  *
  * @example
  * ```ts
  * import type { StellarAccountAddress } from "@effect-blockchain/stellar/StellarAddress"
- * import { StellarRelayer } from "@effect-blockchain/stellar/StellarRelayer"
+ * import * as StellarRelayer from "@effect-blockchain/stellar/StellarRelayer"
+ * import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
  * import type { StellarSigner } from "@effect-blockchain/stellar/StellarSigner"
  * import type { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransactionHash"
  * import { Asset, Operation } from "@stellar/stellar-sdk"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  *
  * declare const signer: StellarSigner
  * declare const destination: StellarAccountAddress
  * declare const store: (hash: StellarTransactionHash, sequence: bigint, maxLedger: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const relayer = yield* StellarRelayer
- *   const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" })
- *   const { hash, maxLedger, sequence, signed } = yield* relayer.sign({ signer, operations: [payment.toXDR("base64")] })
- *   // stored before the broadcast: a crash in between leaves a hash to look up, never an unknown transaction
+ *   const relayer = yield* StellarRelayer.StellarRelayer
+ *   const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" }).toXDR("base64")
+ *   const { hash, maxLedger, sequence, signed } = yield* relayer.sign({ signer, operations: [payment] })
  *   yield* store(hash, sequence, maxLedger)
  *   yield* relayer.broadcast({ signed })
  *   // `maxLedger` ends the wait with `Expired` when no ledger took the transaction, the timeout bounds the rest
- *   const status = yield* relayer.awaitConfirmation({ hash, maxLedger }).pipe(Effect.timeout("10 minutes"))
- *   if (status._tag === "Failed") {
- *     yield* Effect.logError(`failed in ledger ${status.block}: ${status.reason?.code}`)
- *   }
+ *   return yield* relayer.awaitConfirmation({ hash, maxLedger }).pipe(Effect.timeout("10 minutes"))
  * })
+ *
+ * const RpcLive = StellarRpc.layerConfig({
+ *   network: Config.succeed("Stellar"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STELLAR_RPC_URL") })])
+ * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(StellarRelayer.layer().pipe(Layer.provide(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.2.0
@@ -194,6 +157,30 @@ export interface StellarTransactionStatusOptions {
 }
 
 /**
+ * The relayer service. In the example, `signer` pays the fee of a transaction sent through a channel account, which
+ * then only keeps its minimum balance.
+ *
+ * @example
+ * ```ts
+ * import { StellarRelayer } from "@effect-blockchain/stellar/StellarRelayer"
+ * import type { StellarSigner } from "@effect-blockchain/stellar/StellarSigner"
+ * import type * as Arr from "effect/Array"
+ * import * as Effect from "effect/Effect"
+ *
+ * declare const signer: StellarSigner
+ * declare const channel: StellarSigner
+ * declare const operations: Arr.NonEmptyReadonlyArray<string>
+ *
+ * const program = Effect.gen(function*() {
+ *   const relayer = yield* StellarRelayer
+ *   const direct = yield* relayer.sign({ signer, channel, operations })
+ *   const bumped = yield* relayer.feeBump({ signer, signed: direct.signed })
+ *   yield* relayer.broadcast({ signed: bumped.signed })
+ *   // the fee bump has its own hash, and the `maxLedger` of the transaction it wraps
+ *   return yield* relayer.awaitConfirmation(bumped)
+ * })
+ * ```
+ *
  * @since 0.2.0
  * @category services
  */
@@ -203,13 +190,17 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * `signer.address` without sending it. A missing `sequence` is the account's sequence number plus 1, missing `fees`
    * come from the layer's fee strategy, and a missing `maxLedger` is the latest ledger plus the layer's `validity`.
    *
-   * A single `invokeHostFunction` operation is simulated: the transaction gets its footprint and resources, the
-   * operation the authorization entries it has none of, and the resource fee is added to `fees`, then estimated from
-   * the Soroban inclusion fees. Fails with a {@link StellarSimulationError} when the simulation does, or when it asks
-   * to restore an archived entry first.
+   * A single `invokeHostFunction` operation is simulated. The transaction gets its footprint and resources from the
+   * simulation, missing `fees` are estimated from the Soroban inclusion fees, and the resource fee is added on top. An
+   * operation without authorization entries gets the ones the simulation returns, and fails with `UnsupportedAuth`
+   * when another address must sign one of them: pass that operation with its signed entries, which are kept. Fails
+   * with a {@link StellarSimulationError} when the simulation fails, or when it asks to restore an archived entry
+   * first.
    *
-   * With a `channel`, the transaction is the channel's: it uses its sequence number and pays the fee from its
-   * balance, the operations without a source account get `signer.address`, and the channel signs before `signer`.
+   * A `channel` is another account lending its sequence number, so that one `signer` sends several transactions at
+   * once: the transaction uses the channel's sequence number and pays the fee from its balance, the operations
+   * without a source account get `signer.address`, and the channel signs before `signer`. The application chooses a
+   * free channel and holds it until its transaction is final.
    * `cosigners` sign after them, for the operations whose source account is another account. The network refuses
    * a transaction carrying a signature it does not need (`txBadAuthExtra`).
    *
@@ -236,6 +227,8 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * The fee bump has the `sequence` and `maxLedger` of `signed`, 0 for a `signed` without an upper ledger bound, which
    * never reads `Expired`. Fails with a `StellarSignerError` when `signed` is not a transaction envelope, or `fees`
    * are below its fee.
+   *
+   * The `@example` of {@link StellarRelayer} sends a channel's transaction with a fee bump.
    */
   readonly feeBump: (options: {
     readonly signer: StellarSigner
@@ -262,10 +255,9 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
     options: StellarTransactionStatusOptions
   ) => Effect.Effect<StellarTransactionStatus, StellarRpc.StellarRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
-   * `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so pass `maxLedger` or bound the wait
-   * with a timeout. A read failing with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other
-   * error fails the wait. A `poll` that ends first returns the last read.
+   * Reads {@link fetchTransactionStatus} on `poll` until it is `Confirmed`, `Failed` or `Expired`, and returns it.
+   * `NotFound` keeps polling, so pass `maxLedger` or bound the wait with a timeout. `poll` and errors work as in
+   * {@link Confirmations.awaitConfirmation}.
    */
   readonly awaitConfirmation: (
     options: StellarTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }

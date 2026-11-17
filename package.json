@@ -16,7 +16,7 @@
     "test": "vitest",
     "coverage": "vitest --coverage",
     "check": "tsc -b tsconfig.json",
-    "check-packages": "node scripts/check-packages.mjs",
+    "check-packages": "node scripts/check-packages.mjs && node scripts/check-readme-examples.mjs",
     "check-dist-types": "node scripts/check-dist-types.mjs",
     "check:watch": "tsc -b tsconfig.json -w",
     "check-recursive": "pnpm --recursive --filter './packages/*' exec tsc -b tsconfig.json",

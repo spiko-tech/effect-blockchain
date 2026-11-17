@@ -1,74 +1,60 @@
 /**
- * Solana transaction relaying on top of {@link SolanaRpc.SolanaRpc}: signing a transaction, broadcasting it and
- * following it until it is final.
+ * Signs v0 transactions with a recent blockhash, broadcasts them and follows them until they are final, on top of
+ * {@link SolanaRpc.SolanaRpc}. The relayer keeps no state and `broadcast` is idempotent, as described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#stateless-relayer).
  *
- * A relayer here sends an account's own transactions and manages their fees, as OpenZeppelin Relayer does. It is not
- * a meta-transaction relayer paying for someone else's transaction. It keeps no state: storing signatures and their
- * `lastValidBlockHeight`, deciding when to resend and holding keys belong to the application. Solana has no nonce:
- * the recent blockhash plays that role, so concurrent senders from one address need no coordination, but two
- * transactions with the same instructions, signers, fees and blockhash are one transaction and land once.
- *
- * Only v0 transactions with a recent blockhash are sent: address lookup tables and durable nonces are not. `sign`
- * returns the transaction's signature before anything is broadcast, so it can be stored first, and `broadcast` can be
- * repeated with the same bytes.
- *
- * Every transaction starts with the two Compute Budget instructions. Unless `sign` receives them, the compute unit
- * limit is what a simulation consumed times the layer's `computeUnitMultiplier`, and the compute unit price comes from
- * `getRecentPrioritizationFees` for the accounts the transaction writes to (see {@link defaultFees}). The price sets
- * the priority fee only: the base fee of 5000 lamports per signature is charged on top. A compute unit limit that is
- * not an integer from 0 to 1,400,000, or a price that is not a u64, fails `sign` with a `SolanaSignerError`.
- *
- * A transaction is in one {@link SolanaTransactionStatus}:
+ * `sign` uses neither address lookup tables nor durable nonces. Every transaction starts with the two Compute Budget
+ * instructions. The compute unit price sets the priority fee, and the base fee of 5000 lamports per signature is
+ * charged on top.
  *
  * | status | meaning | final |
  * |---|---|---|
- * | `Pending` | never reported: a node does not expose the transactions it has not processed | no |
+ * | `Pending` | never returned: a node does not expose the transactions it has not processed | no |
  * | `Included` | in `block`, not finalized or above the last confirmed slot: a fork can still drop it | no |
  * | `Confirmed` | succeeded in `block`, finalized, at or below the last confirmed slot | yes |
  * | `Failed` | failed in `block`, finalized, at or below the last confirmed slot: it paid its fee | yes |
  * | `Expired` | unknown to the node, and its blockhash expired: it can no longer land | yes |
  * | `NotFound` | unknown to the node: not processed yet, dropped, or never sent | no |
  *
- * A node reports a transaction as soon as it has processed its block, then the block reaches the `confirmed`
- * commitment (voted by a supermajority) and the `finalized` one. `processed` and `confirmed` are both `Included`:
- * the `Confirmed` status is not the `confirmed` commitment. A `finalized` transaction is `Confirmed` or `Failed` once
- * its slot is at or below the last confirmed slot, the finalized slot minus `confirmations` (0 by default), as
- * `SolanaIndexer.lastConfirmedBlock`.
- *
- * A transaction can land only while the block height is at most the `lastValidBlockHeight` returned with its recent
- * blockhash. `Expired` is reported when the caller passes that height, a `finalized` block is above it, and the
- * endpoint that then did not know the transaction answered at that block's slot or later: an endpoint behind it
- * answers `NotFound`, so a transaction that can still land, or that a lagging endpoint cannot see yet, is never
- * `Expired`.
- * A durable-nonce transaction does not expire: leave `lastValidBlockHeight` out.
+ * The `Confirmed` status means finalized: a block at the `processed` or `confirmed` commitment is `Included`. A
+ * transaction can land while the block height is at most its `lastValidBlockHeight`. It is `Expired` once a finalized
+ * block is above that height and the answering endpoint, at that block's slot or later, does not know it.
+ * `fetchTransactionStatus` also follows a durable-nonce transaction signed elsewhere, which does not expire: leave
+ * `lastValidBlockHeight` out.
  *
  * @example
  * ```ts
- * import { type SolanaInstruction, SolanaRelayer } from "@effect-blockchain/solana/SolanaRelayer"
+ * import * as SolanaRelayer from "@effect-blockchain/solana/SolanaRelayer"
+ * import * as SolanaRpc from "@effect-blockchain/solana/SolanaRpc"
  * import type { SolanaSigner } from "@effect-blockchain/solana/SolanaSigner"
  * import type { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
  * import type * as Arr from "effect/Array"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  *
  * declare const signer: SolanaSigner
- * declare const instructions: Arr.NonEmptyReadonlyArray<SolanaInstruction>
+ * declare const instructions: Arr.NonEmptyReadonlyArray<SolanaRelayer.SolanaInstruction>
  * declare const store: (hash: SolanaTransactionHash, lastValidBlockHeight: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const relayer = yield* SolanaRelayer
+ *   const relayer = yield* SolanaRelayer.SolanaRelayer
  *   const { hash, lastValidBlockHeight, signed } = yield* relayer.sign({ signer, instructions })
- *   // stored before the broadcast: a crash in between leaves a signature to look up, never an unknown transaction
  *   yield* store(hash, lastValidBlockHeight)
  *   yield* relayer.broadcast({ signed })
- *   // a lagging endpoint can answer `NotFound` for a while: the timeout bounds the wait
- *   const status = yield* relayer.awaitConfirmation({ hash, lastValidBlockHeight }).pipe(Effect.timeout("5 minutes"))
- *   if (status._tag === "Failed") {
- *     yield* Effect.logError(`failed in slot ${status.block}`, status.reason)
- *   }
- *   if (status._tag === "Expired") {
- *     yield* Effect.logError("never landed: sign it again with a new blockhash")
- *   }
+ *   // `Expired` ends the wait when the transaction can no longer land, the timeout bounds the rest
+ *   return yield* relayer.awaitConfirmation({ hash, lastValidBlockHeight }).pipe(Effect.timeout("5 minutes"))
  * })
+ *
+ * const RpcLive = SolanaRpc.layerConfig({
+ *   network: Config.succeed("Solana"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("SOLANA_RPC_URL") })])
+ * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(SolanaRelayer.layer().pipe(Layer.provide(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.2.0
@@ -314,10 +300,9 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
     options: SolanaTransactionStatusOptions
   ) => Effect.Effect<SolanaTransactionStatus, SolanaRpc.SolanaRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
-   * `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A
-   * read failing with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the
-   * wait. A `poll` that ends first returns the last read.
+   * Reads {@link fetchTransactionStatus} on `poll` until it is `Confirmed`, `Failed` or `Expired`, and returns it.
+   * `NotFound` keeps polling, so bound the wait with a timeout. `poll` and errors work as in
+   * {@link Confirmations.awaitConfirmation}.
    */
   readonly awaitConfirmation: (
     options: SolanaTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }

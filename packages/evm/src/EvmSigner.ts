@@ -1,9 +1,7 @@
 /**
- * Signers of EVM transactions: a local private key, or a custody API that only signs a hash.
- *
- * A signer is a value and receives the whole transaction, never a hash chosen by its caller: signing an opaque hash
- * hides what is being authorised, and custody policy engines and hardware wallets refuse it. Only EIP-1559
- * transactions calling an address are signed.
+ * Signers of EIP-1559 transactions: a private key held in memory, or a custody API that only signs a hash. The
+ * reason a signer receives the whole transaction is described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#signers).
  *
  * @since 0.3.0
  */

@@ -134,10 +134,11 @@ export const isTestnet = (network: EvmNetwork): boolean => (testnets as Readonly
 
 // testnets reuse their mainnet value: same consensus and block time
 const confirmations: Record<EvmNetwork, number> = {
-  // 2 epochs, Kraken credits at finalization "typically after 64-96": https://support.kraken.com/articles/203325283
+  // finalized after 2 epochs of 32 slots: https://ethereum.org/en/developers/docs/consensus-mechanisms/pos/#finality
   Ethereum: 64,
   Sepolia: 64,
-  // milestones finalize in 2-5s since Heimdall v2: https://docs.polygon.technology/pos/concepts/finality/finality/
+  // milestones finalize a block within 2 to 5 s, 1 to 3 blocks of 2 s. 32 blocks keep a margin for a late milestone,
+  // when a block only has probabilistic finality: https://docs.polygon.technology/pos/concepts/finality/finality/
   Polygon: 32,
   PolygonAmoy: 32,
   // ~1 min of 2s blocks against sequencer reorgs: https://docs.optimism.io/stack/transactions/transaction-finality
@@ -149,18 +150,19 @@ const confirmations: Record<EvmNetwork, number> = {
   // confirmed on Tezos L1 in ~6s: https://docs.etherlink.com
   Etherlink: 20,
   EtherlinkTestnet: 20,
-  // Pionex uses 27 for Optimism: https://intercom.help/pionex/en/articles/14700793-what-is-block-confirmation
+  // OP Stack, as Base: https://docs.optimism.io/stack/transactions/transaction-finality
   Optimism: 30,
   OptimismSepolia: 30,
-  // Snowman finality is irreversible, Circle uses 1: https://developers.circle.com/circle-mint/blockchain-confirmations
+  // Snowman acceptance is final: https://build.avax.network/docs/primary-network/avalanche-consensus
   Avalanche: 1,
   AvalancheFuji: 1,
-  // Kraken uses 50 (fast finality in 2 blocks): https://support.kraken.com/articles/203325283
+  // fast finality finalizes a block once its child is justified. 50 blocks keep a margin for when no block is
+  // justified and finality is probabilistic again: https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP126.md
   BnbSmartChain: 50,
   BnbSmartChainTestnet: 50,
   // 2 epochs of 16 slots: https://docs.gnosischain.com/about/specs/consensus/
   Gnosis: 32,
-  // ~1 min of 2s blocks, Circle Fast Transfer uses 1: https://developers.circle.com/cctp/required-block-confirmations
+  // ~1 min of 2s blocks against sequencer reorgs: https://docs.linea.build/protocol/transaction-lifecycle
   Linea: 30,
   LineaSepolia: 30,
   // local node mines instantly and never reorgs: https://getfoundry.sh/anvil/overview

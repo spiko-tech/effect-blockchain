@@ -1,9 +1,8 @@
 /**
- * Signers of Stellar transactions: a local secret seed, or a custody API that only signs a hash.
- *
- * A signer is a value and receives the whole transaction envelope, never a hash chosen by its caller: signing an
- * opaque hash hides what is being authorised, and custody policy engines and hardware wallets refuse it. Transaction
- * and fee bump envelopes are both signed, and the signature is added to the ones the envelope already carries.
+ * Signers of Stellar transaction and fee bump envelopes: a secret seed held in memory, or a custody API that only
+ * signs a hash. The signature is added to the ones the envelope already carries. The reason a signer receives the
+ * whole envelope is described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#signers).
  *
  * @since 0.2.0
  */

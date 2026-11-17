@@ -36,3 +36,14 @@ For concepts not covered by that guide, search the source in `node_modules/effec
 - Always run `pnpm changeset` after changes
 - Use patch for dependency updates/bug fixes
 - Include specific version numbers in summaries
+
+## Comments and docs
+
+- A module header is 1-3 sentences of purpose, plus at most one `@example`. Rules shared by the chains live in `docs/concepts.md`: link to it instead of repeating them.
+- A comment gives the reason the code cannot show: a protocol rule, a spec link, a provider quirk with its version, an invariant.
+- The first JSDoc sentence is a present-tense summary. Then come defaults, units and failure reasons. Never restate the type.
+- Every code sample is an `@example`, so that `pnpm docgen` type-checks it. README samples are copies of an `@example` (`scripts/check-readme-examples.mjs`).
+- State the scope in one line. Do not argue for the design or list what a module is not.
+- Cite specs and upstream source, not help pages.
+- Use one term and one sentence template per concept on every chain.
+- Write full sentences, wrapped at 120 columns, without em dashes.

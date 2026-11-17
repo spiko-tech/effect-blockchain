@@ -1,54 +1,46 @@
 /**
- * Soroban contract event indexing on top of {@link StellarRpc}: the last confirmed ledger, the events of a set of
- * contracts over a ledger range, and a stream of them following the confirmed head. Also the native (XLM) balance of
- * an account at a ledger and sampled every `step` ledgers, from the account entry at the head and the ledger metas of
- * `getLedgers` (Stellar RPC keeps no past balances).
+ * Reads the Soroban events of a set of contracts and the native (XLM) balance of an account over confirmed ledgers,
+ * on top of {@link StellarRpc}, once or as a stream following the confirmed head. The stream options are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
- * A range is split into ranges of at most `maxBlockRange` ledgers, each paged with `getEvents` until its cursor is
- * `undefined`. `contractIds` is split into groups of 5, the RPC limit per filter (`MaxContractIDsLimit` in
- * https://github.com/stellar/go-stellar-sdk/blob/main/protocols/rpc/get_events.go), merged back in event id order. A
- * cursor page is pinned to the endpoint that issued it, so when it fails the group restarts once from its first page.
- * Any other failure fails the whole call and drops the events already read: the caller retries the same range.
+ * An event range is split into ranges of at most `maxBlockRange` ledgers, each paged with `getEvents`, and
+ * `contractIds` into groups of 5, the RPC limit per filter (`MaxContractIDsLimit` in
+ * https://github.com/stellar/go-stellar-sdk/blob/main/protocols/rpc/get_events.go). A page after a cursor is only
+ * served by the endpoint that issued the cursor, so when it fails the group restarts once from its first page. Stellar
+ * RPC keeps no past balances: a balance is read from the account entry at the head and the ledger metas of
+ * `getLedgers`.
  *
  * @example
  * ```ts
- * import type { StellarIndexerFilter } from "@effect-blockchain/stellar/StellarIndexer"
- * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
+ * import * as StellarIndexer from "@effect-blockchain/stellar/StellarIndexer"
+ * import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
- * import * as Schedule from "effect/Schedule"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  * import * as Stream from "effect/Stream"
  *
- * declare const filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
+ * declare const filter: Omit<StellarIndexer.StellarIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
  * declare const save: (ledger: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const indexer = yield* StellarIndexer
- *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
- *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
- *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
+ *   const rpc = yield* StellarRpc.StellarRpc
+ *   const indexer = yield* StellarIndexer.StellarIndexer
+ *   yield* Effect.log(`head: ${(yield* rpc.getLatestLedger).sequence}`)
+ *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1) }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
- * ```
  *
- * @example
- * ```ts
- * import type { StellarAccountAddress } from "@effect-blockchain/stellar/StellarAddress"
- * import { StellarIndexer } from "@effect-blockchain/stellar/StellarIndexer"
- * import * as Effect from "effect/Effect"
- * import * as Stream from "effect/Stream"
- *
- * declare const address: StellarAccountAddress
- * declare const save: (ledger: bigint, stroops: bigint) => Effect.Effect<void>
- *
- * // the balance of `address` every 720 ledgers (about an hour) from ledger 65000000 on
- * const balances = Effect.gen(function*() {
- *   const indexer = yield* StellarIndexer
- *   yield* indexer.streamNativeBalance({ address, fromBlock: BigInt(65000000), step: 720 }).pipe(
- *     Stream.runForEach(({ balance, block }) => save(block, balance))
- *   )
+ * const RpcLive = StellarRpc.layerConfig({
+ *   network: Config.succeed("Stellar"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STELLAR_RPC_URL") })])
  * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(StellarIndexer.layer().pipe(Layer.provideMerge(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.1.0

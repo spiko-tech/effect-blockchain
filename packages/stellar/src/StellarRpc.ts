@@ -1,12 +1,11 @@
 /**
- * Typed Stellar RPC methods over an ordered list of endpoints with fallback.
+ * The Stellar RPC methods over an ordered list of endpoints with fallback, one request per call. The fallback rules,
+ * the error reasons, the routing of a cursor and the endpoints flagged `archive` are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#endpoint-fallback).
  *
- * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`getNetwork` passphrase). Every method is a read, except
- * `sendTransaction`, which a node answers `DUPLICATE` the second time: retries and fallback are safe. Methods are
- * named after the RPC method. A `getEvents` or `getLedgers` page cursor is only sent to the endpoint that issued it,
- * with no fallback. An endpoint flagged `archive` serves the whole history: it takes every call like the others, and
- * is the only kind to take a `getLedgers` call asking for `archive`.
+ * `sendTransaction` is the only write. A node that still holds the transaction answers `DUPLICATE` to a second copy.
+ * Once the transaction is in a ledger, it answers `TRY_AGAIN_LATER` for about 10 ledgers, then `ERROR` with
+ * `txBadSeq`: `StellarRelayer.broadcast` reads these two as a success when the node knows the transaction.
  *
  * @example
  * ```ts
@@ -47,8 +46,9 @@ import * as StellarNetwork from "./StellarNetwork.ts"
 import type { StellarTransactionHash } from "./StellarTransactionHash.ts"
 
 /**
- * A Stellar RPC endpoint. The `name` is shown in errors and spans and routes cursors, so it must be unique; the `url`
- * is never logged. `archive` flags an endpoint that serves ledgers older than the retention window of a regular one.
+ * A Stellar RPC endpoint. The `name` is shown in errors and spans, and a cursor goes to the first endpoint with the
+ * name of the one that issued it. The `url` is never logged. `archive` flags an endpoint that serves ledgers older
+ * than the retention window of a regular one.
  *
  * @since 0.1.0
  * @category models
@@ -60,9 +60,7 @@ export interface StellarRpcEndpoint {
 }
 
 /**
- * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
- * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
- * and `cause` is an `AggregateError` of each endpoint's error, in order.
+ * A failed call, with a {@link JsonRpc.Reason} as `reason`.
  *
  * On Stellar, `Unavailable` includes the code -32603, `InvalidResponse` an event outside the `getEvents` filter or a
  * `getLedgers` page with a missing ledger, `Lagging` a latest ledger below `toBlock` (or `startLedger`, `minLedger`),
@@ -678,7 +676,7 @@ export const layer = (options: {
   )
 
 /**
- * Builds an {@link StellarRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
+ * Builds a {@link StellarRpc} like {@link layer}, reading the options from `Config`. Endpoint URLs stay `Redacted`.
  *
  * @example
  * ```ts

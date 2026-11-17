@@ -1,10 +1,8 @@
 /**
- * Typed EVM JSON-RPC methods over an ordered list of endpoints with fallback.
- *
- * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
- * is checked once to serve the configured network (`eth_chainId`). Every method but `sendRawTransaction` is a read,
- * so retries and fallback are safe; `sendRawTransaction` documents its own case. Methods are named after the JSON-RPC
- * method without its namespace (`eth_getLogs` is `getLogs`).
+ * The EVM JSON-RPC methods over an ordered list of endpoints with fallback, one request per call. Methods are named
+ * after the JSON-RPC method without its namespace (`eth_getLogs` is `getLogs`). The fallback rules and the error
+ * reasons are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#endpoint-fallback).
  *
  * @example
  * ```ts
@@ -63,9 +61,7 @@ export interface EvmRpcEndpoint {
 }
 
 /**
- * A failed call: its `reason` (a {@link JsonRpc.Reason}, matched with `Effect.catchReason`), the JSON-RPC error code or
- * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
- * and `cause` is an `AggregateError` of each endpoint's error, in order.
+ * A failed call, with a {@link JsonRpc.Reason} as `reason`.
  *
  * On EVM, `Unavailable` includes the codes -32005, -32603, -32007, -1 and 429, `InvalidResponse` a log outside the
  * `getLogs` filter, and `Lagging` a head below the requested block.

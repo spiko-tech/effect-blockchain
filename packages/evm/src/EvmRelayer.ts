@@ -1,23 +1,11 @@
 /**
- * EVM transaction relaying on top of {@link EvmRpc.EvmRpc}: signing a transaction, broadcasting it and following it
- * until it is final.
+ * Signs EIP-1559 transactions, broadcasts them and follows them until they are final, on top of
+ * {@link EvmRpc.EvmRpc}. The relayer keeps no state and `broadcast` is idempotent, as described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#stateless-relayer).
  *
- * A relayer here sends an account's own transactions and manages their nonces and fees, as OpenZeppelin Relayer does.
- * It is not a meta-transaction relayer (Gelato, ERC-2771) paying for someone else's transaction. It keeps no state:
- * storing hashes and nonces, deciding when to resend and holding keys belong to the application. Senders sharing an
- * address must each pass their own nonce, as the node's pending count does not see a transaction that is signed and
- * not yet broadcast, and two concurrent `sign` calls read the same count.
- *
- * Only EIP-1559 (type 2) transactions calling an address are sent: legacy transactions and contract creations are
- * not. `sign` returns the transaction hash before anything is broadcast, so it can be stored first, and `broadcast`
- * can be repeated with the same bytes.
- *
- * Fees come from `eth_feeHistory` (see {@link EvmFeeEstimate} and {@link defaultFees}) unless `sign` receives them.
- * The estimate covers the execution fee only: on a rollup, the L1 data fee is not in `eth_feeHistory` and is charged
- * on top, and where blocks are ordered first-come first-served (Arbitrum) the priority fee buys nothing. Replacing a
- * stuck transaction is `sign` with the same nonce and higher explicit `fees`: nodes ask for at least 10% more on both.
- *
- * A transaction is in one {@link EvmTransactionStatus}:
+ * Fees come from `eth_feeHistory` and cover execution only: a rollup charges its L1 data fee on top. To replace a
+ * pending transaction, call `sign` with the same nonce and with both fees at least 10% higher, the smallest bump
+ * nodes accept.
  *
  * | status | meaning | final |
  * |---|---|---|
@@ -30,27 +18,36 @@
  * @example
  * ```ts
  * import type { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
- * import { EvmRelayer } from "@effect-blockchain/evm/EvmRelayer"
+ * import * as EvmRelayer from "@effect-blockchain/evm/EvmRelayer"
+ * import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
  * import type { EvmSigner } from "@effect-blockchain/evm/EvmSigner"
  * import type { EvmTransactionHash } from "@effect-blockchain/evm/EvmTransactionHash"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  *
  * declare const signer: EvmSigner
  * declare const to: EvmAddress
  * declare const store: (hash: EvmTransactionHash, nonce: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const relayer = yield* EvmRelayer
+ *   const relayer = yield* EvmRelayer.EvmRelayer
  *   const { hash, nonce, signed } = yield* relayer.sign({ signer, to, value: BigInt(1) })
- *   // stored before the broadcast: a crash in between leaves a hash to look up, never an unknown transaction
  *   yield* store(hash, nonce)
  *   yield* relayer.broadcast({ signed })
- *   // a transaction the node never sees stays `NotFound`: the timeout bounds the wait
- *   const status = yield* relayer.awaitConfirmation({ hash }).pipe(Effect.timeout("10 minutes"))
- *   if (status._tag === "Failed") {
- *     yield* Effect.logError(`reverted in block ${status.block}`)
- *   }
+ *   // `NotFound` keeps polling: the timeout bounds the wait
+ *   return yield* relayer.awaitConfirmation({ hash }).pipe(Effect.timeout("10 minutes"))
  * })
+ *
+ * const RpcLive = EvmRpc.layerConfig({
+ *   network: Config.succeed("Ethereum"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("ETHEREUM_RPC_URL") })])
+ * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(EvmRelayer.layer().pipe(Layer.provide(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.3.0
@@ -256,10 +253,9 @@ export class EvmRelayer extends Context.Service<EvmRelayer, {
     options: EvmTransactionStatusOptions
   ) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
-   * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
-   * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
-   * that ends first returns the last read.
+   * Reads {@link fetchTransactionStatus} on `poll` until it is `Confirmed` or `Failed`, and returns it. `NotFound`
+   * keeps polling, so bound the wait with a timeout. `poll` and errors work as in
+   * {@link Confirmations.awaitConfirmation}.
    */
   readonly awaitConfirmation: (
     options: EvmTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }

@@ -1,55 +1,43 @@
 /**
- * Starknet event indexing on top of {@link StarknetRpc}: the last confirmed block, the events of a contract over a
- * block range, and a stream of them following the confirmed head.
+ * Reads the events of a contract and the STRK balance of an address, in fri, over confirmed blocks, on top of
+ * {@link StarknetRpc}, once or as a stream following the confirmed head. The stream options are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
- * A range is split into ranges of at most `maxBlockRange` blocks, each paged with `starknet_getEvents` (`chunkSize`
- * events per page) until its continuation token is absent. A cursor page is pinned to the endpoint that issued it, so
- * when it fails the range restarts once from its first page, through the fallback again. Any other failure fails the whole call and drops the
- * events already read: the caller retries the same range.
+ * An event range is split into ranges of at most `maxBlockRange` blocks, each paged with `starknet_getEvents`. A page
+ * after a cursor is only served by the endpoint that issued the cursor, so when it fails the range restarts once from
+ * its first page. Any other failure fails the whole call, and the caller retries the same range.
  *
  * @example
  * ```ts
- * import type { StarknetIndexerFilter } from "@effect-blockchain/starknet/StarknetIndexer"
- * import { StarknetIndexer } from "@effect-blockchain/starknet/StarknetIndexer"
+ * import * as StarknetIndexer from "@effect-blockchain/starknet/StarknetIndexer"
+ * import * as StarknetRpc from "@effect-blockchain/starknet/StarknetRpc"
+ * import * as Config from "effect/Config"
  * import * as Effect from "effect/Effect"
- * import * as Schedule from "effect/Schedule"
+ * import * as FetchHttpClient from "effect/http/FetchHttpClient"
+ * import * as Layer from "effect/Layer"
  * import * as Stream from "effect/Stream"
  *
- * declare const filter: Omit<StarknetIndexerFilter, "fromBlock" | "toBlock">
+ * declare const filter: Omit<StarknetIndexer.StarknetIndexerFilter, "fromBlock" | "toBlock">
  * declare const cursor: bigint
  * declare const save: (block: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
- *   const indexer = yield* StarknetIndexer
- *   // once caught up, read the head after 1 s, 2 s, 4 s... at most every minute
- *   const poll = Schedule.min([Schedule.exponential("1 second"), Schedule.spaced("1 minute")])
- *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1), poll }).pipe(
+ *   const rpc = yield* StarknetRpc.StarknetRpc
+ *   const indexer = yield* StarknetIndexer.StarknetIndexer
+ *   yield* Effect.log(`head: ${yield* rpc.blockNumber}`)
+ *   yield* indexer.streamEvents({ filter, fromBlock: cursor + BigInt(1) }).pipe(
  *     Stream.runForEach((batch) => save(batch.toBlock))
  *   )
  * })
- * ```
  *
- * The STRK balance of an address, in fri, is read at one block or sampled every `step` blocks:
- *
- * @example
- * ```ts
- * import type { StarknetAddress } from "@effect-blockchain/starknet/StarknetAddress"
- * import { StarknetIndexer } from "@effect-blockchain/starknet/StarknetIndexer"
- * import * as Effect from "effect/Effect"
- * import * as Stream from "effect/Stream"
- *
- * declare const address: StarknetAddress
- *
- * // the balance every 1000 blocks from block 1000000 to 1010000
- * const balances = Effect.gen(function*() {
- *   const indexer = yield* StarknetIndexer
- *   return yield* indexer.streamNativeBalance({
- *     address,
- *     fromBlock: BigInt(1_000_000),
- *     toBlock: BigInt(1_010_000),
- *     step: 1000
- *   }).pipe(Stream.runCollect)
+ * const RpcLive = StarknetRpc.layerConfig({
+ *   network: Config.succeed("Starknet"),
+ *   endpoints: Config.all([Config.all({ name: Config.succeed("main"), url: Config.Redacted("STARKNET_RPC_URL") })])
  * })
+ *
+ * const main = program.pipe(
+ *   Effect.provide(StarknetIndexer.layer().pipe(Layer.provideMerge(RpcLive), Layer.provide(FetchHttpClient.layer)))
+ * )
  * ```
  *
  * @since 0.1.0
@@ -107,7 +95,8 @@ export interface StarknetIndexerBatch {
 export const DEFAULT_MAX_BLOCK_RANGE = 10_000
 
 /**
- * The {@link StarknetIndexer.Service.streamEvents} options.
+ * The {@link StarknetIndexer.Service.streamEvents} options. `toBlock`, `poll` and `retry` are described in
+ * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
  * @since 0.1.0
  * @category models
@@ -115,14 +104,8 @@ export const DEFAULT_MAX_BLOCK_RANGE = 10_000
 export interface StarknetIndexerStreamOptions {
   readonly filter: Omit<StarknetIndexerFilter, "fromBlock" | "toBlock">
   readonly fromBlock: bigint
-  /** The stream ends after the batch reaching it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
-  /**
-   * When to read the head again once caught up, `Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default. It restarts after
-   * each batch, and its end ends the stream: `Schedule.recurs(0)` drains to the head and stops.
-   */
   readonly poll?: Schedule.Schedule<unknown> | undefined
-  /** Retries a step failing with a transient reason ({@link JsonRpc.isTransient}) at the same block. Off by default. */
   readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
 }
 
@@ -148,7 +131,6 @@ export interface StarknetNativeBalance {
 export interface StarknetIndexerNativeBalanceOptions {
   readonly address: StarknetAddress
   readonly fromBlock: bigint
-  /** The stream ends after the last sample at or below it, and is empty when `fromBlock > toBlock`. */
   readonly toBlock?: bigint | undefined
   readonly step: number
   readonly poll?: Schedule.Schedule<unknown> | undefined
@@ -346,7 +328,7 @@ export const layer = (options: {
   )
 
 /**
- * Builds an {@link StarknetIndexer} like {@link layer}, reading the options from `Config`.
+ * Builds a {@link StarknetIndexer} like {@link layer}, reading the options from `Config`.
  *
  * @example
  * ```ts
