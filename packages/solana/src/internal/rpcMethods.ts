@@ -18,8 +18,6 @@ export type RpcJson =
   | ReadonlyArray<RpcJson>
   | { readonly [key: string]: RpcJson }
 
-const make = <Params, Result>(method: JsonRpc.Method<Params, Result, RpcJson>) => method
-
 const RpcJson: Schema.Codec<RpcJson> = Schema.Union([
   Schema.Null,
   Schema.Boolean,
@@ -120,24 +118,24 @@ const NoParams = Schema.Tuple([])
 const Commitment = Schema.Literals(["confirmed", "finalized"])
 
 /** @internal */
-export const getGenesisHash = make({ name: "getGenesisHash", params: NoParams, result: Schema.String })
+export const getGenesisHash = JsonRpc.method({ name: "getGenesisHash", params: NoParams, result: Schema.String })
 
 /** @internal */
-export const getSlot = make({
+export const getSlot = JsonRpc.method({
   name: "getSlot",
   params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
   result: Schema.BigInt
 })
 
 /** @internal */
-export const getBlockHeight = make({
+export const getBlockHeight = JsonRpc.method({
   name: "getBlockHeight",
   params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
   result: Schema.BigInt
 })
 
 /** @internal */
-export const getSignatureStatuses = make({
+export const getSignatureStatuses = JsonRpc.method({
   name: "getSignatureStatuses",
   params: Schema.Tuple([
     Schema.Array(SolanaTransactionHash),
@@ -156,14 +154,14 @@ export const getSignatureStatuses = make({
 })
 
 /** @internal */
-export const getBalance = make({
+export const getBalance = JsonRpc.method({
   name: "getBalance",
   params: Schema.Tuple([SolanaAddress, Schema.Struct({ commitment: Commitment })]),
   result: Schema.Struct({ context: Schema.Struct({ slot: Schema.BigInt }), value: Schema.BigInt })
 })
 
 /** @internal */
-export const getSignaturesForAddress = make({
+export const getSignaturesForAddress = JsonRpc.method({
   name: "getSignaturesForAddress",
   params: Schema.Tuple([
     SolanaAddress,
@@ -186,7 +184,7 @@ export const getSignaturesForAddress = make({
 
 /** @internal */
 export const getTransaction = (encoding: keyof typeof transactions) =>
-  make({
+  JsonRpc.method({
     name: "getTransaction",
     params: Schema.Tuple([
       SolanaTransactionHash,
@@ -206,7 +204,7 @@ export const getTransaction = (encoding: keyof typeof transactions) =>
   })
 
 /** @internal */
-export const getLatestBlockhash = make({
+export const getLatestBlockhash = JsonRpc.method({
   name: "getLatestBlockhash",
   params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
   result: Schema.Struct({
@@ -216,7 +214,7 @@ export const getLatestBlockhash = make({
 })
 
 /** @internal */
-export const simulateTransaction = make({
+export const simulateTransaction = JsonRpc.method({
   name: "simulateTransaction",
   params: Schema.Tuple([
     Schema.String,
@@ -238,14 +236,14 @@ export const simulateTransaction = make({
 })
 
 /** @internal */
-export const getRecentPrioritizationFees = make({
+export const getRecentPrioritizationFees = JsonRpc.method({
   name: "getRecentPrioritizationFees",
   params: Schema.Tuple([Schema.Array(SolanaAddress)]),
   result: Schema.Array(Schema.Struct({ slot: Schema.BigInt, prioritizationFee: Schema.BigInt }))
 })
 
 /** @internal */
-export const sendTransaction = make({
+export const sendTransaction = JsonRpc.method({
   name: "sendTransaction",
   params: Schema.Tuple([
     Schema.String,

@@ -55,23 +55,24 @@
  *
  * @since 0.3.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
+import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Order from "effect/Order"
-import * as Schedule from "effect/Schedule"
+import type * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
 import { keccak256 } from "viem"
 import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmHexData } from "./EvmHexData.ts"
-import { DEFAULT_POLL_INTERVAL } from "./EvmIndexer.ts"
 import * as EvmNetwork from "./EvmNetwork.ts"
 import * as EvmRpc from "./EvmRpc.ts"
 import type { EvmSigner, EvmSignerError } from "./EvmSigner.ts"
 import { EvmTransactionHash } from "./EvmTransactionHash.ts"
-import * as Confirmations from "./internal/confirmations.ts"
 
 /**
  * Where a transaction stands, by `_tag`: see the module's table. `block` is the block holding it, and `reason` the
@@ -221,15 +222,24 @@ export class EvmRelayer extends Context.Service<EvmRelayer, {
     readonly hash: EvmTransactionHash
   }) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(EvmIndexer.DEFAULT_POLL_INTERVAL)` by default) until it is
-   * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A `poll` that
-   * ends first returns the last status read.
+   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
+   * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
+   * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
+   * that ends first returns the last read.
    */
   readonly awaitConfirmation: (options: {
     readonly hash: EvmTransactionHash
     readonly poll?: Schedule.Schedule<unknown> | undefined
   }) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRelayer") {}
+
+/**
+ * The default `poll` spacing of {@link EvmRelayer.Service.awaitConfirmation}: 10 seconds.
+ *
+ * @since 0.4.0
+ * @category constants
+ */
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 // geth's default `miner.gasprice` (0.001 gwei): the lowest tip its block producers take
 const PRIORITY_FEE_FLOOR = BigInt(1_000_000)
@@ -255,13 +265,6 @@ export const defaultFees = (estimate: EvmFeeEstimate): EvmFees => {
   )
   return { maxFeePerGas: estimate.baseFeePerGas * BigInt(2) + maxPriorityFeePerGas, maxPriorityFeePerGas }
 }
-
-const messagesOf = (cause: unknown): ReadonlyArray<string> =>
-  cause instanceof AggregateError
-    ? cause.errors.flatMap(messagesOf)
-    : cause instanceof Error
-    ? [cause.message, ...messagesOf(cause.cause)]
-    : []
 
 // the refusals of geth (`core/txpool/errors.go`, `core/error.go`), also used by erigon, reth and anvil, then those
 // of Nethermind (`AcceptTxResult`), Besu and anvil that differ
@@ -292,6 +295,7 @@ export const layer = (options: {
     Effect.gen(function*() {
       const rpc = yield* EvmRpc.EvmRpc
       const chainId = EvmNetwork.toChainId(rpc.network)
+      const confirmations = options.confirmations ?? EvmNetwork.defaultConfirmations(rpc.network)
       const gasPercent = BigInt(Math.round((options.gasMultiplier ?? 1.2) * 100))
       const estimateFees = Effect.map(rpc.feeHistory(FEE_HISTORY), (history) =>
         (options.fees ?? defaultFees)({
@@ -322,7 +326,7 @@ export const layer = (options: {
           if (sent._tag === "Success") return sent.success
           const cause = sent.failure
           const hash = EvmTransactionHash.make(keccak256(signed))
-          const messages = messagesOf(cause).join("\n")
+          const messages = JsonRpc.errorsOf(cause).map((error) => error.message).join("\n")
           if (alreadyKnown.test(messages)) return hash
           const reason = refusals.find(([pattern]) => pattern.test(messages))?.[1]()
           if (reason === undefined) return yield* cause
@@ -339,7 +343,7 @@ export const layer = (options: {
             return transaction === null ? { _tag: "NotFound" } as const : { _tag: "Pending" } as const
           }
           // read after the receipt: a head older than the receipt's block could only delay `Confirmed`
-          const confirmed = yield* Confirmations.lastConfirmedBlock(rpc, options.confirmations)
+          const confirmed = Confirmations.lastConfirmedBlock(yield* rpc.blockNumber, confirmations)
           const block = receipt.blockNumber
           if (block > confirmed) return { _tag: "Included", block } as const
           return receipt.status === 1
@@ -351,11 +355,12 @@ export const layer = (options: {
         sign,
         broadcast,
         fetchTransactionStatus,
-        awaitConfirmation: ({ hash, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL) }) =>
-          fetchTransactionStatus({ hash }).pipe(
-            Effect.repeat({ schedule: poll, until: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" }),
-            Effect.withSpan("EvmRelayer.awaitConfirmation")
-          )
+        awaitConfirmation: ({ hash, poll }) =>
+          Confirmations.awaitConfirmation({
+            fetch: fetchTransactionStatus({ hash }),
+            isFinal: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed",
+            poll
+          }).pipe(Effect.withSpan("EvmRelayer.awaitConfirmation"))
       })
     })
   )

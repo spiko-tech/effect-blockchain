@@ -54,18 +54,18 @@
  *
  * @since 0.1.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
-import * as Confirmations from "./internal/confirmations.ts"
 import type { StarknetAddress } from "./StarknetAddress.ts"
 import type { StarknetEvent } from "./StarknetEvent.ts"
 import * as StarknetNetwork from "./StarknetNetwork.ts"
@@ -193,7 +193,7 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
  * @since 0.1.0
  * @category constants
  */
-export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 // sn_keccak("balanceOf"), the ERC-20 entry point selector
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
@@ -228,7 +228,9 @@ export const layer = (options: {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
       const size = BigInt(maxBlockRange)
-      const lastConfirmedBlock = Confirmations.lastConfirmedBlock(rpc, options.confirmations).pipe(
+      const confirmations = options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network)
+      const lastConfirmedBlock = rpc.blockNumber.pipe(
+        Effect.map((head) => Confirmations.lastConfirmedBlock(head, confirmations)),
         Effect.withSpan("StarknetIndexer.lastConfirmedBlock")
       )
       const fetchEvents = Effect.fn("StarknetIndexer.fetchEvents")((filter: StarknetIndexerFilter) =>

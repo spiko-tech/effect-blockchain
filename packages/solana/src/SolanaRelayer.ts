@@ -69,6 +69,7 @@
  *
  * @since 0.2.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import {
   AccountRole,
   address,
@@ -89,15 +90,15 @@ import {
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Context from "effect/Context"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Order from "effect/Order"
-import * as Schedule from "effect/Schedule"
+import type * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
-import * as Confirmations from "./internal/confirmations.ts"
 import * as RpcMethods from "./internal/rpcMethods.ts"
 import { SolanaAddress } from "./SolanaAddress.ts"
-import { DEFAULT_POLL_INTERVAL } from "./SolanaIndexer.ts"
+import * as SolanaNetwork from "./SolanaNetwork.ts"
 import * as SolanaRpc from "./SolanaRpc.ts"
 import { type SolanaSigner, SolanaSignerError } from "./SolanaSigner.ts"
 import { SolanaTransactionHash } from "./SolanaTransactionHash.ts"
@@ -265,9 +266,10 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
     options: SolanaTransactionStatusOptions
   ) => Effect.Effect<SolanaTransactionStatus, SolanaRpc.SolanaRpcError>
   /**
-   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(SolanaIndexer.DEFAULT_POLL_INTERVAL)` by
-   * default) until it is `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so bound the
-   * wait with a timeout. A `poll` that ends first returns the last status read.
+   * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
+   * `Confirmed`, `Failed` or `Expired`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A
+   * read failing with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the
+   * wait. A `poll` that ends first returns the last read.
    */
   readonly awaitConfirmation: (
     options: SolanaTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }
@@ -276,6 +278,14 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
 
 // a slot reports the lowest price that landed in it, 0 as soon as one transaction paid none: any price above 0 is
 // ordered before those transactions
+/**
+ * The default `poll` spacing of {@link SolanaRelayer.Service.awaitConfirmation}: 10 seconds.
+ *
+ * @since 0.3.0
+ * @category constants
+ */
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
+
 const PRIORITY_FEE_FLOOR = BigInt(1)
 
 /**
@@ -363,6 +373,7 @@ export const layer = (options: {
     SolanaRelayer,
     Effect.gen(function*() {
       const rpc = yield* SolanaRpc.SolanaRpc
+      const confirmations = options.confirmations ?? SolanaNetwork.defaultConfirmations(rpc.network)
       const sign = Effect.fn("SolanaRelayer.sign")(
         function*(
           { feePayer, instructions, signers = [], ...given }: Parameters<SolanaRelayer["Service"]["sign"]>[0]
@@ -468,7 +479,9 @@ export const layer = (options: {
           const block = status.slot
           if (status.confirmationStatus !== "finalized") return { _tag: "Included", block } as const
           // read after the status: a finalized slot older than the transaction's could only delay `Confirmed`
-          if (block > (yield* Confirmations.lastConfirmedBlock(rpc, options.confirmations))) {
+          if (
+            block > Confirmations.lastConfirmedBlock(yield* rpc.getSlot({ commitment: "finalized" }), confirmations)
+          ) {
             return { _tag: "Included", block } as const
           }
           return status.err === null
@@ -480,14 +493,12 @@ export const layer = (options: {
         sign,
         broadcast,
         fetchTransactionStatus,
-        awaitConfirmation: ({ poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), ...transaction }) =>
-          fetchTransactionStatus(transaction).pipe(
-            Effect.repeat({
-              schedule: poll,
-              until: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" || _tag === "Expired"
-            }),
-            Effect.withSpan("SolanaRelayer.awaitConfirmation")
-          )
+        awaitConfirmation: ({ poll, ...transaction }) =>
+          Confirmations.awaitConfirmation({
+            fetch: fetchTransactionStatus(transaction),
+            isFinal: ({ _tag }) => _tag === "Confirmed" || _tag === "Failed" || _tag === "Expired",
+            poll
+          }).pipe(Effect.withSpan("SolanaRelayer.awaitConfirmation"))
       })
     })
   )

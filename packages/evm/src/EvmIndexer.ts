@@ -48,12 +48,13 @@
  *
  * @since 0.1.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
@@ -61,8 +62,8 @@ import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import type { EvmAddress } from "./EvmAddress.ts"
 import type { EvmLog } from "./EvmLog.ts"
+import * as EvmNetwork from "./EvmNetwork.ts"
 import * as EvmRpc from "./EvmRpc.ts"
-import * as Confirmations from "./internal/confirmations.ts"
 
 /**
  * A {@link EvmIndexer} `fetchLogs` filter: an `eth_getLogs` filter over the inclusive block range
@@ -189,7 +190,7 @@ export const DEFAULT_MAX_BLOCK_RANGE = 1000
  * @since 0.1.0
  * @category constants
  */
-export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 // the confirmed blocks [next, head] not indexed yet, empty once the stream reaches the head it last read
 interface StreamPosition {
@@ -221,7 +222,9 @@ export const layer = (options: {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
       const size = BigInt(maxBlockRange)
-      const lastConfirmedBlock = Confirmations.lastConfirmedBlock(rpc, options.confirmations).pipe(
+      const confirmations = options.confirmations ?? EvmNetwork.defaultConfirmations(rpc.network)
+      const lastConfirmedBlock = rpc.blockNumber.pipe(
+        Effect.map((head) => Confirmations.lastConfirmedBlock(head, confirmations)),
         Effect.withSpan("EvmIndexer.lastConfirmedBlock")
       )
       // the head last read is reused while it covers `next` (the confirmed head only moves forward), else polled

@@ -53,13 +53,14 @@
  *
  * @since 0.1.0
  */
+import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
@@ -67,9 +68,9 @@ import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import { accountChange } from "./internal/accountChange.ts"
-import * as Confirmations from "./internal/confirmations.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
+import * as StellarNetwork from "./StellarNetwork.ts"
 import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
 import { StellarRpc } from "./StellarRpc.ts"
 
@@ -202,7 +203,7 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
  * @since 0.1.0
  * @category constants
  */
-export const DEFAULT_POLL_INTERVAL: Duration.Duration = Duration.seconds(10)
+export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
 const MAX_CONTRACT_IDS = 5
 
@@ -257,8 +258,9 @@ export const layer = (options: {
       const range = BigInt(maxBlockRange)
       const { limit } = options
 
+      const confirmations = options.confirmations ?? StellarNetwork.defaultConfirmations(rpc.network)
       const lastConfirmedBlock = rpc.getLatestLedger.pipe(
-        Effect.map((ledger) => Confirmations.lastConfirmedBlock(rpc.network, options.confirmations, ledger.sequence)),
+        Effect.map((ledger) => Confirmations.lastConfirmedBlock(ledger.sequence, confirmations)),
         Effect.withSpan("StellarIndexer.lastConfirmedBlock")
       )
       const fetchEvents = Effect.fn("StellarIndexer.fetchEvents")((filter: StellarIndexerFilter) => {

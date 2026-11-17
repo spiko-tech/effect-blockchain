@@ -9,8 +9,6 @@ import { EvmTransaction, EvmTransactionReceipt } from "../EvmTransaction.ts"
 import { EvmTransactionHash } from "../EvmTransactionHash.ts"
 import { IntFromHex, QuantityFromHex } from "./QuantityFromHex.ts"
 
-const make = <Params, Result>(method: JsonRpc.Method<Params, Result>): JsonRpc.Method<Params, Result> => method
-
 const NoParams = Schema.Tuple([])
 
 const Topics = Schema.Array(Schema.NullOr(Schema.Union([EvmHexData, Schema.Array(EvmHexData)])))
@@ -18,13 +16,13 @@ const Topics = Schema.Array(Schema.NullOr(Schema.Union([EvmHexData, Schema.Array
 const BlockTag = Schema.Literals(["latest", "pending"])
 
 /** @internal */
-export const chainId = make({ name: "eth_chainId", params: NoParams, result: IntFromHex })
+export const chainId = JsonRpc.method({ name: "eth_chainId", params: NoParams, result: IntFromHex })
 
 /** @internal */
-export const blockNumber = make({ name: "eth_blockNumber", params: NoParams, result: QuantityFromHex })
+export const blockNumber = JsonRpc.method({ name: "eth_blockNumber", params: NoParams, result: QuantityFromHex })
 
 /** @internal */
-export const getBlockByNumber = make({
+export const getBlockByNumber = JsonRpc.method({
   name: "eth_getBlockByNumber",
   // `false`: transaction hashes only, never the full transactions
   params: Schema.Tuple([QuantityFromHex, Schema.Literal(false)]),
@@ -33,14 +31,14 @@ export const getBlockByNumber = make({
 })
 
 /** @internal */
-export const getBalance = make({
+export const getBalance = JsonRpc.method({
   name: "eth_getBalance",
   params: Schema.Tuple([EvmAddress, QuantityFromHex]),
   result: QuantityFromHex
 })
 
 /** @internal */
-export const getLogs = make({
+export const getLogs = JsonRpc.method({
   name: "eth_getLogs",
   params: Schema.Tuple([
     Schema.Struct({
@@ -55,7 +53,7 @@ export const getLogs = make({
 })
 
 /** @internal */
-export const getTransactionByHash = make({
+export const getTransactionByHash = JsonRpc.method({
   name: "eth_getTransactionByHash",
   params: Schema.Tuple([EvmTransactionHash]),
   // `null` when the node does not know the transaction
@@ -63,7 +61,7 @@ export const getTransactionByHash = make({
 })
 
 /** @internal */
-export const getTransactionReceipt = make({
+export const getTransactionReceipt = JsonRpc.method({
   name: "eth_getTransactionReceipt",
   params: Schema.Tuple([EvmTransactionHash]),
   // `null` until the transaction is in a block
@@ -71,21 +69,21 @@ export const getTransactionReceipt = make({
 })
 
 /** @internal */
-export const sendRawTransaction = make({
+export const sendRawTransaction = JsonRpc.method({
   name: "eth_sendRawTransaction",
   params: Schema.Tuple([EvmHexData]),
   result: EvmTransactionHash
 })
 
 /** @internal */
-export const getTransactionCount = make({
+export const getTransactionCount = JsonRpc.method({
   name: "eth_getTransactionCount",
   params: Schema.Tuple([EvmAddress, BlockTag]),
   result: QuantityFromHex
 })
 
 /** @internal */
-export const estimateGas = make({
+export const estimateGas = JsonRpc.method({
   name: "eth_estimateGas",
   params: Schema.Tuple([
     Schema.Struct({
@@ -99,7 +97,7 @@ export const estimateGas = make({
 })
 
 /** @internal */
-export const feeHistory = make({
+export const feeHistory = JsonRpc.method({
   name: "eth_feeHistory",
   params: Schema.Tuple([IntFromHex, BlockTag, Schema.Array(Schema.Number)]),
   result: EvmFeeHistory

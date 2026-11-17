@@ -11,8 +11,6 @@ import { StarknetTransactionHash } from "../StarknetTransactionHash.ts"
 import { PaddedFelt } from "./PaddedFelt.ts"
 
 // by-name params: every method sends an object, `{}` when it takes none
-const make = <Params, Result>(method: JsonRpc.Method<Params, Result>): JsonRpc.Method<Params, Result> => method
-
 const NoParams = Schema.Struct({})
 
 const decodeShortString = (felt: string) => {
@@ -40,13 +38,17 @@ const Felt = Schema.toEncoded(PaddedFelt)
 const BlockId = Schema.Struct({ block_number: JsonRpc.BigIntFromInt })
 
 /** @internal */
-export const chainId = make({ name: "starknet_chainId", params: NoParams, result: ShortStringFromFelt })
+export const chainId = JsonRpc.method({ name: "starknet_chainId", params: NoParams, result: ShortStringFromFelt })
 
 /** @internal */
-export const blockNumber = make({ name: "starknet_blockNumber", params: NoParams, result: JsonRpc.BigIntFromInt })
+export const blockNumber = JsonRpc.method({
+  name: "starknet_blockNumber",
+  params: NoParams,
+  result: JsonRpc.BigIntFromInt
+})
 
 /** @internal */
-export const getBlockWithTxHashes = make({
+export const getBlockWithTxHashes = JsonRpc.method({
   name: "starknet_getBlockWithTxHashes",
   params: Schema.Struct({ block_id: BlockId }),
   // a pre-confirmed block has no block hash and does not decode
@@ -54,7 +56,7 @@ export const getBlockWithTxHashes = make({
 })
 
 /** @internal */
-export const call = make({
+export const call = JsonRpc.method({
   name: "starknet_call",
   params: Schema.Struct({
     request: Schema.Struct({
@@ -68,7 +70,7 @@ export const call = make({
 })
 
 /** @internal */
-export const getEvents = make({
+export const getEvents = JsonRpc.method({
   name: "starknet_getEvents",
   params: Schema.Struct({
     filter: Schema.Struct({
@@ -87,7 +89,7 @@ export const getEvents = make({
 })
 
 /** @internal */
-export const getTransactionStatus = make({
+export const getTransactionStatus = JsonRpc.method({
   name: "starknet_getTransactionStatus",
   params: Schema.Struct({ transaction_hash: StarknetTransactionHash }),
   result: Schema.Struct({
@@ -113,7 +115,7 @@ export const getTransactionStatus = make({
 })
 
 /** @internal */
-export const getTransactionReceipt = make({
+export const getTransactionReceipt = JsonRpc.method({
   name: "starknet_getTransactionReceipt",
   params: Schema.Struct({ transaction_hash: StarknetTransactionHash }),
   // a pre-confirmed receipt has no block hash and does not decode
@@ -170,14 +172,14 @@ const DeployAccountTransaction = Schema.Struct({
 })
 
 /** @internal */
-export const getNonce = make({
+export const getNonce = JsonRpc.method({
   name: "starknet_getNonce",
   params: Schema.Struct({ block_id: BlockTag, contract_address: StarknetAddress }),
   result: BigIntFromFelt
 })
 
 /** @internal */
-export const estimateFee = make({
+export const estimateFee = JsonRpc.method({
   name: "starknet_estimateFee",
   params: Schema.Struct({
     request: Schema.NonEmptyArray(Schema.Union([InvokeTransaction, DeployAccountTransaction])),
@@ -206,7 +208,7 @@ export const estimateFee = make({
 })
 
 /** @internal */
-export const addInvokeTransaction = make({
+export const addInvokeTransaction = JsonRpc.method({
   name: "starknet_addInvokeTransaction",
   params: Schema.Struct({ invoke_transaction: InvokeTransaction }),
   result: Schema.Struct({ transactionHash: StarknetTransactionHash }).pipe(
@@ -215,7 +217,7 @@ export const addInvokeTransaction = make({
 })
 
 /** @internal */
-export const addDeployAccountTransaction = make({
+export const addDeployAccountTransaction = JsonRpc.method({
   name: "starknet_addDeployAccountTransaction",
   params: Schema.Struct({ deploy_account_transaction: DeployAccountTransaction }),
   result: Schema.Struct({ transactionHash: StarknetTransactionHash, contractAddress: StarknetAddress }).pipe(
