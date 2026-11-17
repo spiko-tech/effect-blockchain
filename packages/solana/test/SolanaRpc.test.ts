@@ -152,12 +152,13 @@ describe("SolanaRpc", () => {
         slot: BigInt(12),
         blockTime: BigInt(1700000000),
         transaction: "AQID",
-        // unknown fields dropped, the error kept as JSON
+        // the error and the fields the library does not type kept as JSON
         meta: {
           err: { InstructionError: ["0", { Custom: "1" }] },
           fee: BigInt(5000),
           preBalances: [BigInt("18446744073709551615")],
-          postBalances: [BigInt("18446744073709546615")]
+          postBalances: [BigInt("18446744073709546615")],
+          logMessages: ["ok"]
         }
       })
     }))
