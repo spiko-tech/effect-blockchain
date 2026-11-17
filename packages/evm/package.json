@@ -47,7 +47,7 @@
     "record-fixtures": "node --env-file-if-exists=../../.env scripts/record-fixtures.ts"
   },
   "dependencies": {
-    "@effect-blockchain/core": "workspace:^"
+    "@effect-blockchain/core": "workspace:*"
   },
   "devDependencies": {
     "@effect/vitest": "4.1.0",
