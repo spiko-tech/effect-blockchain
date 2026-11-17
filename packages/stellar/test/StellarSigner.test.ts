@@ -22,7 +22,7 @@ const transaction = { network: "StellarTestnet", envelope } as const
 describe("StellarSigner", () => {
   it.effect("fromPrivateKey signs like the SDK", () =>
     Effect.gen(function*() {
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(SEED))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(SEED) })
       expect(signer.address).toBe(ADDRESS)
       const expected = unsigned()
       expected.sign(keypair)
@@ -35,7 +35,7 @@ describe("StellarSigner", () => {
 
   it.effect("fromPrivateKey fails on an invalid seed without repeating it", () =>
     Effect.gen(function*() {
-      const error = yield* Effect.flip(StellarSigner.fromPrivateKey(Redacted.make("SNOTASEED")))
+      const error = yield* Effect.flip(StellarSigner.fromPrivateKey({ key: Redacted.make("SNOTASEED") }))
       expect(error._tag).toBe("StellarSignerError")
       expect(JSON.stringify(error) + String(error.cause)).not.toContain("SNOTASEED")
     }))

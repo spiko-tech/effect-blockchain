@@ -361,7 +361,7 @@ describe("StellarRpc fixtures", () => {
       })
       expect(stats.sorobanInclusionFee).toMatchObject({ max: BigInt(114406), p99: BigInt(57203), ledgerCount: 50 })
       expect(stats.latestLedger).toBe(BigInt(65511132))
-      expect(defaultFees(stats.inclusionFee)).toBe(BigInt(200))
+      expect(defaultFees(stats.inclusionFee)).toStrictEqual({ fee: BigInt(200) })
     }))
 
   // the unsigned calls of `scripts/record-fixtures.ts`

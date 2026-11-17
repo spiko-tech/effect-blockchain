@@ -302,7 +302,8 @@ export interface StellarFeeStats {
  * A `simulateTransaction` reply. A Soroban transaction that would run has its `transactionData` (the base64
  * `SorobanTransactionData` XDR holding its footprint and resources), its `minResourceFee` in stroops and, for an
  * invocation, its `results`: the base64 `SorobanAuthorizationEntry` XDRs it needs as `auth` and its return value as
- * `xdr`. One that would not has the node's `error`.
+ * `xdr`. One touching archived entries has a `restorePreamble`: the `transactionData` and `minResourceFee` of the
+ * `restoreFootprint` transaction to send first. One that would not run has the node's `error`.
  *
  * @since 0.2.0
  * @category models
@@ -313,6 +314,7 @@ export type StellarSimulation =
     readonly transactionData: string
     readonly minResourceFee: bigint
     readonly results?: ReadonlyArray<{ readonly auth: ReadonlyArray<string>; readonly xdr: string }>
+    readonly restorePreamble?: { readonly transactionData: string; readonly minResourceFee: bigint }
     readonly latestLedger: bigint
   }
 

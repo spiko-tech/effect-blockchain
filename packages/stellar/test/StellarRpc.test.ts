@@ -608,7 +608,12 @@ describe("StellarRpc", () => {
   it.effect("sends simulateTransaction and reads a simulation and an error", () => {
     const replies = [
       { transactionData: "AAAA", minResourceFee: "6343", events: [], results: [{ auth: ["BBBB"], xdr: "CCCC" }] },
-      { transactionData: "AAAA", minResourceFee: "1", cost: { cpuInsns: "1", memBytes: "1" } },
+      {
+        transactionData: "AAAA",
+        minResourceFee: "1",
+        cost: { cpuInsns: "1", memBytes: "1" },
+        restorePreamble: { transactionData: "DDDD", minResourceFee: "700" }
+      },
       { error: "HostError", events: [] }
     ]
     const params: Array<Params | undefined> = []
@@ -630,7 +635,12 @@ describe("StellarRpc", () => {
           results: [{ auth: ["BBBB"], xdr: "CCCC" }],
           latestLedger
         },
-        { transactionData: "AAAA", minResourceFee: BigInt(1), latestLedger },
+        {
+          transactionData: "AAAA",
+          minResourceFee: BigInt(1),
+          restorePreamble: { transactionData: "DDDD", minResourceFee: BigInt(700) },
+          latestLedger
+        },
         { error: "HostError", latestLedger }
       ])
       expect(params[0]).toStrictEqual({ transaction: "envelope" })
