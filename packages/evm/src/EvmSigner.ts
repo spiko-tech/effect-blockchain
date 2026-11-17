@@ -78,10 +78,12 @@ const serializable = (transaction: EvmUnsignedTransaction) => ({
  * @since 0.3.0
  * @category constructors
  */
-export const fromPrivateKey = (key: Redacted.Redacted<string>): Effect.Effect<EvmSigner, EvmSignerError> =>
+export const fromPrivateKey = (options: {
+  readonly key: Redacted.Redacted<string>
+}): Effect.Effect<EvmSigner, EvmSignerError> =>
   Effect.try({
     try: () => {
-      const value = Redacted.value(key)
+      const value = Redacted.value(options.key)
       if (!isHex(value)) throw new Error("not hex")
       return privateKeyToAccount(value)
     },

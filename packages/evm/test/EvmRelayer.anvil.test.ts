@@ -41,7 +41,7 @@ describe.skipIf(url === "")("EvmRelayer on Anvil", { concurrent: false }, () => 
     Effect.gen(function*() {
       const relayer = yield* EvmRelayer.EvmRelayer
       const rpc = yield* EvmRpc.EvmRpc
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       const count = yield* rpc.getTransactionCount({ address: signer.address, blockTag: "latest" })
       const { hash, nonce, signed } = yield* relayer.sign({ signer, to: TO, value: BigInt(1) })
       expect(nonce).toBe(count)
@@ -58,11 +58,11 @@ describe.skipIf(url === "")("EvmRelayer on Anvil", { concurrent: false }, () => 
   it.live("reports a reverted call as Failed", () =>
     Effect.gen(function*() {
       const relayer = yield* EvmRelayer.EvmRelayer
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       // PUSH1 0 PUSH1 0 REVERT
       yield* anvil("anvil_setCode", [REVERTING, "0x60006000fd"])
       const estimated = yield* Effect.flip(relayer.sign({ signer, to: REVERTING }))
-      expect(estimated).toMatchObject({ _tag: "EvmRpcError", reason: { _tag: "Rejected" } })
+      expect(estimated).toMatchObject({ _tag: "EvmSimulationError", reason: { _tag: "SimulationFailed" } })
       const { hash, signed } = yield* relayer.sign({ signer, to: REVERTING, gas: BigInt(100_000) })
       yield* relayer.broadcast({ signed })
       expect(yield* relayer.awaitConfirmation({ hash, poll })).toMatchObject({ _tag: "Failed" })
@@ -71,7 +71,7 @@ describe.skipIf(url === "")("EvmRelayer on Anvil", { concurrent: false }, () => 
   it.live("replaces a pending transaction at the same nonce with bumped fees", () =>
     Effect.gen(function*() {
       const relayer = yield* EvmRelayer.EvmRelayer
-      const signer = yield* EvmSigner.fromPrivateKey(Redacted.make(KEY))
+      const signer = yield* EvmSigner.fromPrivateKey({ key: Redacted.make(KEY) })
       yield* anvil("evm_setAutomine", [false])
       const fees = { maxFeePerGas: BigInt(10_000_000_000), maxPriorityFeePerGas: BigInt(1_000_000_000) }
       const stuck = yield* relayer.sign({ signer, to: TO, value: BigInt(1), fees })

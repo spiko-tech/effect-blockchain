@@ -59,6 +59,7 @@ import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -75,8 +76,8 @@ import type { EvmSigner, EvmSignerError } from "./EvmSigner.ts"
 import { EvmTransactionHash } from "./EvmTransactionHash.ts"
 
 /**
- * Where a transaction stands, by `_tag`: see the module's table. `block` is the block holding it, and `reason` the
- * revert data, `undefined` when it is not available: a receipt does not carry it.
+ * Where a transaction stands, by `_tag`: see the module's table. `block` is the block holding it. `reason` is always
+ * `undefined`: a receipt does not carry the revert data.
  *
  * @since 0.3.0
  * @category models
@@ -85,8 +86,18 @@ export type EvmTransactionStatus =
   | { readonly _tag: "Pending" }
   | { readonly _tag: "Included"; readonly block: bigint }
   | { readonly _tag: "Confirmed"; readonly block: bigint }
-  | { readonly _tag: "Failed"; readonly block: bigint; readonly reason: EvmHexData | undefined }
+  | { readonly _tag: "Failed"; readonly block: bigint; readonly reason: undefined }
   | { readonly _tag: "NotFound" }
+
+/**
+ * The transaction to look up: its `hash`.
+ *
+ * @since 0.4.0
+ * @category models
+ */
+export interface EvmTransactionStatusOptions {
+  readonly hash: EvmTransactionHash
+}
 
 /**
  * The fees of an EIP-1559 transaction, in wei per gas: the most it pays in total, and the part of it offered to the
@@ -127,13 +138,35 @@ export interface EvmSignedTransaction {
 }
 
 /**
+ * The simulation of the call failed: `error` is the node's message, with the revert reason when the node gives it.
+ *
+ * @since 0.4.0
+ * @category reasons
+ */
+export class SimulationFailed extends Schema.TaggedError<SimulationFailed>()("SimulationFailed", {
+  error: Schema.String
+}) {}
+
+/**
+ * A transaction could not be prepared for signing, for a `reason` matched with `Effect.catchReason`: `cause` is the
+ * {@link EvmRpc.EvmRpcError} of the refused `eth_estimateGas`.
+ *
+ * @since 0.4.0
+ * @category errors
+ */
+export class EvmSimulationError extends Schema.TaggedError<EvmSimulationError>()("EvmSimulationError", {
+  reason: Schema.Union([SimulationFailed]),
+  cause: Schema.Defect()
+}) {}
+
+/**
  * The sender's nonce is already used by a transaction in a block, and the node does not know this one: another
  * transaction took its place.
  *
- * @since 0.3.0
+ * @since 0.4.0
  * @category reasons
  */
-export class NonceTooLow extends Schema.TaggedError<NonceTooLow>()("NonceTooLow", {}) {}
+export class InvalidNonce extends Schema.TaggedError<InvalidNonce>()("InvalidNonce", {}) {}
 
 /**
  * The node's pool holds another transaction at this nonce and the fees do not exceed its fees enough to replace it.
@@ -167,7 +200,7 @@ export class InsufficientFunds extends Schema.TaggedError<InsufficientFunds>()("
  * @since 0.3.0
  * @category reasons
  */
-export const EvmBroadcastReason = Schema.Union([NonceTooLow, ReplacementUnderpriced, FeeTooLow, InsufficientFunds])
+export const EvmBroadcastReason = Schema.Union([InvalidNonce, ReplacementUnderpriced, FeeTooLow, InsufficientFunds])
 
 /**
  * @since 0.3.0
@@ -194,8 +227,9 @@ export class EvmBroadcastError extends Schema.TaggedError<EvmBroadcastError>()("
 export class EvmRelayer extends Context.Service<EvmRelayer, {
   /**
    * Signs an EIP-1559 call of `to` from `signer.address` without sending it. A missing `nonce` is the sender's pending
-   * transaction count, a missing `gas` is `eth_estimateGas` times the layer's `gasMultiplier` (a call that reverts
-   * fails with `Rejected`), and missing `fees` come from the layer's fee strategy.
+   * transaction count, a missing `gas` is `eth_estimateGas` times the layer's `gasMultiplier` (a call the node
+   * refuses to estimate, as one that reverts, fails with an {@link EvmSimulationError}), and missing `fees` come from
+   * the layer's fee strategy.
    */
   readonly sign: (options: {
     readonly signer: EvmSigner
@@ -205,7 +239,7 @@ export class EvmRelayer extends Context.Service<EvmRelayer, {
     readonly nonce?: bigint | undefined
     readonly gas?: bigint | undefined
     readonly fees?: EvmFees | undefined
-  }) => Effect.Effect<EvmSignedTransaction, EvmRpc.EvmRpcError | EvmSignerError>
+  }) => Effect.Effect<EvmSignedTransaction, EvmRpc.EvmRpcError | EvmSignerError | EvmSimulationError>
   /**
    * Sends a signed transaction with `eth_sendRawTransaction` and returns its hash. Sending the same bytes again is
    * safe: a node answering that it already has the transaction, or that the nonce is used while it knows this hash,
@@ -218,19 +252,18 @@ export class EvmRelayer extends Context.Service<EvmRelayer, {
    * The status of the transaction as the answering endpoint sees it. An endpoint behind the head, or one that never
    * received the transaction, answers `Pending` or `NotFound` for a transaction another one has in a block.
    */
-  readonly fetchTransactionStatus: (options: {
-    readonly hash: EvmTransactionHash
-  }) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
+  readonly fetchTransactionStatus: (
+    options: EvmTransactionStatusOptions
+  ) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
   /**
    * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
    * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
    * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
    * that ends first returns the last read.
    */
-  readonly awaitConfirmation: (options: {
-    readonly hash: EvmTransactionHash
-    readonly poll?: Schedule.Schedule<unknown> | undefined
-  }) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
+  readonly awaitConfirmation: (
+    options: EvmTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }
+  ) => Effect.Effect<EvmTransactionStatus, EvmRpc.EvmRpcError>
 }>()("@effect-blockchain/evm/EvmRelayer") {}
 
 /**
@@ -270,11 +303,13 @@ export const defaultFees = (estimate: EvmFeeEstimate): EvmFees => {
 // of Nethermind (`AcceptTxResult`), Besu and anvil that differ
 const alreadyKnown = /already known|AlreadyKnown|known transaction|already imported/i
 const refusals: ReadonlyArray<readonly [RegExp, () => EvmBroadcastReason]> = [
-  [/nonce too low|OldNonce/i, () => new NonceTooLow()],
+  [/nonce too low|OldNonce/i, () => new InvalidNonce()],
   [/replacement transaction underpriced|ReplacementNotAllowed/i, () => new ReplacementUnderpriced()],
   [/insufficient funds|InsufficientFunds|exceeds transaction sender account balance/i, () => new InsufficientFunds()],
   [/underpriced|less than block base fee|FeeTooLow|gas price below configured minimum/i, () => new FeeTooLow()]
 ]
+
+const messagesOf = (error: unknown) => JsonRpc.errorsOf(error).map(({ message }) => message).join("\n")
 
 /**
  * Builds an {@link EvmRelayer} over the provided {@link EvmRpc.EvmRpc}. `confirmations` overrides the network's
@@ -309,9 +344,18 @@ export const layer = (options: {
               ? rpc.getTransactionCount({ address: signer.address, blockTag: "pending" })
               : Effect.succeed(given.nonce),
             gas: given.gas === undefined
-              ? Effect.map(
-                rpc.estimateGas({ from: signer.address, to, value, data }),
-                (estimate) => estimate * gasPercent / BigInt(100)
+              ? rpc.estimateGas({ from: signer.address, to, value, data }).pipe(
+                Effect.map((estimate) => estimate * gasPercent / BigInt(100)),
+                Effect.catchIf(
+                  (cause) => cause.reason._tag === "Rejected",
+                  (cause) =>
+                    Effect.fail(
+                      new EvmSimulationError({
+                        reason: new SimulationFailed({ error: messagesOf(cause.cause) }),
+                        cause
+                      })
+                    )
+                )
               )
               : Effect.succeed(given.gas),
             fees: given.fees === undefined ? estimateFees : Effect.succeed(given.fees)
@@ -326,17 +370,17 @@ export const layer = (options: {
           if (sent._tag === "Success") return sent.success
           const cause = sent.failure
           const hash = EvmTransactionHash.make(keccak256(signed))
-          const messages = JsonRpc.errorsOf(cause).map((error) => error.message).join("\n")
+          const messages = messagesOf(cause)
           if (alreadyKnown.test(messages)) return hash
           const reason = refusals.find(([pattern]) => pattern.test(messages))?.[1]()
           if (reason === undefined) return yield* cause
           // a node that has this transaction in a block answers that its nonce is used
-          if (reason._tag === "NonceTooLow" && (yield* rpc.getTransactionByHash({ hash })) !== null) return hash
+          if (reason._tag === "InvalidNonce" && (yield* rpc.getTransactionByHash({ hash })) !== null) return hash
           return yield* new EvmBroadcastError({ reason, cause })
         }
       )
       const fetchTransactionStatus = Effect.fn("EvmRelayer.fetchTransactionStatus")(
-        function*({ hash }: { readonly hash: EvmTransactionHash }) {
+        function*({ hash }: EvmTransactionStatusOptions) {
           const receipt = yield* rpc.getTransactionReceipt({ hash })
           if (receipt === null) {
             const transaction = yield* rpc.getTransactionByHash({ hash })
@@ -364,3 +408,22 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds an {@link EvmRelayer} like {@link layer}, reading `confirmations` and `gasMultiplier` from `Config`. The fee
+ * strategy is {@link defaultFees}.
+ *
+ * @example
+ * ```ts
+ * import * as EvmRelayer from "@effect-blockchain/evm/EvmRelayer"
+ * import * as Config from "effect/Config"
+ *
+ * const RelayerLive = EvmRelayer.layerConfig({ confirmations: Config.Int("ETHEREUM_CONFIRMATIONS") })
+ * ```
+ *
+ * @since 0.4.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Omit<NonNullable<Parameters<typeof layer>[0]>, "fees">>
+): Layer.Layer<EvmRelayer, Config.ConfigError, EvmRpc.EvmRpc> => Layer.unwrap(Effect.map(Config.unwrap(options), layer))
