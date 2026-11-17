@@ -261,7 +261,7 @@ importers:
   packages/evm:
     dependencies:
       '@effect-blockchain/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
     devDependencies:
       '@effect/vitest':
@@ -277,7 +277,7 @@ importers:
   packages/solana:
     dependencies:
       '@effect-blockchain/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
     devDependencies:
       '@effect/vitest':
@@ -293,7 +293,7 @@ importers:
   packages/starknet:
     dependencies:
       '@effect-blockchain/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
     devDependencies:
       '@effect/vitest':
@@ -309,7 +309,7 @@ importers:
   packages/stellar:
     dependencies:
       '@effect-blockchain/core':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../core
     devDependencies:
       '@effect/vitest':

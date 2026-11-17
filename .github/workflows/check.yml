@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - run: pnpm check
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - run: pnpm circular
@@ -46,7 +46,7 @@ jobs:
       contents: read
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - name: Build
@@ -63,11 +63,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.9.0
       - name: Start Anvil
         run: |
           anvil --silent &
@@ -82,12 +84,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - name: Start starknet-devnet
         run: |
-          docker run --detach --publish 5050:5050 shardlabs/starknet-devnet-rs:0.7.1 --seed 0
+          docker run --detach --publish 5050:5050 shardlabs/starknet-devnet-rs@sha256:837a1286939a98cfadd0804a98397df4f1de5b773d3ebb94bcb9cc5fe8e8f004 --seed 0 # shardlabs/starknet-devnet-rs:0.7.1
           timeout 60 bash -c 'until curl --silent --fail http://127.0.0.1:5050/is_alive; do sleep 1; done'
       - name: Test
         run: pnpm vitest run packages/starknet/test/StarknetRelayer.devnet.test.ts
@@ -99,12 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - name: Start quickstart
         run: |
-          docker run -d -p 8000:8000 stellar/quickstart:v693-b1627.1-latest --local --enable rpc
+          docker run -d -p 8000:8000 stellar/quickstart@sha256:a61ce821add98adb4f3e3d6e757b2615dd169a2b39c7e30cd47cfa95074f97d9 --local --enable rpc # stellar/quickstart:v693-b1627.1-latest
           health='{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
           timeout 180 bash -c "until curl -sf -H 'content-type: application/json' -d '$health' http://127.0.0.1:8000/rpc | grep -q healthy; do sleep 2; done"
           # friendbot starts after the RPC: fund an account nobody holds the key of
@@ -119,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         uses: ./.github/actions/setup
       - name: Install the Solana CLI
