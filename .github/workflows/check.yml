@@ -77,6 +77,23 @@ jobs:
         env:
           ANVIL_RPC_URL: http://127.0.0.1:8545
 
+  starknet-devnet:
+    name: Starknet Devnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup
+      - name: Start starknet-devnet
+        run: |
+          docker run --detach --publish 5050:5050 shardlabs/starknet-devnet-rs:0.7.1 --seed 0
+          timeout 60 bash -c 'until curl --silent --fail http://127.0.0.1:5050/is_alive; do sleep 1; done'
+      - name: Test
+        run: pnpm vitest run packages/starknet/test/StarknetRelayer.devnet.test.ts
+        env:
+          STARKNET_DEVNET_RPC_URL: http://127.0.0.1:5050
+
   stellar-quickstart:
     name: Stellar quickstart
     runs-on: ubuntu-latest

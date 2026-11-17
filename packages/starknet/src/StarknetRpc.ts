@@ -33,7 +33,7 @@
  * @since 0.1.0
  */
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
-import type * as Arr from "effect/Array"
+import * as Arr from "effect/Array"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
@@ -252,17 +252,18 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
     readonly blockTag: StarknetBlockTag
   }) => Effect.Effect<bigint, StarknetRpcError>
   /**
-   * `starknet_estimateFee`: one estimate per transaction, each executed on top of the previous ones at `blockTag`.
+   * `starknet_estimateFee`: one estimate per transaction, each executed on top of the previous ones at `blockTag`
+   * (a reply without an estimate is an `InvalidResponse`).
    * `skipValidate` sends the `SKIP_VALIDATE` flag, which accepts unsigned transactions. A transaction that fails is
    * `Rejected` with the code 41 (`TRANSACTION_EXECUTION_ERROR`) and the node's message in `cause`.
    *
    * @since 0.2.0
    */
   readonly estimateFee: (options: {
-    readonly transactions: ReadonlyArray<StarknetTransaction>
+    readonly transactions: Arr.NonEmptyReadonlyArray<StarknetTransaction>
     readonly skipValidate?: boolean | undefined
     readonly blockTag: StarknetBlockTag
-  }) => Effect.Effect<ReadonlyArray<StarknetFeeEstimate>, StarknetRpcError>
+  }) => Effect.Effect<Arr.NonEmptyReadonlyArray<StarknetFeeEstimate>, StarknetRpcError>
   /**
    * `starknet_addInvokeTransaction`: submits a signed `INVOKE` transaction and returns its hash. A retry or a fallback
    * sends the same transaction, so it never creates a second one, but a node that already has it refuses the second
@@ -478,8 +479,9 @@ export const layer = (options: {
         estimateFee: ({ blockTag, skipValidate, transactions }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.estimateFee, {
-              request: transactions.map((transaction) =>
-                transaction.type === "INVOKE" ? invoke(transaction) : deployAccount(transaction)
+              request: Arr.map(
+                transactions,
+                (transaction) => transaction.type === "INVOKE" ? invoke(transaction) : deployAccount(transaction)
               ),
               simulation_flags: skipValidate === true ? ["SKIP_VALIDATE"] : [],
               block_id: blockTag
