@@ -1,5 +1,44 @@
 # @effect-blockchain/starknet
 
+## 0.3.0
+
+### Minor Changes
+
+- [#87](https://github.com/spiko-tech/effect-blockchain/pull/87) [`e80c678`](https://github.com/spiko-tech/effect-blockchain/commit/e80c678461917654ffef322ae54eaeeebc77275f) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `StarknetRelayer` follows the shape of the other chains' relayers, and recovers better after an endpoint fallback.
+  
+  - Breaking: `sign` and `signDeployAccount` take `fees?: StarknetFees` (`{ resourceBounds, tip }`) instead of `resourceBounds` and `tip`.
+  - Breaking: `defaultFees` and the layer's `fees` strategy return a `StarknetFees` instead of a `StarknetResourceBounds`.
+  - Breaking: the `InsufficientBalance` broadcast reason is renamed `InsufficientFunds`.
+  - Breaking: `sign` and `signDeployAccount` fail with the new `StarknetSimulationError` (reason `SimulationFailed`) when `starknet_estimateFee` answers `TRANSACTION_EXECUTION_ERROR`, instead of a `StarknetRpcError` with the reason `Rejected`. The `StarknetRpcError` is its `cause`.
+  - Breaking: the `calls` of `sign` are an `Arr.NonEmptyReadonlyArray`.
+  - `StarknetRelayer.layer` takes `feeMultiplier` (default 1.5), the margin of the default fee strategy over the estimate.
+  - `StarknetRelayer.layerConfig` reads `confirmations` and `feeMultiplier` from `Config`.
+  - `StarknetTransactionStatusOptions` is exported.
+  - `broadcast` fails with the node's `StarknetRpcError` instead of dying on a transaction whose hash cannot be computed.
+  - `broadcast` checks whether the node knows the transaction when any endpoint answers `INVALID_TRANSACTION_NONCE`, where it used to read only the first refusal of a fallback.
+  - `StarknetRpc.getTransactionStatus` returns `null` when at least one endpoint answers `TXN_HASH_NOT_FOUND` and every other one fails with a transient reason, where it used to read only the last endpoint's code. An endpoint refusing the request is now an error wherever it comes in the order.
+
+- [#85](https://github.com/spiko-tech/effect-blockchain/pull/85) [`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `StarknetRelayer.awaitConfirmation` no longer ends on a transient RPC error.
+  
+  - A status read failing with a transient reason (`JsonRpc.isTransient`: `Unavailable`, `InvalidResponse`, `Lagging`) is read again on `poll`. It used to fail the wait, leaving the caller unable to tell whether the transaction landed. Any other error still fails the wait, and a `poll` that ends first returns the last read.
+  - `StarknetRelayer.DEFAULT_POLL_INTERVAL` is exported, the same value as `StarknetIndexer.DEFAULT_POLL_INTERVAL`.
+
+### Patch Changes
+
+- [#91](https://github.com/spiko-tech/effect-blockchain/pull/91) [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Shorten the module docs and document the shared semantics once
+  
+  - Module headers are 1 to 3 sentences with one `@example`, and link to `docs/concepts.md` for the rules shared by the chains: endpoint fallback, error reasons, stream options, the stateless relayer, transaction statuses, confirmations and signers.
+  - `StarknetRpcError` and the Indexer stream options link to the shared description instead of repeating it.
+  - The README has an Rpc and Indexer example and a Relayer example, both type-checked.
+  - `StarknetRpcEndpoint` documents that a `getEvents` cursor goes to the first endpoint with the name of the one that issued it.
+
+- [#83](https://github.com/spiko-tech/effect-blockchain/pull/83) [`be71305`](https://github.com/spiko-tech/effect-blockchain/commit/be71305609118c749c0e38b46d60bcb4c45520eb) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Pin `@effect-blockchain/core` to the exact version released with this package (`workspace:*`)
+  
+  - The chain packages use core APIs marked `@internal`, so each release now depends on one exact core version instead of a caret range.
+  - The `starknet` peer dependency is now optional: only `StarknetRelayer` and `StarknetSigner` import it. Import `StarknetRpc` and `StarknetIndexer` by subpath when it is not installed.
+- Updated dependencies [[`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633), [`2c0d672`](https://github.com/spiko-tech/effect-blockchain/commit/2c0d672c3288722af9019ec503bf9519b1df51cd), [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897)]:
+  - @effect-blockchain/core@0.2.0
+
 ## 0.2.0
 
 ### Minor Changes
