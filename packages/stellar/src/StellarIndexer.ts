@@ -207,7 +207,9 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
   /**
    * The native balance of `address` at the end of `block`, in stroops: the account entry at the head when it has not
    * changed since `block`, else the balance before its first change after `block`, read ledger by ledger with
-   * `getLedgers`. An account missing at the head reads `0`, even if it was merged after `block`.
+   * `getLedgers`. An account missing at the head reads `0`, even if it was merged after `block`. A `block` older than
+   * the regular endpoints retain needs an endpoint flagged `archive`, and costs one `getLedgers` page (10 ledgers, 1 to
+   * 3 MB each on mainnet) per 10 ledgers until the account's next change.
    */
   readonly fetchNativeBalance: (
     options: { readonly address: StellarAccountAddress; readonly block: bigint }
@@ -216,7 +218,9 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
    * The native balance of `address` at every `step` ledgers from `fromBlock` on, following the confirmed head. Each
    * sample reads the account entry at the head, unless an earlier read already covers it. When the account changed
    * since the sample, every ledger since the previous sample is read with `getLedgers` (1 to 3 MB each on mainnet):
-   * `step` does not reduce these history reads.
+   * `step` does not reduce these history reads. A sample older than the regular endpoints retain needs an endpoint
+   * flagged `archive`, and costs one `getLedgers` page (10 ledgers, 1 to 3 MB each on mainnet) per 10 ledgers until the
+   * account's next change.
    */
   readonly streamNativeBalance: (
     options: StellarIndexerNativeBalanceOptions
@@ -316,6 +320,20 @@ export const layer = (options: {
         }).pipe(Effect.map((ranges) => Arr.flatten(ranges).filter((event) => event.inSuccessfulContractCall)))
       })
 
+      // one `getLedgers` page: from the archive endpoints only with `archive`, else from the regular ones and, once
+      // they fail `Pruned`, from the archive ones; with no archive endpoint, the `Pruned` error stands
+      const ledgersPage = (startLedger: bigint, limit: number, archive: boolean) =>
+        archive
+          ? rpc.getLedgers({ startLedger, limit, archive })
+          : rpc.getLedgers({ startLedger, limit }).pipe(Effect.catchIf(
+            (error) => error.reason._tag === "Pruned",
+            (pruned) =>
+              rpc.getLedgers({ startLedger, limit, archive: true }).pipe(Effect.catchIf(
+                (error) => error.reason._tag === "Rejected" && error.endpoint === "archive",
+                () => Effect.fail(pruned)
+              ))
+          ))
+
       // what `read` finds in each of the ledgers [from, to], in chain order, a page at a time
       const readLedgers = <A>(
         from: bigint,
@@ -324,14 +342,12 @@ export const layer = (options: {
         archive = false
       ) =>
         Stream.paginate(from, (start) =>
-          rpc.getLedgers({
-            startLedger: start,
-            limit: Number(BigInt_.min(pageSize, to - start + BigInt(1))),
-            archive
-          }).pipe(Effect.map(({ ledgers }) => {
-            const next = start + BigInt(ledgers.length)
-            return [ledgers.flatMap(read), next <= to ? Option.some(next) : Option.none()] as const
-          })))
+          ledgersPage(start, Number(BigInt_.min(pageSize, to - start + BigInt(1))), archive).pipe(
+            Effect.map(({ ledgers }) => {
+              const next = start + BigInt(ledgers.length)
+              return [ledgers.flatMap(read), next <= to ? Option.some(next) : Option.none()] as const
+            })
+          ))
 
       // the changes of `address` in the ledgers [from, to], in chain order
       const changes = (address: StellarAccountAddress, from: bigint, to: bigint) => {
@@ -349,7 +365,9 @@ export const layer = (options: {
         ).toXDR("base64")
         return Effect.map(rpc.getLedgerEntries({ keys: [key], minLedger: block }), ({ entries, latestLedger }) => {
           const entry = entries[0]
-          if (entry === undefined) return { account: undefined, latestLedger }
+          if (entry === undefined) {
+            return { account: undefined, latestLedger }
+          }
           const data = xdr.LedgerEntryData.fromXDR(entry.xdr, "base64").account()
           if (StrKey.encodeEd25519PublicKey(data.accountId().ed25519()) !== address) {
             throw new Error(`getLedgerEntries returned another account than ${address}`)
@@ -361,7 +379,9 @@ export const layer = (options: {
 
       const balanceAt = (address: StellarAccountAddress, block: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
         Effect.flatMap(account(address, block), ({ account, latestLedger }) => {
-          if (account === undefined) return Effect.succeed({ balance: BigInt(0), until: latestLedger })
+          if (account === undefined) {
+            return Effect.succeed({ balance: BigInt(0), until: latestLedger })
+          }
           if (account.lastModifiedLedger <= block) {
             return Effect.succeed({ balance: account.balance, until: latestLedger })
           }
@@ -385,7 +405,12 @@ export const layer = (options: {
             account !== undefined && account.lastModifiedLedger <= block
               ? Effect.succeed({ balance: account.balance, until: latestLedger })
               : Stream.runLast(changes(address, known.until + BigInt(1), block)).pipe(Effect.map((last) => ({
-                balance: Option.match(last, { onNone: () => known.balance, onSome: (change) => change.after }),
+                balance: Option.match(last, {
+                  onNone: () =>
+                    known.balance,
+                  onSome: (change) =>
+                    change.after
+                }),
                 until: block
               })))
         )
