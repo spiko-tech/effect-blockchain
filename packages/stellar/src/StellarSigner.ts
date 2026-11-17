@@ -91,9 +91,11 @@ export const fromHashSigner = <E>(options: {
  * @since 0.2.0
  * @category constructors
  */
-export const fromPrivateKey = (key: Redacted.Redacted<string>): Effect.Effect<StellarSigner, StellarSignerError> =>
+export const fromPrivateKey = (options: {
+  readonly key: Redacted.Redacted<string>
+}): Effect.Effect<StellarSigner, StellarSignerError> =>
   Effect.try({
-    try: () => Keypair.fromSecret(Redacted.value(key)),
+    try: () => Keypair.fromSecret(Redacted.value(options.key)),
     // the thrown error can quote the seed
     catch: () => new StellarSignerError({ cause: new Error("invalid secret seed") })
   }).pipe(Effect.map((keypair) =>

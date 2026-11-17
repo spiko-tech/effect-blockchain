@@ -49,7 +49,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
       const rpc = yield* StellarRpc.StellarRpc
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       yield* Effect.all([fund(signer.address), fund(receiver)])
       const { hash, maxLedger, sequence, signed } = yield* relayer.sign({
         signer,
@@ -72,7 +72,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
   it.live("reports a failing operation as Failed with its codes", () =>
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       const { hash, maxLedger, signed } = yield* relayer.sign({
         signer,
         operations: [payment(receiver, "1"), payment(Keypair.random().publicKey(), "1")]
@@ -88,7 +88,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
       const rpc = yield* StellarRpc.StellarRpc
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       const { latestLedger } = yield* rpc.getFeeStats
       const { hash, maxLedger } = yield* relayer.sign({
         signer,
@@ -101,14 +101,14 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
   it.live("fails a refused transaction with its result code", () =>
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       const operations = [payment(receiver, "1")] as const
       const used = yield* relayer.sign({ signer, operations, sequence: BigInt(1) })
       expect(yield* Effect.flip(relayer.broadcast({ signed: used.signed }))).toMatchObject({
         _tag: "StellarBroadcastError",
-        reason: { _tag: "Refused", code: "txBadSeq" }
+        reason: { _tag: "InvalidNonce" }
       })
-      const cheap = yield* relayer.sign({ signer, operations, fee: BigInt(1) })
+      const cheap = yield* relayer.sign({ signer, operations, fees: { fee: BigInt(1) } })
       expect(yield* Effect.flip(relayer.broadcast({ signed: cheap.signed }))).toMatchObject({
         _tag: "StellarBroadcastError",
         reason: { _tag: "Refused", code: "txInsufficientFee" }
@@ -123,7 +123,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
   it.live("signs, broadcasts and confirms a contract invocation", () =>
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       const send = Effect.fnUntraced(function*(operation: string) {
         const { hash, maxLedger, signed } = yield* relayer.sign({ signer, operations: [operation] })
         yield* relayer.broadcast({ signed })
@@ -152,13 +152,15 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
       const rpc = yield* StellarRpc.StellarRpc
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
-      const payer = yield* StellarSigner.fromPrivateKey(Redacted.make(Keypair.random().secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
+      const payer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(Keypair.random().secret()) })
       yield* fund(payer.address)
       const inner = yield* relayer.sign({ signer, operations: [payment(receiver, "1")] })
-      const { hash, signed } = yield* relayer.feeBump({ signer: payer, signed: inner.signed })
-      expect(yield* relayer.broadcast({ signed })).toBe(hash)
-      const status = yield* relayer.awaitConfirmation({ hash, maxLedger: inner.maxLedger, poll })
+      const bumped = yield* relayer.feeBump({ signer: payer, signed: inner.signed })
+      const { hash } = bumped
+      expect([bumped.sequence, bumped.maxLedger]).toStrictEqual([inner.sequence, inner.maxLedger])
+      expect(yield* relayer.broadcast(bumped)).toBe(hash)
+      const status = yield* relayer.awaitConfirmation({ ...bumped, poll })
       expect(status).toMatchObject({ _tag: "Confirmed" })
       expect(yield* rpc.getTransaction({ hash })).toMatchObject({ status: "SUCCESS", feeBump: true })
     }).pipe(Effect.provide(layer)))
@@ -166,10 +168,10 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
   it.live("sends two payments of one account at once through two channels, one wrapped in a fee bump", () =>
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
       const channels = yield* Effect.forEach(
         [Keypair.random(), Keypair.random()],
-        (channel) => StellarSigner.fromPrivateKey(Redacted.make(channel.secret()))
+        (channel) => StellarSigner.fromPrivateKey({ key: Redacted.make(channel.secret()) })
       )
       yield* Effect.forEach(channels, (channel) => fund(channel.address), { concurrency: 2 })
       const before = yield* accountEntry(signer.address)
@@ -184,7 +186,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
       expect(
         yield* Effect.all([
           relayer.awaitConfirmation({ ...direct, poll }),
-          relayer.awaitConfirmation({ hash: bumped.hash, maxLedger: wrapped.maxLedger, poll })
+          relayer.awaitConfirmation({ ...bumped, poll })
         ], { concurrency: 2 })
       ).toMatchObject([{ _tag: "Confirmed" }, { _tag: "Confirmed" }])
       const after = yield* accountEntry(signer.address)
@@ -198,8 +200,8 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
       const rpc = yield* StellarRpc.StellarRpc
-      const signer = yield* StellarSigner.fromPrivateKey(Redacted.make(sender.secret()))
-      const account = yield* StellarSigner.fromPrivateKey(Redacted.make(Keypair.random().secret()))
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
+      const account = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(Keypair.random().secret()) })
       const { hash, maxLedger, signed } = yield* relayer.sign({
         signer,
         operations: StellarRelayer.createSponsoredAccount({ sponsor: signer.address, account: account.address }),

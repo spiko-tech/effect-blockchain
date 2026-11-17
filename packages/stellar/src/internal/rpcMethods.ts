@@ -145,6 +145,10 @@ export const simulateTransaction = JsonRpc.method({
       results: Schema.optionalKey(
         Schema.Array(Schema.Struct({ auth: Schema.Array(Schema.String), xdr: Schema.String }))
       ),
+      // the `restoreFootprint` transaction to send first when the invocation touches archived entries
+      restorePreamble: Schema.optionalKey(
+        Schema.Struct({ transactionData: Schema.String, minResourceFee: Schema.BigIntFromString })
+      ),
       latestLedger: LedgerFromNumber
     })
   ])
