@@ -1,5 +1,13 @@
 # @effect-blockchain/stellar
 
+## 0.4.0
+
+### Minor Changes
+
+- [#93](https://github.com/spiko-tech/effect-blockchain/pull/93) [`36166d6`](https://github.com/spiko-tech/effect-blockchain/commit/36166d6e89c51bcca14cedf01d6d8bea5e3e5cb5) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read old native balances from the endpoints flagged `archive`
+  
+  - `StellarIndexer.fetchNativeBalance` and `streamNativeBalance` read a `getLedgers` page again from the endpoints flagged `archive` when the regular endpoints fail it `Pruned`, so a `block` older than their retention no longer fails. With no endpoint flagged `archive`, the `Pruned` error stands.
+
 ## 0.3.0
 
 ### Minor Changes
