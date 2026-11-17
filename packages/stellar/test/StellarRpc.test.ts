@@ -43,12 +43,15 @@ const ENVELOPE = transaction.toEnvelope().toXDR("base64")
 const ENVELOPE_HASH = transaction.hash().toString("hex")
 const accountEntryXdr = (address: string) => account(address, 7).data().toXDR("base64")
 
-const ledgers = (sequences: ReadonlyArray<number>) => ({
+const ledgers = (sequences: ReadonlyArray<number>, cursor = String(sequences.at(-1) ?? 0)) => ({
   result: {
     ledgers: sequences.map((sequence) => ({ sequence, ledgerCloseTime: "1700000000", metadataXdr: "AAAA" })),
-    latestLedger: 100
+    cursor,
+    latestLedger: 100,
+    oldestLedger: 1
   }
 })
+const ledgersCursor = (endpoint: string, cursor: string) => StellarRpc.StellarLedgersCursor.make({ endpoint, cursor })
 
 const baseEvent = {
   type: "contract",
@@ -84,7 +87,7 @@ const defaults: Node = {
 }
 
 // one fake fetch serving every endpoint, routed by host: `https://<name>.rpc.test/secret-key`
-const setup = (nodes: Record<string, Node>) => {
+const setup = (nodes: Record<string, Node>, archive: ReadonlyArray<string> = []) => {
   const calls: Array<string> = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const name = new URL(String(input)).hostname.split(".")[0]
@@ -100,7 +103,11 @@ const setup = (nodes: Record<string, Node>) => {
   if (!Arr.isReadonlyArrayNonEmpty(names)) throw new Error("setup needs at least one endpoint")
   const layer = StellarRpc.layer({
     network: "Stellar",
-    endpoints: Arr.map(names, (name) => ({ name, url: Redacted.make(`https://${name}.rpc.test/secret-key`) })),
+    endpoints: Arr.map(names, (name) => ({
+      name,
+      url: Redacted.make(`https://${name}.rpc.test/secret-key`),
+      archive: archive.includes(name)
+    })),
     retries: 0
   }).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)))
   const run = <A, E>(f: (rpc: StellarRpc.StellarRpc["Service"]) => Effect.Effect<A, E>) =>
@@ -418,38 +425,116 @@ describe("StellarRpc", () => {
     )
   })
 
-  it.effect("sends getLedgers params, the limit only when set", () => {
+  it.effect("sends getLedgers params: the limit only when set, the cursor instead of startLedger", () => {
     const params: Array<Params | undefined> = []
     const { run } = setup({
       a: {
         getLedgers: (p) => {
           params.push(p)
-          return ledgers([12])
+          return ledgers(p?.startLedger === undefined ? [13, 14] : [12])
         }
       }
     })
     return run((rpc) =>
       Effect.gen(function*() {
-        expect(yield* rpc.getLedgers({ startLedger: BigInt(12) })).toStrictEqual([
-          { sequence: BigInt(12), closeTime: 1700000000, metadataXdr: "AAAA" }
-        ])
+        const first = yield* rpc.getLedgers({ startLedger: BigInt(12) })
+        expect(first).toStrictEqual({
+          ledgers: [{ sequence: BigInt(12), closeTime: 1700000000, metadataXdr: "AAAA" }],
+          cursor: ledgersCursor("a", "12"),
+          latestLedger: BigInt(100),
+          oldestLedger: BigInt(1)
+        })
         yield* rpc.getLedgers({ startLedger: BigInt(12), limit: 3 })
-        expect(params).toStrictEqual([{ startLedger: 12, pagination: {} }, {
-          startLedger: 12,
-          pagination: { limit: 3 }
-        }])
+        const next = yield* rpc.getLedgers({ cursor: first.cursor, limit: 2 })
+        expect(next.ledgers.map((ledger) => ledger.sequence)).toStrictEqual([BigInt(13), BigInt(14)])
+        expect(next.cursor).toStrictEqual(ledgersCursor("a", "14"))
+        expect(params).toStrictEqual([
+          { startLedger: 12, pagination: {} },
+          { startLedger: 12, pagination: { limit: 3 } },
+          { pagination: { limit: 2, cursor: "12" } }
+        ])
       })
     )
   })
 
-  it.effect("fails getLedgers InvalidResponse on a page that does not start at startLedger", () =>
+  it.effect("fails getLedgers InvalidResponse on a page that is not the ledgers from the start on", () =>
     Effect.gen(function*() {
-      for (const sequences of [[], [13]]) {
-        const { run } = setup({ a: { getLedgers: () => ledgers(sequences) } })
+      for (const reply of [ledgers([]), ledgers([13]), ledgers([12, 14]), ledgers([12], "not a sequence")]) {
+        const { run } = setup({ a: { getLedgers: () => reply } })
         const error = yield* run((rpc) => Effect.flip(rpc.getLedgers({ startLedger: BigInt(12) })))
         expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getLedgers" })
       }
+      const { run } = setup({ a: { getLedgers: () => ledgers([14]) } })
+      const error = yield* run((rpc) => Effect.flip(rpc.getLedgers({ cursor: ledgersCursor("a", "12") })))
+      expect(error).toMatchObject({ reason: { _tag: "InvalidResponse" }, method: "getLedgers" })
     }))
+
+  it.effect("sends a getLedgers cursor to the endpoint that issued it, with no fallback", () => {
+    const { calls, run } = setup({
+      a: { getLedgers: () => ledgers([12]) },
+      b: { getLedgers: () => ({ error: { code: -32603, message: "down" } }) }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        const error = yield* Effect.flip(rpc.getLedgers({ cursor: ledgersCursor("b", "11") }))
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, endpoint: "b" })
+        expect(calls).toStrictEqual(["b:getNetwork", "b:getLedgers"])
+        const unknown = yield* Effect.flip(rpc.getLedgers({ cursor: ledgersCursor("gone", "11") }))
+        expect(unknown).toMatchObject({ reason: { _tag: "Rejected" }, endpoint: "gone" })
+        expect(calls).toHaveLength(2)
+      })
+    )
+  })
+
+  it.effect("reads a getLedgers cursor at the latest ledger as an empty page or Lagging, an old one as Pruned", () =>
+    Effect.gen(function*() {
+      const after = (reply: Reply) =>
+        setup({ a: { getLedgers: () => reply } }).run((rpc) => rpc.getLedgers({ cursor: ledgersCursor("a", "100") }))
+      const failing = (message: string) => Effect.flip(after({ error: { code: -32602, message } }))
+      expect(yield* after(ledgers([], "100"))).toMatchObject({ ledgers: [], cursor: ledgersCursor("a", "100") })
+      expect(
+        yield* failing(
+          "cursor ('100') must be between the oldest ledger: 1 and the latest ledger: 100 for this rpc instance"
+        )
+      ).toMatchObject({ reason: { _tag: "Lagging", head: BigInt(100), toBlock: BigInt(101) }, code: -32602 })
+      for (
+        const message of [
+          "cursor ('100') must be between the oldest ledger: 150 and the latest ledger: 200 for this rpc instance",
+          "cursor ('100') must be at or above the oldest ledger: 150 for this rpc instance"
+        ]
+      ) {
+        expect(yield* failing(message)).toMatchObject({ reason: { _tag: "Pruned" }, code: -32602 })
+      }
+    }))
+
+  it.effect("sends an archive getLedgers call to the archive endpoints only, any other call to every endpoint", () => {
+    const pruned = () => ({ error: { code: -32603, message: "down" } })
+    const { calls, run } = setup({
+      a: { getLedgers: () => ledgers([12]) },
+      b: { getLedgers: pruned },
+      c: { getLedgers: () => ledgers([12]) }
+    }, ["b", "c"])
+    return run((rpc) =>
+      Effect.gen(function*() {
+        const archived = yield* rpc.getLedgers({ startLedger: BigInt(12), archive: true })
+        expect(archived.cursor).toStrictEqual(ledgersCursor("c", "12"))
+        expect(calls).toStrictEqual(["b:getNetwork", "b:getLedgers", "c:getNetwork", "c:getLedgers"])
+        const any = yield* rpc.getLedgers({ startLedger: BigInt(12) })
+        expect(any.cursor).toStrictEqual(ledgersCursor("a", "12"))
+      })
+    )
+  })
+
+  it.effect("fails an archive getLedgers call Rejected without a request when no endpoint is flagged", () => {
+    const { calls, run } = setup({ a: { getLedgers: () => ledgers([12]) } })
+    return run((rpc) => Effect.flip(rpc.getLedgers({ startLedger: BigInt(12), archive: true }))).pipe(
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, method: "getLedgers", endpoint: "archive" })
+        expect(error.cause).toStrictEqual(new Error("no endpoint is flagged archive"))
+        expect(calls).toStrictEqual([])
+      })
+    )
+  })
 
   it.effect("sends getLedgerEntries keys and reads lastModifiedLedgerSeq", () => {
     const params: Array<Params | undefined> = []
@@ -567,7 +652,13 @@ describe("StellarRpc", () => {
 })
 
 describe("layerConfig", () => {
-  const endpoints = Config.all([Config.all({ name: Config.succeed("a"), url: Config.Redacted("STELLAR_RPC_URL") })])
+  const endpoints = Config.all([
+    Config.all({
+      name: Config.succeed("a"),
+      url: Config.Redacted("STELLAR_RPC_URL"),
+      archive: Config.Boolean("STELLAR_RPC_ARCHIVE").pipe(Config.withDefault(false))
+    })
+  ])
   const run = (env: Record<string, string>) => {
     const { calls, fetch } = setup({
       a: { getLatestLedger: () => ({ result: { id: "ab".repeat(32), protocolVersion: 23, sequence: 100 } }) }

@@ -4,7 +4,9 @@
  * A call starts at the first endpoint and moves to the next one on failure, except on `WrongNetwork`. Each endpoint
  * is checked once to serve the configured network (`getNetwork` passphrase). Every method is a read, except
  * `sendTransaction`, which a node answers `DUPLICATE` the second time: retries and fallback are safe. Methods are
- * named after the RPC method. A `getEvents` page cursor is only sent to the endpoint that issued it, with no fallback.
+ * named after the RPC method. A `getEvents` or `getLedgers` page cursor is only sent to the endpoint that issued it,
+ * with no fallback. An endpoint flagged `archive` serves the whole history: it takes every call like the others, and
+ * is the only kind to take a `getLedgers` call asking for `archive`.
  *
  * @example
  * ```ts
@@ -46,7 +48,7 @@ import type { StellarTransactionHash } from "./StellarTransactionHash.ts"
 
 /**
  * A Stellar RPC endpoint. The `name` is shown in errors and spans and routes cursors, so it must be unique; the `url`
- * is never logged.
+ * is never logged. `archive` flags an endpoint that serves ledgers older than the retention window of a regular one.
  *
  * @since 0.1.0
  * @category models
@@ -54,6 +56,7 @@ import type { StellarTransactionHash } from "./StellarTransactionHash.ts"
 export interface StellarRpcEndpoint {
   readonly name: string
   readonly url: Redacted.Redacted<string>
+  readonly archive?: boolean | undefined
 }
 
 /**
@@ -61,9 +64,10 @@ export interface StellarRpcEndpoint {
  * HTTP status as `code`, and a `cause` without the endpoint URL. After several endpoints, the error is the last one
  * and `cause` is an `AggregateError` of each endpoint's error, in order.
  *
- * On Stellar, `Unavailable` includes the code -32603, `InvalidResponse` an event outside the `getEvents` filter,
- * `Lagging` a latest ledger below `toBlock` (or `startLedger`, `minLedger`), and `Pruned` an oldest retained ledger
- * above `fromBlock` (or the cursor, `startLedger`).
+ * On Stellar, `Unavailable` includes the code -32603, `InvalidResponse` an event outside the `getEvents` filter or a
+ * `getLedgers` page with a missing ledger, `Lagging` a latest ledger below `toBlock` (or `startLedger`, `minLedger`),
+ * `Pruned` an oldest retained ledger above `fromBlock` (or the cursor, `startLedger`), and `Rejected` a `getLedgers`
+ * call asking for `archive` when no endpoint is flagged.
  *
  * @since 0.1.0
  * @category errors
@@ -166,6 +170,57 @@ export interface StellarLedger {
   readonly sequence: bigint
   readonly closeTime: number
   readonly metadataXdr: string
+}
+
+/**
+ * Where a `getLedgers` page stopped: the RPC paging cursor and the endpoint that issued it. Opaque: only pass it back to
+ * `getLedgers`.
+ *
+ * @since 0.3.0
+ * @category schemas
+ */
+export const StellarLedgersCursor = Schema.Struct({
+  endpoint: Schema.String,
+  cursor: Schema.String
+}).pipe(Schema.brand("StellarLedgersCursor"))
+
+/**
+ * @since 0.3.0
+ * @category models
+ */
+export type StellarLedgersCursor = typeof StellarLedgersCursor.Type
+
+/**
+ * Which `getLedgers` page to read: the one starting at `startLedger`, or the one after `cursor`, on the endpoint that
+ * issued it.
+ *
+ * - `limit`: page size, 1 to 200, default 50 (stellar-rpc `max-ledgers-limit` and `default-ledgers-limit`,
+ *   https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getLedgers).
+ * - `archive`: only ask the endpoints flagged `archive`.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export type StellarLedgersOptions =
+  | {
+    readonly startLedger: bigint
+    readonly limit?: number | undefined
+    readonly archive?: boolean | undefined
+  }
+  | { readonly cursor: StellarLedgersCursor; readonly limit?: number | undefined }
+
+/**
+ * One `getLedgers` page, in order and without a gap, with the ledger range the endpoint retains. An archive endpoint
+ * serves ledgers below its `oldestLedger`.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface StellarLedgersPage {
+  readonly ledgers: ReadonlyArray<StellarLedger>
+  readonly cursor: StellarLedgersCursor
+  readonly latestLedger: bigint
+  readonly oldestLedger: bigint
 }
 
 /**
@@ -299,14 +354,12 @@ export class StellarRpc extends Context.Service<StellarRpc, {
    */
   readonly getEvents: (filter: StellarEventsFilter) => Effect.Effect<StellarEventsPage, StellarRpcError>
   /**
-   * `getLedgers`: up to `limit` ledgers from `startLedger` on, in order. Fails `Pruned` on an endpoint that no longer
-   * retains `startLedger` and `Lagging` on one that has not closed it yet, then falls back: an archive endpoint later
-   * in the list serves the whole history.
+   * `getLedgers`, one page: up to `limit` ledgers from `startLedger` on, or after `cursor`. A page can be shorter than
+   * `limit`. Fails `Pruned` on an endpoint that no longer retains the start and `Lagging` on one that has not closed
+   * it yet, then falls back, except after a cursor. After a cursor at the latest ledger, a node answers an empty page
+   * or fails `Lagging`, depending on its version.
    */
-  readonly getLedgers: (options: {
-    readonly startLedger: bigint
-    readonly limit?: number | undefined
-  }) => Effect.Effect<ReadonlyArray<StellarLedger>, StellarRpcError>
+  readonly getLedgers: (options: StellarLedgersOptions) => Effect.Effect<StellarLedgersPage, StellarRpcError>
   /**
    * `getLedgerEntries`: the entries of the base64 `LedgerKey` XDRs `keys` at the endpoint's latest ledger, a missing
    * entry left out. Fails `Lagging` on an endpoint whose latest ledger is below `minLedger`, then falls back.
@@ -350,8 +403,9 @@ const codes: ReadonlyMap<number, JsonRpc.CodeReason> = new Map([[-32603, "Unavai
 
 // stellar-rpc's out-of-range start, current ("startLedger must be within the ledger range: X - Y") and older
 // ("startLedger must be between the oldest ledger: X and the latest ledger: Y ..."), and on getLedgers ("start ledger
-// (N) must be between the oldest ledger: X and the latest ledger: Y ...")
-const ledgerRangeError = /(?:startLedger|start ledger \(\d+\)) must be \D*(\d+)\D+(\d+)/u
+// (N) must be between the oldest ledger: X and the latest ledger: Y ...", "cursor ('N') must be between the oldest
+// ledger: X and the latest ledger: Y ...", "cursor ('N') must be at or above the oldest ledger: X ...")
+const ledgerRangeError = /(?:startLedger|start ledger \(\d+\)|cursor \('\d+'\)) must be \D*(\d+)(?:\D+(\d+))?/u
 
 // the ledger of a TOID cursor: ledger << 32 | transaction << 12 | operation
 const cursorLedger = (cursor: string) => BigInt(cursor.slice(0, 19)) >> BigInt(32)
@@ -437,7 +491,7 @@ export const layer = (options: {
           : null
         if (match === null) return error
         return new StellarRpcError({
-          reason: start() < BigInt(match[1])
+          reason: match[2] === undefined || start() < BigInt(match[1])
             ? new JsonRpc.Pruned()
             : new JsonRpc.Lagging({ head: BigInt(match[2]), toBlock: start() }),
           method: error.method,
@@ -497,6 +551,34 @@ export const layer = (options: {
         }
       })
 
+      const getLedgersOn = Effect.fnUntraced(function*(endpoint: Endpoint, options: StellarLedgersOptions) {
+        const cursor = "cursor" in options ? options.cursor.cursor : undefined
+        const start = "cursor" in options ? BigInt(options.cursor.cursor) + BigInt(1) : options.startLedger
+        const page = yield* call(endpoint, RpcMethods.getLedgers, {
+          ...(cursor === undefined ? { startLedger: start } : {}),
+          pagination: {
+            ...(options.limit === undefined ? {} : { limit: options.limit }),
+            ...(cursor === undefined ? {} : { cursor })
+          }
+        }).pipe(Effect.mapError((error) => outOfRange(error, () => start)))
+        yield* Ref.update(endpoint.head, BigInt_.max(page.latestLedger))
+        // only a cursor at the latest ledger has an empty page
+        if (
+          (cursor === undefined && page.ledgers.length === 0) ||
+          page.ledgers.some((ledger, index) => ledger.sequence !== start + BigInt(index))
+        ) {
+          return yield* fail(
+            endpoint,
+            RpcMethods.getLedgers.name,
+            new JsonRpc.InvalidResponse(),
+            new Error(`the page is not the ledgers from ${start} on`)
+          )
+        }
+        return { ...page, cursor: StellarLedgersCursor.make({ endpoint: endpoint.name, cursor: page.cursor }) }
+      })
+
+      const archives = rpc.endpoints.filter((_, index) => options.endpoints[index].archive === true)
+
       return StellarRpc.of({
         network,
         getNetwork: withFallback(rpc.checkNetwork),
@@ -505,24 +587,23 @@ export const layer = (options: {
             Effect.tap((ledger) => Ref.update(endpoint.head, BigInt_.max(ledger.sequence)))
           )
         ),
-        getLedgers: ({ limit, startLedger }) =>
-          withFallback((endpoint) =>
-            call(endpoint, RpcMethods.getLedgers, {
-              startLedger,
-              pagination: limit === undefined ? {} : { limit }
-            }).pipe(
-              Effect.mapError((error) => outOfRange(error, () => startLedger)),
-              Effect.tap((page) => Ref.update(endpoint.head, BigInt_.max(page.latestLedger))),
-              Effect.flatMap((page) =>
-                page.ledgers[0]?.sequence === startLedger ? Effect.succeed(page.ledgers) : Effect.fail(fail(
-                  endpoint,
-                  RpcMethods.getLedgers.name,
-                  new JsonRpc.InvalidResponse(),
-                  new Error(`the page does not start at ledger ${startLedger}`)
-                ))
-              )
+        getLedgers: (options) => {
+          const method = RpcMethods.getLedgers.name
+          if ("cursor" in options) {
+            return Effect.flatMap(rpc.endpointOf(method, options.cursor), (endpoint) => getLedgersOn(endpoint, options))
+          }
+          if (options.archive !== true) return withFallback((endpoint) => getLedgersOn(endpoint, options))
+          return Arr.isReadonlyArrayNonEmpty(archives)
+            ? withFallback((endpoint) => getLedgersOn(endpoint, options), archives)
+            : Effect.fail(
+              new StellarRpcError({
+                reason: new JsonRpc.Rejected(),
+                method,
+                endpoint: "archive",
+                cause: new Error("no endpoint is flagged archive")
+              })
             )
-          ),
+        },
         getLedgerEntries: ({ keys, minLedger }) =>
           withFallback((endpoint) =>
             call(endpoint, RpcMethods.getLedgerEntries, { keys }).pipe(

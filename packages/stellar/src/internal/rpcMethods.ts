@@ -56,8 +56,8 @@ export const getEvents = JsonRpc.method({
 export const getLedgers = JsonRpc.method({
   name: "getLedgers",
   params: Schema.Struct({
-    startLedger: LedgerFromNumber,
-    pagination: Schema.Struct({ limit: Schema.optionalKey(Schema.Int) })
+    startLedger: Schema.optionalKey(LedgerFromNumber),
+    pagination: Schema.Struct({ limit: Schema.optionalKey(Schema.Int), cursor: Schema.optionalKey(Schema.String) })
   }),
   result: Schema.Struct({
     ledgers: Schema.Array(
@@ -66,7 +66,10 @@ export const getLedgers = JsonRpc.method({
           Schema.encodeKeys({ closeTime: "ledgerCloseTime" })
         )
     ),
-    latestLedger: LedgerFromNumber
+    // the sequence of the last ledger of the page, the next page starting one above (stellar-rpc `parseCursor`)
+    cursor: Schema.String.check(Schema.isPattern(/^\d+$/u)),
+    latestLedger: LedgerFromNumber,
+    oldestLedger: LedgerFromNumber
   })
 })
 

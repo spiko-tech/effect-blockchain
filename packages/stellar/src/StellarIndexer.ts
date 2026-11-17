@@ -298,7 +298,7 @@ export const layer = (options: {
           rpc.getLedgers({
             startLedger: start,
             limit: Number(BigInt_.min(BigInt(LEDGERS_PAGE), to - start + BigInt(1)))
-          }).pipe(Effect.map((ledgers) => {
+          }).pipe(Effect.map(({ ledgers }) => {
             const next = start + BigInt(ledgers.length)
             return [
               ledgers.flatMap((ledger) =>

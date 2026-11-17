@@ -28,6 +28,10 @@ const MISSING = "GD7777777777777777777777777777777777777777777777777773DB"
 // v1 ledger (2025) with fee-bump transactions
 const V0_LEDGER = 30000002
 const V1_LEDGER = 55000004
+// ledgers holding contract events of Soroban transactions, before protocol 23 (`LedgerCloseMeta` v1, protocol 22) and
+// after it (v2). The archive endpoint serves every ledger with `TransactionMeta` v4, whatever its protocol.
+const V1_SOROBAN_LEDGER = 58000008
+const V2_SOROBAN_LEDGER = 59000000
 
 // transactions of ledgers 65509458 to 65509460, which Stellar RPC only serves for about 7 days: a payment, a failed
 // transaction of four operations, a fee bump whose inner transaction failed, and a hash no transaction has. To record
@@ -51,7 +55,8 @@ const simulation = (name: string) => ({
     .toEnvelope()
     .toXDR("base64")
 })
-const ledgers = (startLedger: number) => ({ startLedger, pagination: { limit: 1 } })
+const ledgers = (startLedger: number, limit = 1) => ({ startLedger, pagination: { limit } })
+const ledgersAfter = (cursor: string, limit = 1) => ({ pagination: { limit, cursor } })
 
 const contract = (contractIds: ReadonlyArray<string>) => [{ type: "contract", contractIds }]
 const range = (start: number, end: number, contractIds: ReadonlyArray<string>, limit: number) => ({
@@ -113,6 +118,7 @@ const cases: ReadonlyArray<Case> = [
   },
   { name: "getLedgers-pruned", method: "getLedgers", params: ledgers(V1_LEDGER) },
   { name: "getLedgers-lagging", method: "getLedgers", params: ledgers(FUTURE_LEDGER) },
+  { name: "getLedgers-cursor-pruned", method: "getLedgers", params: ledgersAfter(String(V1_LEDGER)) },
   ...Object.entries(transactions).map(([name, hash]) => ({
     name: `getTransaction-${name}`,
     method: "getTransaction",
@@ -123,7 +129,17 @@ const cases: ReadonlyArray<Case> = [
 const archiveCases: ReadonlyArray<Case> = [
   { name: "getNetwork", method: "getNetwork" },
   { name: "getLedgers-v0", method: "getLedgers", params: ledgers(V0_LEDGER) },
-  { name: "getLedgers-v1", method: "getLedgers", params: ledgers(V1_LEDGER) }
+  { name: "getLedgers-v1", method: "getLedgers", params: ledgers(V1_LEDGER) },
+  { name: "getLedgers-v1-soroban", method: "getLedgers", params: ledgers(V1_SOROBAN_LEDGER) },
+  { name: "getLedgers-v2-soroban", method: "getLedgers", params: ledgers(V2_SOROBAN_LEDGER) },
+  // two small pages of two ledgers, the second after the cursor of the first
+  { name: "getLedgers-v0-page", method: "getLedgers", params: ledgers(V0_LEDGER + 1, 2) },
+  {
+    name: "getLedgers-v0-page-next",
+    method: "getLedgers",
+    params: (replies) => ledgersAfter(JSON.parse(replies.get("getLedgers-v0-page") ?? "").result.cursor, 2)
+  },
+  { name: "getLedgers-cursor-lagging", method: "getLedgers", params: ledgersAfter(String(FUTURE_LEDGER)) }
 ]
 
 await record({

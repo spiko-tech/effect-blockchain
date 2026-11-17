@@ -310,6 +310,8 @@ export interface Options<Info, E, J = Schema.Json> {
 export interface JsonRpc<Info, E, J = Schema.Json> {
   /** Builds the chain's error for `endpoint`. */
   readonly fail: (endpoint: Endpoint<Info, E>, method: string, reason: Reason, cause: Error) => E
+  /** The endpoints, in their configured order. */
+  readonly endpoints: Arr.NonEmptyReadonlyArray<Endpoint<Info, E>>
   /** The network check, run once per endpoint, concurrent first calls included. */
   readonly checkNetwork: (endpoint: Endpoint<Info, E>) => Effect.Effect<Info, E>
   /** The network check then the request, its classification, decoding and span. */
@@ -321,8 +323,12 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
   /**
    * Runs `f` on each endpoint in order until one succeeds or fails with a reason that does not fall back. When
    * several endpoints were tried, the error is the last one with an `AggregateError` of every error as its `cause`.
+   * `only` restricts the call to some of `endpoints`, tried in the order given.
    */
-  readonly withFallback: <A>(f: (endpoint: Endpoint<Info, E>) => Effect.Effect<A, E>) => Effect.Effect<A, E>
+  readonly withFallback: <A>(
+    f: (endpoint: Endpoint<Info, E>) => Effect.Effect<A, E>,
+    only?: Arr.NonEmptyReadonlyArray<Endpoint<Info, E>>
+  ) => Effect.Effect<A, E>
   /** The endpoint that issued `cursor`, `Rejected` without a request when there is none. */
   readonly endpointOf: (
     method: string,
@@ -589,11 +595,14 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
   const call = <Params, A>(endpoint: Endpoint, method: Method<Params, A, J>, params: Params) =>
     checkNetwork(endpoint).pipe(Effect.andThen(send(endpoint, method, params)))
 
-  const withFallback = <A>(f: (endpoint: Endpoint) => Effect.Effect<A, E>): Effect.Effect<A, E> => {
+  const withFallback = <A>(
+    f: (endpoint: Endpoint) => Effect.Effect<A, E>,
+    only: ReadonlyArray<Endpoint> = endpoints
+  ): Effect.Effect<A, E> => {
     const from = (index: number, errors: ReadonlyArray<E>): Effect.Effect<A, E> =>
-      Effect.catch(Effect.suspend(() => f(endpoints[index])), (last) => {
+      Effect.catch(Effect.suspend(() => f(only[index])), (last) => {
         const tried = [...errors, last]
-        if (last.reason._tag !== "WrongNetwork" && index + 1 < endpoints.length) {
+        if (last.reason._tag !== "WrongNetwork" && index + 1 < only.length) {
           const attributes = { network, endpoint: last.endpoint, method: last.method, outcome: last.reason._tag }
           return Metric.update(Metric.withAttributes(fallbacksMetric, attributes), 1).pipe(
             Effect.andThen(from(index + 1, tried))
@@ -640,5 +649,5 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
     }
   })
 
-  return { fail, checkNetwork, call, withFallback, endpointOf, requireHead }
+  return { fail, endpoints, checkNetwork, call, withFallback, endpointOf, requireHead }
 })
