@@ -1,5 +1,57 @@
 # @effect-blockchain/stellar
 
+## 0.3.0
+
+### Minor Changes
+
+- [#92](https://github.com/spiko-tech/effect-blockchain/pull/92) [`8b4d3ac`](https://github.com/spiko-tech/effect-blockchain/commit/8b4d3acd78b16244e9a5172d0886ec9b5ded5cba) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `StellarIndexer.fetchArchivedEvents` reads contract events older than a regular endpoint's retention from the archive endpoints.
+  
+  - `fetchArchivedEvents({ filter, fromBlock, toBlock, concurrency?, retry? })` returns a `StellarIndexerBatch`. It pages `getLedgers` on the endpoints flagged `archive` and decodes each `LedgerCloseMeta` (`TransactionMeta` v3 and v4) into the contract events `getEvents` returns, ids included, with the same contract and topic filter. Events of failed transactions are left out.
+  - `LEDGERS_PAGE_SIZE` (10) is the `getLedgers` page size of the Indexer, and `StellarIndexerArchivedEventsOptions` the options type.
+
+- [#88](https://github.com/spiko-tech/effect-blockchain/pull/88) [`2f4d949`](https://github.com/spiko-tech/effect-blockchain/commit/2f4d949a8669e43d6b96a7a008fc984591dc94cb) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Align `StellarRelayer` and `StellarSigner` with the other chains, and stop two ways a transaction could fail late.
+  
+  - `sign` fails with a `StellarSimulationError` of reason `RestoreRequired` (`transactionData`, `minResourceFee`) when the simulation returns a `restorePreamble`. It used to sign the invocation, which then failed in a ledger and paid its fee. `StellarRpc.simulateTransaction` now returns `restorePreamble`.
+  - A result code this version does not list no longer throws inside `broadcast` and `fetchTransactionStatus`: it reads `undefined`.
+  - New `StellarRelayer.layerConfig` (`confirmations`, `validity`), `StellarFees`, `StellarFeeEstimate` and `StellarTransactionStatusOptions`.
+  - `StellarBroadcastError` has a `cause` holding the node's reply.
+  - Breaking: `feeBump` returns a full `StellarSignedTransaction` (`hash`, `signed`, `sequence`, `maxLedger` of the inner transaction) instead of `{ hash, signed }`, so `awaitConfirmation(bumped)` can end in `Expired`.
+  - Breaking: `sign({ fee })` and `feeBump({ fee })` are replaced by `fees: { fee }` (`StellarFees`, stroops per operation).
+  - Breaking: `defaultFees` and the `fees` option of `layer` are `(estimate: StellarFeeEstimate) => StellarFees` instead of `(inclusionFee: StellarFeeDistribution) => bigint`.
+  - Breaking: a `txBadSeq` refusal is the reason `InvalidNonce` and a `txInsufficientBalance` refusal is `InsufficientFunds`, instead of `Refused` with that `code`. `Refused` keeps the other codes.
+  - Breaking: `StellarTransactionFailure.code` and each entry of `operations` (also on `Refused`) can be `undefined`.
+  - Breaking: `StellarSigner.fromPrivateKey({ key })` replaces `fromPrivateKey(key)`.
+
+- [#90](https://github.com/spiko-tech/effect-blockchain/pull/90) [`2c0d672`](https://github.com/spiko-tech/effect-blockchain/commit/2c0d672c3288722af9019ec503bf9519b1df51cd) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `StellarRpc.getLedgers` returns one page with its cursor, and endpoints can be flagged `archive`.
+  
+  - Breaking: `getLedgers` returns a `StellarLedgersPage` (`{ ledgers, cursor, latestLedger, oldestLedger }`) instead of `ReadonlyArray<StellarLedger>`. Read `page.ledgers` where the array was used.
+  - `getLedgers` takes `{ startLedger, limit? }` or `{ cursor, limit? }` (`StellarLedgersOptions`). A `StellarLedgersCursor` is only sent to the endpoint that issued it, with no fallback, like a `getEvents` cursor.
+  - A page that does not start at the requested ledger or that skips a ledger fails `InvalidResponse`. A cursor the endpoint no longer retains fails `Pruned`.
+  - `StellarRpcEndpoint` gains `archive?: boolean`, also read by `layerConfig`. `getLedgers({ startLedger, archive: true })` only asks the endpoints flagged `archive`, in their configured order, and fails `Rejected` without a request when none is flagged. Every other call still goes through all the endpoints.
+
+- [#85](https://github.com/spiko-tech/effect-blockchain/pull/85) [`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `StellarRelayer.awaitConfirmation` no longer ends on a transient RPC error.
+  
+  - A status read failing with a transient reason (`JsonRpc.isTransient`: `Unavailable`, `InvalidResponse`, `Lagging`) is read again on `poll`. It used to fail the wait, leaving the caller unable to tell whether the transaction landed. Any other error still fails the wait, and a `poll` that ends first returns the last read.
+  - `StellarRelayer.DEFAULT_POLL_INTERVAL` is exported, the same value as `StellarIndexer.DEFAULT_POLL_INTERVAL`.
+
+### Patch Changes
+
+- [#91](https://github.com/spiko-tech/effect-blockchain/pull/91) [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Shorten the module docs and document the shared semantics once
+  
+  - Module headers are 1 to 3 sentences with one `@example`, and link to `docs/concepts.md` for the rules shared by the chains: endpoint fallback, error reasons, stream options, the stateless relayer, transaction statuses, confirmations and signers.
+  - `StellarRpcError` and the Indexer stream options link to the shared description instead of repeating it.
+  - The README has an Rpc and Indexer example and a Relayer example, both type-checked.
+  - `StellarRelayer.sign` documents `UnsupportedAuth` and the authorization entries passed by the caller, which are kept.
+  - `StellarRpc` documents what a node answers to a second copy of a transaction: `DUPLICATE`, then `TRY_AGAIN_LATER`, then `txBadSeq`.
+  - `StellarRpcEndpoint` no longer says that endpoint names must be unique: a cursor goes to the first endpoint with the name of the one that issued it.
+  - The channel account and fee bump sample moved from the module header to the `@example` of `feeBump`.
+
+- [#83](https://github.com/spiko-tech/effect-blockchain/pull/83) [`be71305`](https://github.com/spiko-tech/effect-blockchain/commit/be71305609118c749c0e38b46d60bcb4c45520eb) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Pin `@effect-blockchain/core` to the exact version released with this package (`workspace:*`)
+  
+  - The chain packages use core APIs marked `@internal`, so each release now depends on one exact core version instead of a caret range.
+- Updated dependencies [[`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633), [`2c0d672`](https://github.com/spiko-tech/effect-blockchain/commit/2c0d672c3288722af9019ec503bf9519b1df51cd), [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897)]:
+  - @effect-blockchain/core@0.2.0
+
 ## 0.2.0
 
 ### Minor Changes

@@ -1,5 +1,39 @@
 # @effect-blockchain/evm
 
+## 0.4.0
+
+### Minor Changes
+
+- [#86](https://github.com/spiko-tech/effect-blockchain/pull/86) [`a878c81`](https://github.com/spiko-tech/effect-blockchain/commit/a878c81adfcc2ee8627be0e5c30cd7418fbbfb6a) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Align `EvmRelayer` and `EvmSigner` with the other chains.
+  
+  - `EvmRelayer.sign` fails with the new `EvmSimulationError` (`reason: SimulationFailed`, holding the node's message) when the node refuses `eth_estimateGas`, as for a call that reverts.
+  - `EvmRelayer.layerConfig` builds the Relayer from `Config` (`confirmations`, `gasMultiplier`).
+  - `EvmRelayer.EvmTransactionStatusOptions` is exported: the input of `fetchTransactionStatus` and `awaitConfirmation`.
+  - Breaking: `EvmSigner.fromPrivateKey(key)` is now `EvmSigner.fromPrivateKey({ key })`.
+  - Breaking: the `EvmBroadcastError` reason `NonceTooLow` is renamed `InvalidNonce`.
+  - Breaking: a refused gas estimate in `EvmRelayer.sign` is no longer an `EvmRpcError` with reason `Rejected`: catch `EvmSimulationError`. Transport and node failures stay `EvmRpcError`.
+  - Breaking: `reason` of the `Failed` status is typed `undefined` (was `EvmHexData | undefined`, and never set): a receipt does not carry the revert data.
+
+- [#85](https://github.com/spiko-tech/effect-blockchain/pull/85) [`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - `EvmRelayer.awaitConfirmation` no longer ends on a transient RPC error.
+  
+  - A status read failing with a transient reason (`JsonRpc.isTransient`: `Unavailable`, `InvalidResponse`, `Lagging`) is read again on `poll`. It used to fail the wait, leaving the caller unable to tell whether the transaction landed. Any other error still fails the wait, and a `poll` that ends first returns the last read.
+  - `EvmRelayer.DEFAULT_POLL_INTERVAL` is exported, the same value as `EvmIndexer.DEFAULT_POLL_INTERVAL`.
+
+### Patch Changes
+
+- [#91](https://github.com/spiko-tech/effect-blockchain/pull/91) [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Shorten the module docs and document the shared semantics once
+  
+  - Module headers are 1 to 3 sentences with one `@example`, and link to `docs/concepts.md` for the rules shared by the chains: endpoint fallback, error reasons, stream options, the stateless relayer, transaction statuses, confirmations and signers.
+  - `EvmRpcError` and the Indexer stream options link to the shared description instead of repeating it.
+  - The README has an Rpc and Indexer example and a Relayer example, both type-checked.
+  - The default confirmations of `EvmNetwork` cite protocol documentation, and the Polygon and BNB Smart Chain entries say why they keep a margin.
+
+- [#83](https://github.com/spiko-tech/effect-blockchain/pull/83) [`be71305`](https://github.com/spiko-tech/effect-blockchain/commit/be71305609118c749c0e38b46d60bcb4c45520eb) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Pin `@effect-blockchain/core` to the exact version released with this package (`workspace:*`)
+  
+  - The chain packages use core APIs marked `@internal`, so each release now depends on one exact core version instead of a caret range.
+- Updated dependencies [[`5d75cb8`](https://github.com/spiko-tech/effect-blockchain/commit/5d75cb8761d7ed6b8443e74434ee4f9e123a0633), [`2c0d672`](https://github.com/spiko-tech/effect-blockchain/commit/2c0d672c3288722af9019ec503bf9519b1df51cd), [`90ca1fa`](https://github.com/spiko-tech/effect-blockchain/commit/90ca1fa28406bffe7b4d2abc921608f44de8f897)]:
+  - @effect-blockchain/core@0.2.0
+
 ## 0.3.0
 
 ### Minor Changes
