@@ -140,6 +140,14 @@ describe("StarknetRpc", () => {
     const received = setup({
       a: { starknet_getTransactionStatus: () => ({ result: { finality_status: "RECEIVED" } }) }
     })
+    // starknet-devnet answers a null reason for a transaction that did not revert
+    const devnet = setup({
+      a: {
+        starknet_getTransactionStatus: () => ({
+          result: { finality_status: "ACCEPTED_ON_L2", execution_status: "SUCCEEDED", failure_reason: null }
+        })
+      }
+    })
     const unknown = setup({
       a: { starknet_getTransactionStatus: notFound },
       b: {
@@ -157,6 +165,10 @@ describe("StarknetRpc", () => {
       })
       expect(known.calls.filter((call) => call.endsWith("starknet_getTransactionStatus"))).toHaveLength(2)
       expect(yield* received.run(status)).toStrictEqual({ finalityStatus: "RECEIVED" })
+      expect(yield* devnet.run(status)).toStrictEqual({
+        finalityStatus: "ACCEPTED_ON_L2",
+        executionStatus: "SUCCEEDED"
+      })
       expect(yield* unknown.run(status)).toBeNull()
       expect(yield* Effect.flip(failing.run(status))).toMatchObject({ reason: { _tag: "Rejected" }, code: -32601 })
     })

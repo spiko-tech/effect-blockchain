@@ -1,4 +1,7 @@
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import { identity } from "effect/Function"
+import * as Option from "effect/Option"
+import * as Predicate from "effect/Predicate"
 import * as Schema from "effect/Schema"
 import * as SchemaTransformation from "effect/SchemaTransformation"
 import { StarknetAddress } from "../StarknetAddress.ts"
@@ -90,7 +93,16 @@ export const getTransactionStatus = make({
   result: Schema.Struct({
     finalityStatus: Schema.Literals(["RECEIVED", "CANDIDATE", "PRE_CONFIRMED", "ACCEPTED_ON_L2", "ACCEPTED_ON_L1"]),
     executionStatus: Schema.optionalKey(Schema.Literals(["SUCCEEDED", "REVERTED"])),
-    failureReason: Schema.optionalKey(Schema.String)
+    // starknet-devnet 0.7.1 answers `"failure_reason": null` for a transaction that did not revert
+    failureReason: Schema.optionalKey(Schema.NullOr(Schema.String)).pipe(
+      Schema.decodeTo(
+        Schema.optionalKey(Schema.String),
+        SchemaTransformation.transformOptional<string, string | null>({
+          decode: Option.filter(Predicate.isNotNull),
+          encode: identity
+        })
+      )
+    )
   }).pipe(
     Schema.encodeKeys({
       finalityStatus: "finality_status",
@@ -168,11 +180,11 @@ export const getNonce = make({
 export const estimateFee = make({
   name: "starknet_estimateFee",
   params: Schema.Struct({
-    request: Schema.Array(Schema.Union([InvokeTransaction, DeployAccountTransaction])),
+    request: Schema.NonEmptyArray(Schema.Union([InvokeTransaction, DeployAccountTransaction])),
     simulation_flags: Schema.Array(Schema.Literal("SKIP_VALIDATE")),
     block_id: BlockTag
   }),
-  result: Schema.Array(
+  result: Schema.NonEmptyArray(
     Schema.Struct({
       l1GasConsumed: BigIntFromFelt,
       l1GasPrice: BigIntFromFelt,
