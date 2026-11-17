@@ -63,13 +63,19 @@ export const update = (address: string, from: number, to: number): Array<xdr.Led
   xdr.LedgerEntryChange.ledgerEntryUpdated(account(address, to))
 ]
 
-export const transaction = (fee: Array<xdr.LedgerEntryChange>, apply: xdr.TransactionMeta) =>
+export const transaction = (
+  fee: Array<xdr.LedgerEntryChange>,
+  apply: xdr.TransactionMeta,
+  options: { readonly hash?: Buffer; readonly failed?: boolean } = {}
+) =>
   new xdr.TransactionResultMeta({
     result: new xdr.TransactionResultPair({
-      transactionHash: Buffer.alloc(32),
+      transactionHash: options.hash ?? Buffer.alloc(32),
       result: new xdr.TransactionResult({
         feeCharged: xdr.Int64.fromString("100"),
-        result: xdr.TransactionResultResult.txSuccess([]),
+        result: options.failed === true
+          ? xdr.TransactionResultResult.txFailed([])
+          : xdr.TransactionResultResult.txSuccess([]),
         ext: new xdr.TransactionResultExt(0)
       })
     }),

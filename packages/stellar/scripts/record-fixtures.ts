@@ -1,7 +1,7 @@
 // Records real Stellar RPC replies into `test/fixtures/<provider>/<method>[-<case>].json`, replayed by
 // `test/StellarRpc.fixtures.test.ts`. Needs the network and QUASAR_API_KEY:
 //
-//   node --env-file=<path to .env> scripts/record-fixtures.ts [startLedger]
+//   node --env-file=<path to .env> scripts/record-fixtures.ts [startLedger] [eventsLedger]
 //
 // Stellar RPC only keeps about 7 days of ledgers, so the pinned range falls out of the retention window: pass a recent
 // `startLedger` (a ledger with EUTBL and USTBL events) to move it, then update the values the tests assert.
@@ -32,6 +32,9 @@ const V1_LEDGER = 55000004
 // after it (v2). The archive endpoint serves every ledger with `TransactionMeta` v4, whatever its protocol.
 const V1_SOROBAN_LEDGER = 58000008
 const V2_SOROBAN_LEDGER = 59000000
+// two ledgers read from both endpoints while the regular one retained them (recorded on 2026-11-17), to compare the
+// events decoded from `getLedgers` with every contract event `getEvents` returns. Pass a recent ledger to move them.
+const EVENTS_LEDGER = Number(process.argv[3] ?? 65528571)
 
 // transactions of ledgers 65509458 to 65509460, which Stellar RPC only serves for about 7 days: a payment, a failed
 // transaction of four operations, a fee bump whose inner transaction failed, and a hash no transaction has. To record
@@ -119,6 +122,16 @@ const cases: ReadonlyArray<Case> = [
   { name: "getLedgers-pruned", method: "getLedgers", params: ledgers(V1_LEDGER) },
   { name: "getLedgers-lagging", method: "getLedgers", params: ledgers(FUTURE_LEDGER) },
   { name: "getLedgers-cursor-pruned", method: "getLedgers", params: ledgersAfter(String(V1_LEDGER)) },
+  {
+    name: "getEvents-all",
+    method: "getEvents",
+    params: {
+      startLedger: EVENTS_LEDGER,
+      endLedger: EVENTS_LEDGER + 2,
+      filters: [{ type: "contract" }],
+      pagination: { limit: 10000 }
+    }
+  },
   ...Object.entries(transactions).map(([name, hash]) => ({
     name: `getTransaction-${name}`,
     method: "getTransaction",
@@ -139,7 +152,8 @@ const archiveCases: ReadonlyArray<Case> = [
     method: "getLedgers",
     params: (replies) => ledgersAfter(JSON.parse(replies.get("getLedgers-v0-page") ?? "").result.cursor, 2)
   },
-  { name: "getLedgers-cursor-lagging", method: "getLedgers", params: ledgersAfter(String(FUTURE_LEDGER)) }
+  { name: "getLedgers-cursor-lagging", method: "getLedgers", params: ledgersAfter(String(FUTURE_LEDGER)) },
+  { name: "getLedgers-recent", method: "getLedgers", params: ledgers(EVENTS_LEDGER, 2) }
 ]
 
 await record({

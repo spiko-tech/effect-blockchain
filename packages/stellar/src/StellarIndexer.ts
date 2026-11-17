@@ -1,6 +1,7 @@
 /**
  * Reads the Soroban events of a set of contracts and the native (XLM) balance of an account over confirmed ledgers,
- * on top of {@link StellarRpc}, once or as a stream following the confirmed head. The stream options are described in
+ * on top of {@link StellarRpc}, once or as a stream following the confirmed head. Events older than a regular
+ * endpoint's retention are read from the ledgers of the archive endpoints. The stream options are described in
  * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
  * An event range is split into ranges of at most `maxBlockRange` ledgers, each paged with `getEvents`, and
@@ -60,10 +61,11 @@ import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import { accountChange } from "./internal/accountChange.ts"
+import { ledgerEvents, matchesTopics } from "./internal/ledgerEvents.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
-import type { StellarEventsCursor, StellarEventsFilter, StellarRpcError } from "./StellarRpc.ts"
+import type { StellarEventsCursor, StellarEventsFilter, StellarLedger, StellarRpcError } from "./StellarRpc.ts"
 import { StellarRpc } from "./StellarRpc.ts"
 
 /**
@@ -122,6 +124,30 @@ export interface StellarIndexerStreamOptions {
 }
 
 /**
+ * The ledgers per `getLedgers` page: 10, each ledger meta being 1 to 3 MB on mainnet.
+ *
+ * @since 0.3.0
+ * @category constants
+ */
+export const LEDGERS_PAGE_SIZE = 10
+
+/**
+ * The {@link StellarIndexer.Service.fetchArchivedEvents} options, over the inclusive ledger range `[fromBlock, toBlock]`.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface StellarIndexerArchivedEventsOptions {
+  readonly filter: Omit<StellarIndexerFilter, "fromBlock" | "toBlock">
+  readonly fromBlock: bigint
+  readonly toBlock: bigint
+  /** Pages of {@link LEDGERS_PAGE_SIZE} ledgers read at once, 1 by default. Each holds up to 30 MB of metas. */
+  readonly concurrency?: number | undefined
+  /** Retries a page failing with a transient reason ({@link JsonRpc.isTransient}). Off by default. */
+  readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
+}
+
+/**
  * The native balance of an account at the end of a ledger, in stroops, emitted by
  * {@link StellarIndexer.Service.streamNativeBalance}.
  *
@@ -171,6 +197,14 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
    */
   readonly streamEvents: (options: StellarIndexerStreamOptions) => Stream.Stream<StellarIndexerBatch, StellarRpcError>
   /**
+   * The events `fetchEvents` returns for `filter`, ids included, decoded from the `getLedgers` metas of the endpoints
+   * flagged `archive`, for ledgers a regular endpoint no longer retains. Every ledger of the range is downloaded (1 to
+   * 3 MB each on mainnet) and the range is returned as one batch. `fromBlock > toBlock` returns no events.
+   */
+  readonly fetchArchivedEvents: (
+    options: StellarIndexerArchivedEventsOptions
+  ) => Effect.Effect<StellarIndexerBatch, StellarRpcError>
+  /**
    * The native balance of `address` at the end of `block`, in stroops: the account entry at the head when it has not
    * changed since `block`, else the balance before its first change after `block`, read ledger by ledger with
    * `getLedgers`. An account missing at the head reads `0`, even if it was merged after `block`.
@@ -200,9 +234,6 @@ export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_PO
 const MAX_CONTRACT_IDS = 5
 
 const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event.id)
-
-// ledgers per `getLedgers` page: each ledger meta is 1 to 3 MB on mainnet
-const LEDGERS_PAGE = 10
 
 // a balance that holds from the ledger it was read at until `until`
 interface KnownBalance {
@@ -248,6 +279,7 @@ export const layer = (options: {
         return yield* Effect.die(new RangeError(`maxBlockRange must be a positive integer, got ${maxBlockRange}`))
       }
       const range = BigInt(maxBlockRange)
+      const pageSize = BigInt(LEDGERS_PAGE_SIZE)
       const { limit } = options
 
       const confirmations = options.confirmations ?? StellarNetwork.defaultConfirmations(rpc.network)
@@ -284,24 +316,31 @@ export const layer = (options: {
         }).pipe(Effect.map((ranges) => Arr.flatten(ranges).filter((event) => event.inSuccessfulContractCall)))
       })
 
-      // the changes of `address` in the ledgers [from, to], in chain order
-      const changes = (address: StellarAccountAddress, from: bigint, to: bigint) =>
+      // what `read` finds in each of the ledgers [from, to], in chain order, a page at a time
+      const readLedgers = <A>(
+        from: bigint,
+        to: bigint,
+        read: (ledger: StellarLedger) => ReadonlyArray<A>,
+        archive = false
+      ) =>
         Stream.paginate(from, (start) =>
           rpc.getLedgers({
             startLedger: start,
-            limit: Number(BigInt_.min(BigInt(LEDGERS_PAGE), to - start + BigInt(1)))
+            limit: Number(BigInt_.min(pageSize, to - start + BigInt(1))),
+            archive
           }).pipe(Effect.map(({ ledgers }) => {
             const next = start + BigInt(ledgers.length)
-            return [
-              ledgers.flatMap((ledger) =>
-                Option.toArray(Option.map(accountChange(ledger.metadataXdr, address), (change) => ({
-                  ...change,
-                  ledger: ledger.sequence
-                })))
-              ),
-              next <= to ? Option.some(next) : Option.none()
-            ] as const
+            return [ledgers.flatMap(read), next <= to ? Option.some(next) : Option.none()] as const
           })))
+
+      // the changes of `address` in the ledgers [from, to], in chain order
+      const changes = (address: StellarAccountAddress, from: bigint, to: bigint) => {
+        const read = (ledger: StellarLedger) =>
+          Option.toArray(
+            Option.map(accountChange(ledger.metadataXdr, address), (change) => ({ ...change, ledger: ledger.sequence }))
+          )
+        return readLedgers(from, to, read)
+      }
 
       // the account entry of `address` at the head, from an endpoint that has reached `block`; a malformed entry is a defect
       const account = (address: StellarAccountAddress, block: bigint) => {
@@ -354,6 +393,22 @@ export const layer = (options: {
       return StellarIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
+        fetchArchivedEvents: Effect.fn("StellarIndexer.fetchArchivedEvents")(
+          ({ concurrency = 1, filter, fromBlock, retry, toBlock }) => {
+            if (fromBlock > toBlock) return Effect.succeed({ fromBlock, toBlock, events: [] })
+            const pages = Number((toBlock - fromBlock) / pageSize) + 1
+            const read = (ledger: StellarLedger) =>
+              ledgerEvents(ledger, filter.contractIds).filter((event) => matchesTopics(filter.topics, event.topics))
+            return Effect.forEach(Arr.makeBy(pages, (i) => fromBlock + BigInt(i) * pageSize), (start) => {
+              const page = Stream.runCollect(
+                readLedgers(start, BigInt_.min(start + pageSize - BigInt(1), toBlock), read, true)
+              )
+              return retry === undefined
+                ? page
+                : Effect.retry(page, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+            }, { concurrency }).pipe(Effect.map((pages) => ({ fromBlock, toBlock, events: Arr.flatten(pages) })))
+          }
+        ),
         fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")(({ address, block }) =>
           Effect.map(balanceAt(address, block), (known) => known.balance)
         ),
