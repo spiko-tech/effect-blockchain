@@ -63,13 +63,18 @@ const cases: ReadonlyArray<Case> = [
     params: [EUTBL, { before: BEFORE, until: UNTIL, limit: 5, ...finalized, minContextSlot: FUTURE_SLOT }]
   },
   { name: "getBlockHeight", method: "getBlockHeight", params: [finalized] },
+  { name: "getEpochInfo", method: "getEpochInfo", params: [finalized] },
   {
     name: "getSignatureStatuses",
     method: "getSignatureStatuses",
     params: [[TX_1, FAILED_CUSTOM, FAILED_NAMED, UNKNOWN_TX], { searchTransactionHistory: true }]
   },
   // without the history, a transaction older than the node's status cache is unknown
-  { name: "getSignatureStatuses-recent", method: "getSignatureStatuses", params: [[TX_1], {}] },
+  {
+    name: "getSignatureStatuses-recent",
+    method: "getSignatureStatuses",
+    params: [[TX_1], { searchTransactionHistory: false }]
+  },
   { name: "getLatestBlockhash", method: "getLatestBlockhash", params: [finalized] },
   { name: "getRecentPrioritizationFees", method: "getRecentPrioritizationFees", params: [[BINANCE]] },
   { name: "simulateTransaction", method: "simulateTransaction", params: [TRANSFER, simulation] },

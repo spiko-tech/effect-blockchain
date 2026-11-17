@@ -15,7 +15,8 @@
  * Every transaction starts with the two Compute Budget instructions. Unless `sign` receives them, the compute unit
  * limit is what a simulation consumed times the layer's `computeUnitMultiplier`, and the compute unit price comes from
  * `getRecentPrioritizationFees` for the accounts the transaction writes to (see {@link defaultFees}). The price sets
- * the priority fee only: the base fee of 5000 lamports per signature is charged on top.
+ * the priority fee only: the base fee of 5000 lamports per signature is charged on top. A compute unit limit that is
+ * not an integer from 0 to 1,400,000, or a price that is not a u64, fails `sign` with a `SolanaSignerError`.
  *
  * A transaction is in one {@link SolanaTransactionStatus}:
  *
@@ -35,24 +36,27 @@
  * `SolanaIndexer.lastConfirmedBlock`.
  *
  * A transaction can land only while the block height is at most the `lastValidBlockHeight` returned with its recent
- * blockhash. `Expired` is reported when the caller passes that height and the `finalized` block height is above it,
- * so a transaction that can still land is never `Expired`. A durable-nonce transaction does not expire: leave
- * `lastValidBlockHeight` out.
+ * blockhash. `Expired` is reported when the caller passes that height, a `finalized` block is above it, and the
+ * endpoint that then did not know the transaction answered at that block's slot or later: an endpoint behind it
+ * answers `NotFound`, so a transaction that can still land, or that a lagging endpoint cannot see yet, is never
+ * `Expired`.
+ * A durable-nonce transaction does not expire: leave `lastValidBlockHeight` out.
  *
  * @example
  * ```ts
  * import { type SolanaInstruction, SolanaRelayer } from "@effect-blockchain/solana/SolanaRelayer"
  * import type { SolanaSigner } from "@effect-blockchain/solana/SolanaSigner"
  * import type { SolanaTransactionHash } from "@effect-blockchain/solana/SolanaTransactionHash"
+ * import type * as Arr from "effect/Array"
  * import * as Effect from "effect/Effect"
  *
- * declare const feePayer: SolanaSigner
- * declare const instructions: ReadonlyArray<SolanaInstruction>
+ * declare const signer: SolanaSigner
+ * declare const instructions: Arr.NonEmptyReadonlyArray<SolanaInstruction>
  * declare const store: (hash: SolanaTransactionHash, lastValidBlockHeight: bigint) => Effect.Effect<void>
  *
  * const program = Effect.gen(function*() {
  *   const relayer = yield* SolanaRelayer
- *   const { hash, lastValidBlockHeight, signed } = yield* relayer.sign({ feePayer, instructions })
+ *   const { hash, lastValidBlockHeight, signed } = yield* relayer.sign({ signer, instructions })
  *   // stored before the broadcast: a crash in between leaves a signature to look up, never an unknown transaction
  *   yield* store(hash, lastValidBlockHeight)
  *   yield* relayer.broadcast({ signed })
@@ -89,6 +93,7 @@ import {
 } from "@solana/kit"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -158,7 +163,7 @@ export interface SolanaInstruction {
 
 /**
  * A transaction signed by {@link SolanaRelayer.sign}: `signed` is the base64 wire transaction `broadcast` takes,
- * `hash` the fee payer's signature and `lastValidBlockHeight` the last block height it can land at.
+ * `hash` the signature of its `signer` and `lastValidBlockHeight` the last block height it can land at.
  *
  * @since 0.2.0
  * @category models
@@ -179,20 +184,18 @@ export interface SolanaSignedTransaction {
 export class BlockhashNotFound extends Schema.TaggedError<BlockhashNotFound>()("BlockhashNotFound", {}) {}
 
 /**
- * The fee payer cannot pay the transaction fee: its balance is too low, or it holds no account.
+ * The signer cannot pay the transaction fee: its balance is too low, or it holds no account.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category reasons
  */
-export class InsufficientFundsForFee
-  extends Schema.TaggedError<InsufficientFundsForFee>()("InsufficientFundsForFee", {})
-{}
+export class InsufficientFunds extends Schema.TaggedError<InsufficientFunds>()("InsufficientFunds", {}) {}
 
 const TransactionError: Schema.Codec<SolanaRpc.SolanaTransactionError> = Schema.toType(RpcMethods.TransactionError)
 
 /**
  * The node simulated the transaction and it failed: `error` is the transaction error and `logs` the program logs up
- * to it. {@link SolanaRelayer.sign} fails with it when it estimates the compute unit limit.
+ * to it.
  *
  * @since 0.2.0
  * @category reasons
@@ -208,7 +211,7 @@ export class SimulationFailed extends Schema.TaggedError<SimulationFailed>()("Si
  * @since 0.2.0
  * @category reasons
  */
-export const SolanaBroadcastReason = Schema.Union([BlockhashNotFound, InsufficientFundsForFee, SimulationFailed])
+export const SolanaBroadcastReason = Schema.Union([BlockhashNotFound, InsufficientFunds, SimulationFailed])
 
 /**
  * @since 0.2.0
@@ -229,25 +232,71 @@ export class SolanaBroadcastError extends Schema.TaggedError<SolanaBroadcastErro
 }) {}
 
 /**
+ * Why a transaction cannot be signed as it would run, the `reason` of a {@link SolanaSimulationError}, matched with
+ * `Effect.catchReason`.
+ *
+ * @since 0.3.0
+ * @category reasons
+ */
+export const SolanaSimulationReason = Schema.Union([SimulationFailed])
+
+/**
+ * @since 0.3.0
+ * @category reasons
+ */
+export type SolanaSimulationReason = typeof SolanaSimulationReason.Type
+
+/**
+ * The simulation {@link SolanaRelayer.sign} runs to estimate the compute unit limit shows the transaction would fail,
+ * for `reason`. Nothing was signed.
+ *
+ * @since 0.3.0
+ * @category errors
+ */
+export class SolanaSimulationError extends Schema.TaggedError<SolanaSimulationError>()("SolanaSimulationError", {
+  reason: SolanaSimulationReason
+}) {}
+
+/**
+ * The fees of a transaction: `computeUnitPrice`, in micro-lamports per compute unit, sets its priority fee.
+ *
+ * @since 0.3.0
+ * @category fees
+ */
+export interface SolanaFees {
+  readonly computeUnitPrice: bigint
+}
+
+/**
+ * What a fee strategy prices a transaction from: the `getRecentPrioritizationFees` of the accounts it writes to.
+ *
+ * @since 0.3.0
+ * @category fees
+ */
+export interface SolanaFeeEstimate {
+  readonly prioritizationFees: ReadonlyArray<SolanaRpc.SolanaPrioritizationFee>
+}
+
+/**
  * @since 0.2.0
  * @category services
  */
 export class SolanaRelayer extends Context.Service<SolanaRelayer, {
   /**
-   * Signs a v0 transaction of `instructions` paid by `feePayer` without sending it. `signers` are the other accounts
-   * the instructions mark as signer. A missing `blockhash` is the latest one at `confirmed` commitment, a missing
-   * `computeUnitLimit` is the units a simulation consumed times the layer's `computeUnitMultiplier` (a transaction
-   * that would fail fails with `SimulationFailed`), and a missing `computeUnitPrice`, in micro-lamports, comes from
-   * the layer's fee strategy.
+   * Signs a v0 transaction of `instructions` without sending it: `signer` pays its fee and signs first, `cosigners`
+   * are the other accounts the instructions mark as signer. A missing `blockhash` is the latest one at `confirmed`
+   * commitment, a missing `computeUnitLimit` is the units a simulation consumed times the layer's
+   * `computeUnitMultiplier` (a transaction that would fail fails with a `SimulationFailed` reason), and missing `fees`
+   * come from the layer's fee strategy.
    */
   readonly sign: (options: {
-    readonly feePayer: SolanaSigner
-    readonly signers?: ReadonlyArray<SolanaSigner> | undefined
-    readonly instructions: ReadonlyArray<SolanaInstruction>
+    readonly signer: SolanaSigner
+    readonly cosigners?: ReadonlyArray<SolanaSigner> | undefined
+    readonly instructions: Arr.NonEmptyReadonlyArray<SolanaInstruction>
     readonly blockhash?: Pick<SolanaRpc.SolanaLatestBlockhash, "blockhash" | "lastValidBlockHeight"> | undefined
+    readonly fees?: SolanaFees | undefined
     readonly computeUnitLimit?: number | undefined
-    readonly computeUnitPrice?: bigint | undefined
-  }) => Effect.Effect<SolanaSignedTransaction, SolanaRpc.SolanaRpcError | SolanaSignerError | SimulationFailed>
+  }) => Effect.Effect<SolanaSignedTransaction, SolanaRpc.SolanaRpcError | SolanaSignerError | SolanaSimulationError>
   /**
    * Sends a signed transaction with `sendTransaction` and returns its hash. The node simulates it first at
    * `confirmed` commitment, then rebroadcasts it to the leaders until its blockhash expires (the node's default
@@ -259,8 +308,7 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
   }) => Effect.Effect<SolanaTransactionHash, SolanaBroadcastError | SolanaRpc.SolanaRpcError>
   /**
    * The status of the transaction as the answering endpoint sees it. An endpoint behind the head, or one that never
-   * received the transaction, answers `NotFound`, or `Expired` when `lastValidBlockHeight` has passed, for a
-   * transaction another one has in a block.
+   * received the transaction, answers `NotFound` for a transaction another one has in a block.
    */
   readonly fetchTransactionStatus: (
     options: SolanaTransactionStatusOptions
@@ -276,8 +324,6 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
   ) => Effect.Effect<SolanaTransactionStatus, SolanaRpc.SolanaRpcError>
 }>()("@effect-blockchain/solana/SolanaRelayer") {}
 
-// a slot reports the lowest price that landed in it, 0 as soon as one transaction paid none: any price above 0 is
-// ordered before those transactions
 /**
  * The default `poll` spacing of {@link SolanaRelayer.Service.awaitConfirmation}: 10 seconds.
  *
@@ -286,6 +332,8 @@ export class SolanaRelayer extends Context.Service<SolanaRelayer, {
  */
 export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_POLL_INTERVAL
 
+// a slot reports the lowest price that landed in it, 0 as soon as one transaction paid none: any price above 0 is
+// ordered before those transactions
 const PRIORITY_FEE_FLOOR = BigInt(1)
 
 /**
@@ -295,9 +343,11 @@ const PRIORITY_FEE_FLOOR = BigInt(1)
  * @since 0.2.0
  * @category fees
  */
-export const defaultFees = (fees: ReadonlyArray<SolanaRpc.SolanaPrioritizationFee>): bigint => {
-  const sorted = Arr.sort(fees.map(({ prioritizationFee }) => prioritizationFee), Order.BigInt)
-  return BigInt_.max(sorted[Math.floor(sorted.length * 0.75)] ?? PRIORITY_FEE_FLOOR, PRIORITY_FEE_FLOOR)
+export const defaultFees = ({ prioritizationFees }: SolanaFeeEstimate): SolanaFees => {
+  const sorted = Arr.sort(prioritizationFees.map(({ prioritizationFee }) => prioritizationFee), Order.BigInt)
+  return {
+    computeUnitPrice: BigInt_.max(sorted[Math.floor(sorted.length * 0.75)] ?? PRIORITY_FEE_FLOOR, PRIORITY_FEE_FLOOR)
+  }
 }
 
 const COMPUTE_BUDGET_PROGRAM = SolanaAddress.make("ComputeBudget111111111111111111111111111111")
@@ -308,18 +358,28 @@ const MAX_COMPUTE_UNITS = 1_400_000
 // `getRecentPrioritizationFees` takes at most 128 addresses
 const MAX_FEE_ADDRESSES = 128
 
-// `SetComputeUnitLimit` (discriminator 2, u32) and `SetComputeUnitPrice` (discriminator 3, u64), little-endian
-const computeBudget = (limit: number, price: bigint): ReadonlyArray<SolanaInstruction> => {
+const invalid = (message: string) => Effect.fail(new SolanaSignerError({ cause: new Error(message) }))
+
+// `SetComputeUnitLimit` (discriminator 2, u32) and `SetComputeUnitPrice` (discriminator 3, u64), little-endian. The
+// values are checked first: `DataView` wraps an out-of-range number and throws on an out-of-range bigint
+const computeBudget = (
+  limit: number,
+  price: bigint
+): Effect.Effect<ReadonlyArray<SolanaInstruction>, SolanaSignerError> => {
+  if (!Number.isInteger(limit) || limit < 0 || limit > MAX_COMPUTE_UNITS) {
+    return invalid(`computeUnitLimit ${limit} is not an integer from 0 to ${MAX_COMPUTE_UNITS}`)
+  }
+  if (BigInt.asUintN(64, price) !== price) return invalid(`computeUnitPrice ${price} is not a u64`)
   const unitLimit = new DataView(new ArrayBuffer(5))
   unitLimit.setUint8(0, 2)
   unitLimit.setUint32(1, limit, true)
   const unitPrice = new DataView(new ArrayBuffer(9))
   unitPrice.setUint8(0, 3)
   unitPrice.setBigUint64(1, price, true)
-  return [
+  return Effect.succeed([
     { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array(unitLimit.buffer) },
     { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array(unitPrice.buffer) }
-  ]
+  ])
 }
 
 const roleOf = ({ signer = false, writable = false }: SolanaAccountMeta) =>
@@ -328,7 +388,7 @@ const roleOf = ({ signer = false, writable = false }: SolanaAccountMeta) =>
     : (writable ? AccountRole.WRITABLE : AccountRole.READONLY)
 
 const compile = (
-  feePayer: SolanaAddress,
+  signer: SolanaAddress,
   lifetime: Pick<SolanaRpc.SolanaLatestBlockhash, "blockhash" | "lastValidBlockHeight">,
   instructions: ReadonlyArray<SolanaInstruction>
 ) =>
@@ -336,7 +396,7 @@ const compile = (
     try: () =>
       compileTransaction(pipe(
         createTransactionMessage({ version: 0 }),
-        (message) => setTransactionMessageFeePayer(address(feePayer), message),
+        (message) => setTransactionMessageFeePayer(address(signer), message),
         (message) =>
           setTransactionMessageLifetimeUsingBlockhash({
             blockhash: blockhash(lifetime.blockhash),
@@ -358,15 +418,15 @@ const compile = (
 /**
  * Builds a {@link SolanaRelayer} over the provided {@link SolanaRpc.SolanaRpc}. `confirmations` overrides the
  * network's default, as in `SolanaIndexer.layer`: both agree on the last confirmed slot. `fees` (default
- * {@link defaultFees}) prices the transactions signed without a compute unit price, and `computeUnitMultiplier`
- * (default 1.2) is the margin applied to a simulated compute unit limit.
+ * {@link defaultFees}) prices the transactions signed without `fees`, and `computeUnitMultiplier` (default 1.2) is
+ * the margin applied to a simulated compute unit limit.
  *
  * @since 0.2.0
  * @category layers
  */
 export const layer = (options: {
   readonly confirmations?: number | undefined
-  readonly fees?: ((fees: ReadonlyArray<SolanaRpc.SolanaPrioritizationFee>) => bigint) | undefined
+  readonly fees?: ((estimate: SolanaFeeEstimate) => SolanaFees) | undefined
   readonly computeUnitMultiplier?: number | undefined
 } = {}): Layer.Layer<SolanaRelayer, never, SolanaRpc.SolanaRpc> =>
   Layer.effect(
@@ -376,27 +436,30 @@ export const layer = (options: {
       const confirmations = options.confirmations ?? SolanaNetwork.defaultConfirmations(rpc.network)
       const sign = Effect.fn("SolanaRelayer.sign")(
         function*(
-          { feePayer, instructions, signers = [], ...given }: Parameters<SolanaRelayer["Service"]["sign"]>[0]
+          { cosigners = [], instructions, signer, ...given }: Parameters<SolanaRelayer["Service"]["sign"]>[0]
         ) {
           const writable = Arr.dedupe([
-            feePayer.address,
+            signer.address,
             ...instructions.flatMap(({ accounts = [] }) =>
               accounts.filter((account) => account.writable === true).map((account) => account.address)
             )
           ])
-          const { lifetime, price } = yield* Effect.all({
+          const { fees, lifetime } = yield* Effect.all({
             lifetime: given.blockhash === undefined
               ? rpc.getLatestBlockhash({ commitment: "confirmed" })
               : Effect.succeed(given.blockhash),
-            price: given.computeUnitPrice === undefined
+            fees: given.fees === undefined
               ? Effect.map(
                 rpc.getRecentPrioritizationFees({ addresses: writable.slice(0, MAX_FEE_ADDRESSES) }),
-                options.fees ?? defaultFees
+                (prioritizationFees) => (options.fees ?? defaultFees)({ prioritizationFees })
               )
-              : Effect.succeed(given.computeUnitPrice)
+              : Effect.succeed(given.fees)
           }, { concurrency: "unbounded" })
           const build = (limit: number) =>
-            compile(feePayer.address, lifetime, [...computeBudget(limit, price), ...instructions])
+            Effect.flatMap(
+              computeBudget(limit, fees.computeUnitPrice),
+              (budget) => compile(signer.address, lifetime, [...budget, ...instructions])
+            )
           const estimate = Effect.gen(function*() {
             const simulation = yield* rpc.simulateTransaction({
               transaction: getBase64EncodedWireTransaction(yield* build(MAX_COMPUTE_UNITS)),
@@ -405,7 +468,9 @@ export const layer = (options: {
               replaceRecentBlockhash: true
             })
             if (simulation.err !== null) {
-              return yield* new SimulationFailed({ error: simulation.err, logs: simulation.logs ?? [] })
+              return yield* new SolanaSimulationError({
+                reason: new SimulationFailed({ error: simulation.err, logs: simulation.logs ?? [] })
+              })
             }
             const units = Number(simulation.unitsConsumed ?? MAX_COMPUTE_UNITS)
             return Math.min(MAX_COMPUTE_UNITS, Math.ceil(units * (options.computeUnitMultiplier ?? 1.2)))
@@ -414,10 +479,10 @@ export const layer = (options: {
           const message = Uint8Array.from(compiled.messageBytes)
           const required = Object.keys(compiled.signatures)
           const signatures = yield* Effect.forEach(required, (account) => {
-            const signer = [feePayer, ...signers].find((signer) => signer.address === account)
-            return signer === undefined
-              ? Effect.fail(new SolanaSignerError({ cause: new Error(`no signer for ${account}`) }))
-              : Effect.flatMap(signer.signTransactionMessage(message), (signature) =>
+            const found = [signer, ...cosigners].find((candidate) => candidate.address === account)
+            return found === undefined
+              ? invalid(`no signer for ${account}`)
+              : Effect.flatMap(found.signTransactionMessage(message), (signature) =>
                 Effect.try({
                   try: () => {
                     assertIsSignatureBytes(signature)
@@ -461,21 +526,34 @@ export const layer = (options: {
             ? new BlockhashNotFound()
             // `AccountNotFound` is the fee payer's: the only account a transaction needs to exist
             : err === "InsufficientFundsForFee" || err === "AccountNotFound"
-            ? new InsufficientFundsForFee()
+            ? new InsufficientFunds()
             : new SimulationFailed({ error: err, logs: logs ?? [] })
           return yield* new SolanaBroadcastError({ reason, cause })
         }
       )
       const fetchTransactionStatus = Effect.fn("SolanaRelayer.fetchTransactionStatus")(
         function*({ hash, lastValidBlockHeight }: SolanaTransactionStatusOptions) {
-          // read before the status: once the finalized height has passed `lastValidBlockHeight`, a block holding the
-          // transaction is finalized too, and the status read that follows finds it
-          const expired = lastValidBlockHeight !== undefined
-            && (yield* rpc.getBlockHeight({ commitment: "finalized" })) > lastValidBlockHeight
+          // read before the status: a finalized block above `lastValidBlockHeight` closes the transaction's window
+          const closing = lastValidBlockHeight === undefined
+            ? undefined
+            : yield* rpc.getEpochInfo({ commitment: "finalized" }).pipe(
+              Effect.map((finalized) =>
+                finalized.blockHeight > lastValidBlockHeight ? finalized.absoluteSlot : undefined
+              )
+            )
           // the node's status cache only covers recent slots: without the history, an old transaction would be unknown
-          const { value } = yield* rpc.getSignatureStatuses({ signatures: [hash], searchTransactionHistory: true })
+          const { slot, value } = yield* rpc.getSignatureStatuses({
+            signatures: [hash],
+            searchTransactionHistory: true
+          })
           const status = value[0] ?? null
-          if (status === null) return expired ? { _tag: "Expired" } as const : { _tag: "NotFound" } as const
+          if (status === null) {
+            // the two reads can come from different nodes: the status proves the transaction is in none of the blocks
+            // of its window only when the node answering it, at `slot`, had reached the block closing that window
+            return closing !== undefined && slot >= closing
+              ? { _tag: "Expired" } as const
+              : { _tag: "NotFound" } as const
+          }
           const block = status.slot
           if (status.confirmationStatus !== "finalized") return { _tag: "Included", block } as const
           // read after the status: a finalized slot older than the transaction's could only delay `Confirmed`
@@ -502,3 +580,23 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds a {@link SolanaRelayer} like {@link layer}, reading `confirmations` and `computeUnitMultiplier` from
+ * `Config`. The fee strategy is {@link defaultFees}.
+ *
+ * @example
+ * ```ts
+ * import * as SolanaRelayer from "@effect-blockchain/solana/SolanaRelayer"
+ * import * as Config from "effect/Config"
+ *
+ * const RelayerLive = SolanaRelayer.layerConfig({ confirmations: Config.Int("SOLANA_CONFIRMATIONS") })
+ * ```
+ *
+ * @since 0.3.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Omit<NonNullable<Parameters<typeof layer>[0]>, "fees">>
+): Layer.Layer<SolanaRelayer, Config.ConfigError, SolanaRpc.SolanaRpc> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))

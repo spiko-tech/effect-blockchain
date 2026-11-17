@@ -135,11 +135,24 @@ export const getBlockHeight = JsonRpc.method({
 })
 
 /** @internal */
+export const getEpochInfo = JsonRpc.method({
+  name: "getEpochInfo",
+  params: Schema.Tuple([Schema.Struct({ commitment: Commitment })]),
+  result: Schema.Struct({
+    epoch: Schema.BigInt,
+    slotIndex: Schema.BigInt,
+    slotsInEpoch: Schema.BigInt,
+    absoluteSlot: Schema.BigInt,
+    blockHeight: Schema.BigInt
+  })
+})
+
+/** @internal */
 export const getSignatureStatuses = JsonRpc.method({
   name: "getSignatureStatuses",
   params: Schema.Tuple([
     Schema.Array(SolanaTransactionHash),
-    Schema.Struct({ searchTransactionHistory: JsonRpc.optionalOmitted(Schema.Boolean) })
+    Schema.Struct({ searchTransactionHistory: Schema.Boolean })
   ]),
   result: Schema.Struct({
     context: Schema.Struct({ slot: Schema.BigInt }),

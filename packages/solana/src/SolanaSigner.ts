@@ -35,7 +35,7 @@ export class SolanaSignerError extends Schema.TaggedError<SolanaSignerError>()("
 
 /**
  * Signs transactions as `address`. `signTransactionMessage` receives the serialized transaction message and returns
- * the 64-byte ed25519 signature of these bytes.
+ * the 64-byte ed25519 signature of these bytes: Solana signs the message itself, where other chains sign its hash.
  *
  * @since 0.2.0
  * @category models
@@ -48,16 +48,18 @@ export interface SolanaSigner {
 const toError = (cause: unknown) => new SolanaSignerError({ cause })
 
 /**
- * A signer holding an ed25519 key in memory: the 64-byte secret key (the private key followed by its public key) in
- * base58, as wallets export it. An invalid key fails with a {@link SolanaSignerError} that does not repeat it.
+ * A signer holding an ed25519 key in memory: `key` is the 64-byte secret key (the private key followed by its public
+ * key) in base58, as wallets export it. An invalid key fails with a {@link SolanaSignerError} that does not repeat it.
  *
  * @since 0.2.0
  * @category constructors
  */
-export const fromPrivateKey = (key: Redacted.Redacted<string>): Effect.Effect<SolanaSigner, SolanaSignerError> =>
+export const fromPrivateKey = (options: {
+  readonly key: Redacted.Redacted<string>
+}): Effect.Effect<SolanaSigner, SolanaSignerError> =>
   Effect.tryPromise({
     try: async () => {
-      const keyPair = await createKeyPairFromBytes(getBase58Encoder().encode(Redacted.value(key)))
+      const keyPair = await createKeyPairFromBytes(getBase58Encoder().encode(Redacted.value(options.key)))
       return { keyPair, address: SolanaAddress.make(await getAddressFromPublicKey(keyPair.publicKey)) }
     },
     // the thrown error can quote the key

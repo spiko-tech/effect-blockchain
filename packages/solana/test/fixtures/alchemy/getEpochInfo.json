@@ -1,0 +1,15 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-17",
+  "request": {
+    "method": "getEpochInfo",
+    "params": [
+      {
+        "commitment": "finalized"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"absoluteSlot\":470582501,\"blockHeight\":448597315,\"epoch\":1089,\"slotIndex\":134501,\"slotsInEpoch\":432000,\"transactionCount\":567107551459},\"id\":1}\n"
+}

@@ -182,6 +182,16 @@ describe("SolanaRpc fixtures", () => {
       Effect.map((height) => expect(height >= BigInt(448153724)).toBe(true))
     ))
 
+  it.effect("fixture: alchemy getEpochInfo", () =>
+    alchemy("getEpochInfo").run((rpc) => rpc.getEpochInfo(finalized)).pipe(
+      // the head moves on every recording: only check the slot and the height are one bank's
+      Effect.map(({ absoluteSlot, blockHeight, epoch, slotIndex, slotsInEpoch }) => {
+        expect(blockHeight >= BigInt(448153724)).toBe(true)
+        expect(absoluteSlot > blockHeight).toBe(true)
+        expect(absoluteSlot).toBe(epoch * slotsInEpoch + slotIndex)
+      })
+    ))
+
   it.effect("fixture: alchemy getSignatureStatuses and -recent", () =>
     alchemy("getSignatureStatuses", "getSignatureStatuses-recent").run((rpc) =>
       Effect.gen(function*() {

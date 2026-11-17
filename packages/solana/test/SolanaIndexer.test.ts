@@ -360,6 +360,7 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
       getGenesisHash: Effect.die("unused"),
       getSlot: () => call("getSlot", () => state.head),
       getBlockHeight: () => Effect.die("unused"),
+      getEpochInfo: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: () => Effect.die("unused"),
       getLatestBlockhash: () => Effect.die("unused"),

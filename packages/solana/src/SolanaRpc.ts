@@ -241,6 +241,21 @@ export interface SolanaBalance {
 }
 
 /**
+ * A `getEpochInfo` result: the `absoluteSlot` and `blockHeight` of one bank of the answering endpoint, and where that
+ * slot stands in its `epoch` (`slotIndex` of `slotsInEpoch`).
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface SolanaEpochInfo {
+  readonly epoch: bigint
+  readonly slotIndex: bigint
+  readonly slotsInEpoch: bigint
+  readonly absoluteSlot: bigint
+  readonly blockHeight: bigint
+}
+
+/**
  * Why an instruction failed, as the node returns it: the variant's name (`"ProgramFailedToComplete"`), the program's
  * own error code (`{ Custom: 6001 }`), or any other variant carrying data as raw JSON (integers as decimal strings).
  *
@@ -357,10 +372,14 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly getBlockHeight: (options: {
     readonly commitment: SolanaCommitment
   }) => Effect.Effect<bigint, SolanaRpcError>
+  /** `getEpochInfo`: unlike `getSlot` and `getBlockHeight`, the slot and the block height come from one bank. */
+  readonly getEpochInfo: (options: {
+    readonly commitment: SolanaCommitment
+  }) => Effect.Effect<SolanaEpochInfo, SolanaRpcError>
   /**
    * `getSignatureStatuses` of at most 256 `signatures`, read from the blocks the node has processed, whatever their
-   * commitment. Without `searchTransactionHistory`, only the node's cache of recent slots is searched: an older
-   * transaction is `null`.
+   * commitment. Without `searchTransactionHistory` (sent as `false`), only the node's cache of recent slots is
+   * searched: an older transaction is `null`.
    */
   readonly getSignatureStatuses: (options: {
     readonly signatures: ReadonlyArray<SolanaTransactionHash>
@@ -535,9 +554,12 @@ export const layer = (options: {
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getSlot, [{ commitment }])),
         getBlockHeight: ({ commitment }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getBlockHeight, [{ commitment }])),
-        getSignatureStatuses: ({ signatures, ...config }) =>
+        getEpochInfo: ({ commitment }) =>
+          rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getEpochInfo, [{ commitment }])),
+        // Agave refuses a config without `searchTransactionHistory`
+        getSignatureStatuses: ({ searchTransactionHistory = false, signatures }) =>
           rpc.withFallback((endpoint) =>
-            rpc.call(endpoint, RpcMethods.getSignatureStatuses, [signatures, config]).pipe(
+            rpc.call(endpoint, RpcMethods.getSignatureStatuses, [signatures, { searchTransactionHistory }]).pipe(
               Effect.map(({ context, value }) => ({ slot: context.slot, value }))
             )
           ),

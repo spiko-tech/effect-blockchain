@@ -29,6 +29,8 @@ interface Node {
   readonly head: number
   // the finalized block height
   readonly height?: number | undefined
+  // the slot the status is answered at, `head` by default
+  readonly statusSlot?: number | undefined
   readonly status?: SolanaRpc.SolanaSignatureStatus | undefined
 }
 
@@ -46,13 +48,24 @@ const setup = (initial: Node, options?: Parameters<typeof SolanaRelayer.layer>[0
       network: "Solana",
       getGenesisHash: Effect.die("unused"),
       getSlot: () => call("getSlot", () => BigInt(node.current.head)),
-      getBlockHeight: () => call("getBlockHeight", () => BigInt(node.current.height ?? 0)),
+      getBlockHeight: () => Effect.die("unused"),
+      getEpochInfo: () =>
+        call("getEpochInfo", () => ({
+          epoch: BigInt(0),
+          slotIndex: BigInt(node.current.head),
+          slotsInEpoch: BigInt(432_000),
+          absoluteSlot: BigInt(node.current.head),
+          blockHeight: BigInt(node.current.height ?? 0)
+        })),
       getSignatureStatuses: ({ searchTransactionHistory, signatures }) =>
         call("getSignatureStatuses", () => {
           node.polls++
           expect(signatures).toStrictEqual([HASH])
           expect(searchTransactionHistory).toBe(true)
-          return { slot: BigInt(node.current.head), value: [node.current.status ?? null] }
+          return {
+            slot: BigInt(node.current.statusSlot ?? node.current.head),
+            value: [node.current.status ?? null]
+          }
         }),
       getBalance: () => Effect.die("unused"),
       getLatestBlockhash: () => Effect.die("unused"),
@@ -131,14 +144,34 @@ describe("SolanaRelayer", () => {
       expect((yield* statusOf({ head: 100, height: 51, status: status(100) }, undefined, 50))._tag).toBe("Confirmed")
     }))
 
-  it.effect("reads the block height before the status, and only with lastValidBlockHeight", () =>
+  it.effect("never reports Expired from an endpoint behind the finalized block that closes the window", () =>
+    Effect.gen(function*() {
+      // the finalized block above `lastValidBlockHeight` is at slot 100: the status comes from a node at slot 99,
+      // which may not have the block holding the transaction yet
+      expect(yield* statusOf({ head: 100, height: 51, statusSlot: 99 }, undefined, 50)).toStrictEqual({
+        _tag: "NotFound"
+      })
+      expect(yield* statusOf({ head: 100, height: 51, statusSlot: 100 }, undefined, 50)).toStrictEqual({
+        _tag: "Expired"
+      })
+      // a node ahead of the finalized slot, as any node in sync is
+      expect(yield* statusOf({ head: 100, height: 51, statusSlot: 132 }, undefined, 50)).toStrictEqual({
+        _tag: "Expired"
+      })
+      // the window is still open, whatever the node's slot
+      expect(yield* statusOf({ head: 100, height: 50, statusSlot: 132 }, undefined, 50)).toStrictEqual({
+        _tag: "NotFound"
+      })
+    }))
+
+  it.effect("reads the finalized block before the status, and only with lastValidBlockHeight", () =>
     Effect.gen(function*() {
       const without = setup({ head: 100, height: 51 })
       yield* without.run((relayer) => relayer.fetchTransactionStatus({ hash: HASH }))
       expect(without.node.calls).toStrictEqual(["getSignatureStatuses"])
       const given = setup({ head: 100, height: 51, status: status(100) })
       yield* given.run((relayer) => relayer.fetchTransactionStatus({ hash: HASH, lastValidBlockHeight: BigInt(50) }))
-      expect(given.node.calls).toStrictEqual(["getBlockHeight", "getSignatureStatuses", "getSlot"])
+      expect(given.node.calls).toStrictEqual(["getEpochInfo", "getSignatureStatuses", "getSlot"])
     }))
 
   it.effect("awaitConfirmation polls every 10 seconds until the transaction is confirmed", () => {
