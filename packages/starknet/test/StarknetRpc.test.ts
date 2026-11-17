@@ -154,8 +154,16 @@ describe("StarknetRpc", () => {
         starknet_getTransactionStatus: notFound
       }
     })
-    // the last endpoint failing otherwise is an error, not an unknown transaction
+    // an endpoint refusing the request is an error, not an unknown transaction, wherever it comes in the order
     const failing = setup({ a: { starknet_getTransactionStatus: notFound }, b: {} })
+    const refusedFirst = setup({ a: {}, b: { starknet_getTransactionStatus: notFound } })
+    // an endpoint that is down says nothing about the transaction
+    const down = () => ({ error: { code: 63, message: "An unexpected error occurred" } })
+    const downLast = setup({
+      a: { starknet_getTransactionStatus: notFound },
+      b: { starknet_getTransactionStatus: down }
+    })
+    const allDown = setup({ a: { starknet_getTransactionStatus: down }, b: { starknet_getTransactionStatus: down } })
     const status = (rpc: StarknetRpc.StarknetRpc["Service"]) => rpc.getTransactionStatus({ transactionHash: TX })
     return Effect.gen(function*() {
       expect(yield* known.run(status)).toStrictEqual({
@@ -171,6 +179,9 @@ describe("StarknetRpc", () => {
       })
       expect(yield* unknown.run(status)).toBeNull()
       expect(yield* Effect.flip(failing.run(status))).toMatchObject({ reason: { _tag: "Rejected" }, code: -32601 })
+      expect(yield* Effect.flip(refusedFirst.run(status))).toMatchObject({ reason: { _tag: "Lagging" }, code: 29 })
+      expect(yield* downLast.run(status)).toBeNull()
+      expect(yield* Effect.flip(allDown.run(status))).toMatchObject({ reason: { _tag: "Unavailable" }, code: 63 })
     })
   })
 

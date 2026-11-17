@@ -13,10 +13,10 @@
  * transaction hash before anything is broadcast, so it can be stored first, and `broadcast` can be repeated with the
  * same transaction.
  *
- * Resource bounds come from `starknet_estimateFee` (see {@link defaultFees}) unless `sign` receives them. The
- * transaction is estimated unsigned, with `SKIP_VALIDATE`, so that a custody signer signs once: the estimate leaves
- * out the account's validation, which the default strategy adds back. The account must hold the bounds in STRK, each
- * `maxAmount` times its `maxPricePerUnit`, though it only pays what the transaction uses. The tip is 0 unless given.
+ * Fees come from `starknet_estimateFee` (see {@link defaultFees}) unless `sign` receives them. The transaction is
+ * estimated unsigned, with `SKIP_VALIDATE`, so that a custody signer signs once: the estimate leaves out the
+ * account's validation, which the default strategy adds back. The account must hold the bounds in STRK, each
+ * `maxAmount` times its `maxPricePerUnit`, though it only pays what the transaction uses.
  *
  * A transaction is in one {@link StarknetTransactionStatus}:
  *
@@ -47,7 +47,7 @@
  * const program = Effect.gen(function*() {
  *   const relayer = yield* StarknetRelayer
  *   // an ERC-20 `transfer(recipient, amount)`, the amount being a u256 as two felts
- *   const calls = [{ contractAddress: token, entrypoint: "transfer", calldata: [to, "0x1", "0x0"] }]
+ *   const calls = [{ contractAddress: token, entrypoint: "transfer", calldata: [to, "0x1", "0x0"] }] as const
  *   const { hash, nonce, signed } = yield* relayer.sign({ signer, calls })
  *   // stored before the broadcast: a crash in between leaves a hash to look up, never an unknown transaction
  *   yield* store(hash, nonce)
@@ -64,6 +64,8 @@
  */
 import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import * as JsonRpc from "@effect-blockchain/core/JsonRpc"
+import type * as Arr from "effect/Array"
+import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
@@ -92,6 +94,28 @@ export type StarknetTransactionStatus =
   | { readonly _tag: "Confirmed"; readonly block: bigint }
   | { readonly _tag: "Failed"; readonly block: bigint; readonly reason: string | undefined }
   | { readonly _tag: "NotFound" }
+
+/**
+ * The transaction that `fetchTransactionStatus` and `awaitConfirmation` read, by its `hash`.
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface StarknetTransactionStatusOptions {
+  readonly hash: StarknetTransactionHash
+}
+
+/**
+ * What a transaction may pay: the most of each resource it may use and the price it accepts for it, and the `tip`
+ * per unit of L2 gas, in FRI (10^-18 STRK).
+ *
+ * @since 0.3.0
+ * @category models
+ */
+export interface StarknetFees {
+  readonly resourceBounds: StarknetResourceBounds
+  readonly tip: bigint
+}
 
 /**
  * One call of an `INVOKE` transaction: the `entrypoint` name of `contractAddress` and its calldata felts.
@@ -129,10 +153,10 @@ export class InvalidNonce extends Schema.TaggedError<InvalidNonce>()("InvalidNon
 /**
  * The account's STRK balance does not cover the resource bounds (`INSUFFICIENT_ACCOUNT_BALANCE`).
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category reasons
  */
-export class InsufficientBalance extends Schema.TaggedError<InsufficientBalance>()("InsufficientBalance", {}) {}
+export class InsufficientFunds extends Schema.TaggedError<InsufficientFunds>()("InsufficientFunds", {}) {}
 
 /**
  * The resource bounds are below what validating the transaction needs or below the current prices
@@ -171,7 +195,7 @@ export class ReplacementUnderpriced
  */
 export const StarknetBroadcastReason = Schema.Union([
   InvalidNonce,
-  InsufficientBalance,
+  InsufficientFunds,
   InsufficientResources,
   ValidationFailure,
   ReplacementUnderpriced
@@ -197,22 +221,46 @@ export class StarknetBroadcastError extends Schema.TaggedError<StarknetBroadcast
 }) {}
 
 /**
+ * The estimate ran the transaction and it failed (`TRANSACTION_EXECUTION_ERROR`): `error` is the node's message.
+ *
+ * @since 0.3.0
+ * @category reasons
+ */
+export class SimulationFailed extends Schema.TaggedError<SimulationFailed>()("SimulationFailed", {
+  error: Schema.String
+}) {}
+
+/**
+ * `starknet_estimateFee` refused the transaction, for a `reason` matched with `Effect.catchReason`: `cause` is the
+ * {@link StarknetRpc.StarknetRpcError} of the estimate. A failed request stays a `StarknetRpcError`.
+ *
+ * @since 0.3.0
+ * @category errors
+ */
+export class StarknetSimulationError extends Schema.TaggedError<StarknetSimulationError>()("StarknetSimulationError", {
+  reason: Schema.Union([SimulationFailed]),
+  cause: Schema.Defect()
+}) {}
+
+/**
  * @since 0.2.0
  * @category services
  */
 export class StarknetRelayer extends Context.Service<StarknetRelayer, {
   /**
    * Signs an `INVOKE` running `calls` in order from the account at `signer.address`, without sending it. A missing
-   * `nonce` is the account's nonce at the pre-confirmed block, missing `resourceBounds` come from the layer's fee
-   * strategy over `starknet_estimateFee` (calls that revert fail with `Rejected`), and a missing `tip` is 0.
+   * `nonce` is the account's nonce at the pre-confirmed block, and missing `fees` come from the layer's fee strategy
+   * over `starknet_estimateFee`: calls that revert fail with a {@link StarknetSimulationError}.
    */
   readonly sign: (options: {
     readonly signer: StarknetSigner
-    readonly calls: ReadonlyArray<StarknetCall>
+    readonly calls: Arr.NonEmptyReadonlyArray<StarknetCall>
     readonly nonce?: bigint | undefined
-    readonly resourceBounds?: StarknetResourceBounds | undefined
-    readonly tip?: bigint | undefined
-  }) => Effect.Effect<StarknetSignedTransaction, StarknetRpc.StarknetRpcError | StarknetSignerError>
+    readonly fees?: StarknetFees | undefined
+  }) => Effect.Effect<
+    StarknetSignedTransaction,
+    StarknetRpc.StarknetRpcError | StarknetSignerError | StarknetSimulationError
+  >
   /**
    * Signs the `DEPLOY_ACCOUNT` of the signer's own account contract, without sending it: its nonce is 0. The address
    * that `classHash`, `salt` and `constructorCalldata` deploy to must be `signer.address`, or it fails with a
@@ -223,9 +271,11 @@ export class StarknetRelayer extends Context.Service<StarknetRelayer, {
     readonly classHash: string
     readonly salt: string
     readonly constructorCalldata: ReadonlyArray<string>
-    readonly resourceBounds?: StarknetResourceBounds | undefined
-    readonly tip?: bigint | undefined
-  }) => Effect.Effect<StarknetSignedTransaction, StarknetRpc.StarknetRpcError | StarknetSignerError>
+    readonly fees?: StarknetFees | undefined
+  }) => Effect.Effect<
+    StarknetSignedTransaction,
+    StarknetRpc.StarknetRpcError | StarknetSignerError | StarknetSimulationError
+  >
   /**
    * Sends a signed transaction and returns its hash. Sending the same transaction again is safe: a node answering
    * `DUPLICATE_TX`, or that the nonce is invalid while it knows this hash, is a success.
@@ -235,46 +285,52 @@ export class StarknetRelayer extends Context.Service<StarknetRelayer, {
   }) => Effect.Effect<StarknetTransactionHash, StarknetBroadcastError | StarknetRpc.StarknetRpcError>
   /**
    * The status of the transaction as the answering endpoint sees it. An endpoint behind the head answers `Pending` or
-   * `Included` for a transaction another one has in a confirmed block, and `NotFound` means that the last endpoint
-   * tried does not know it.
+   * `Included` for a transaction another one has in a confirmed block, and `NotFound` means that no endpoint knows
+   * it.
    */
-  readonly fetchTransactionStatus: (options: {
-    readonly hash: StarknetTransactionHash
-  }) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
+  readonly fetchTransactionStatus: (
+    options: StarknetTransactionStatusOptions
+  ) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
   /**
    * Reads {@link fetchTransactionStatus} on `poll` (`Schedule.spaced(DEFAULT_POLL_INTERVAL)` by default) until it is
    * `Confirmed` or `Failed`, and returns it. `NotFound` keeps polling, so bound the wait with a timeout. A read failing
    * with a transient reason (`JsonRpc.isTransient`) is read again on `poll`, any other error fails the wait. A `poll`
    * that ends first returns the last read.
    */
-  readonly awaitConfirmation: (options: {
-    readonly hash: StarknetTransactionHash
-    readonly poll?: Schedule.Schedule<unknown> | undefined
-  }) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
+  readonly awaitConfirmation: (
+    options: StarknetTransactionStatusOptions & { readonly poll?: Schedule.Schedule<unknown> | undefined }
+  ) => Effect.Effect<StarknetTransactionStatus, StarknetRpc.StarknetRpcError>
 }>()("@effect-blockchain/starknet/StarknetRelayer") {}
 
 // `__validate__` and `__validate_deploy__` of an OpenZeppelin account, one Stark curve signature check, use 130,240 L2
 // gas: the estimate is made with `SKIP_VALIDATE` and leaves them out
 const VALIDATION_L2_GAS = BigInt(300_000)
 
-const margin = (value: bigint) => value * BigInt(3) / BigInt(2)
+const feesWith = (multiplier: number) => {
+  const percent = BigInt(Math.round(multiplier * 100))
+  const margin = (value: bigint) => value * percent / BigInt(100)
+  return (estimate: StarknetRpc.StarknetFeeEstimate): StarknetFees => ({
+    resourceBounds: {
+      l1Gas: { maxAmount: margin(estimate.l1GasConsumed), maxPricePerUnit: margin(estimate.l1GasPrice) },
+      l1DataGas: { maxAmount: margin(estimate.l1DataGasConsumed), maxPricePerUnit: margin(estimate.l1DataGasPrice) },
+      l2Gas: {
+        maxAmount: margin(estimate.l2GasConsumed + VALIDATION_L2_GAS),
+        maxPricePerUnit: margin(estimate.l2GasPrice)
+      }
+    },
+    tip: BigInt(0)
+  })
+}
 
 /**
  * The library's fee strategy: each resource is bounded by 1.5 times its estimated amount at 1.5 times its estimated
- * price, which keeps the transaction includable while prices rise. The L2 gas amount first gains 300,000 for the
- * account's validation, which the estimate leaves out: over twice what a single signature check uses.
+ * price, which keeps the transaction includable while prices rise, with no tip. The L2 gas amount first gains 300,000
+ * for the account's validation, which the estimate leaves out: over twice what a single signature check uses.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category fees
  */
-export const defaultFees = (estimate: StarknetRpc.StarknetFeeEstimate): StarknetResourceBounds => ({
-  l1Gas: { maxAmount: margin(estimate.l1GasConsumed), maxPricePerUnit: margin(estimate.l1GasPrice) },
-  l1DataGas: { maxAmount: margin(estimate.l1DataGasConsumed), maxPricePerUnit: margin(estimate.l1DataGasPrice) },
-  l2Gas: {
-    maxAmount: margin(estimate.l2GasConsumed + VALIDATION_L2_GAS),
-    maxPricePerUnit: margin(estimate.l2GasPrice)
-  }
-})
+export const defaultFees: (estimate: StarknetRpc.StarknetFeeEstimate) => StarknetFees = feesWith(1.5)
 
 /**
  * The default `poll` spacing of {@link StarknetRelayer.Service.awaitConfirmation}: 10 seconds.
@@ -301,14 +357,15 @@ const executeCalldata = (calls: ReadonlyArray<StarknetCall>): ReadonlyArray<stri
 
 // error codes of `starknet_addInvokeTransaction` and `starknet_addDeployAccountTransaction` in the Starknet JSON-RPC
 // spec v0.9 (starknet_write_api.json)
+const INVALID_TRANSACTION_NONCE = 52
 const DUPLICATE_TX = 59
 const refusals: ReadonlyMap<number | undefined, () => StarknetBroadcastReason> = new Map<
   number,
   () => StarknetBroadcastReason
 >([
-  [52, () => new InvalidNonce()],
+  [INVALID_TRANSACTION_NONCE, () => new InvalidNonce()],
   [53, () => new InsufficientResources()],
-  [54, () => new InsufficientBalance()],
+  [54, () => new InsufficientFunds()],
   [55, () => new ValidationFailure()],
   [64, () => new ReplacementUnderpriced()],
   [65, () => new InsufficientResources()]
@@ -318,19 +375,31 @@ const refusals: ReadonlyMap<number | undefined, () => StarknetBroadcastReason> =
 const codesOf = (error: StarknetRpc.StarknetRpcError): ReadonlyArray<number | undefined> =>
   JsonRpc.errorsOf(error).map((each) => each instanceof StarknetRpc.StarknetRpcError ? each.code : undefined)
 
+// `TRANSACTION_EXECUTION_ERROR` of `starknet_estimateFee`, from any endpoint tried
+const toSimulationError = (cause: StarknetRpc.StarknetRpcError) => {
+  const refusal = JsonRpc.errorsOf(cause).find((each) =>
+    each instanceof StarknetRpc.StarknetRpcError && each.code === 41
+  )
+  if (refusal === undefined) return cause
+  const error = refusal.cause instanceof Error ? refusal.cause.message : refusal.message
+  return new StarknetSimulationError({ reason: new SimulationFailed({ error }), cause })
+}
+
 const toSignerError = (cause: unknown) => new StarknetSignerError({ cause })
 
 /**
  * Builds a {@link StarknetRelayer} over the provided {@link StarknetRpc.StarknetRpc}. `confirmations` overrides the
- * network's default, as in `StarknetIndexer.layer`: both agree on the last confirmed block. `fees` (default
- * {@link defaultFees}) bounds the resources of the transactions signed without explicit bounds.
+ * network's default, as in `StarknetIndexer.layer`: both agree on the last confirmed block. `fees` prices the
+ * transactions signed without explicit fees: it defaults to {@link defaultFees} with `feeMultiplier` (default 1.5) as
+ * its margin over the estimate.
  *
- * @since 0.2.0
+ * @since 0.3.0
  * @category layers
  */
 export const layer = (options: {
   readonly confirmations?: number | undefined
-  readonly fees?: ((estimate: StarknetRpc.StarknetFeeEstimate) => StarknetResourceBounds) | undefined
+  readonly fees?: ((estimate: StarknetRpc.StarknetFeeEstimate) => StarknetFees) | undefined
+  readonly feeMultiplier?: number | undefined
 } = {}): Layer.Layer<StarknetRelayer, never, StarknetRpc.StarknetRpc> =>
   Layer.effect(
     StarknetRelayer,
@@ -338,41 +407,41 @@ export const layer = (options: {
       const rpc = yield* StarknetRpc.StarknetRpc
       const confirmations = options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network)
       const chainId = StarknetNetwork.toChainId(rpc.network)
+      const estimatedFees = options.fees ?? feesWith(options.feeMultiplier ?? 1.5)
       const finish = Effect.fnUntraced(function*(
         signer: StarknetSigner,
         draft: StarknetUnsignedTransaction,
-        given: StarknetResourceBounds | undefined
+        given: StarknetFees | undefined
       ) {
-        const resourceBounds = given ?? (yield* Effect.map(
-          rpc.estimateFee({
-            transactions: [{ ...draft, signature: [] }],
-            skipValidate: true,
-            blockTag: "pre_confirmed"
-          }),
-          ([estimate]) => (options.fees ?? defaultFees)(estimate)
+        const { resourceBounds, tip } = given ?? (yield* rpc.estimateFee({
+          transactions: [{ ...draft, signature: [] }],
+          skipValidate: true,
+          blockTag: "pre_confirmed"
+        }).pipe(
+          Effect.mapError(toSimulationError),
+          Effect.map(([estimate]) => estimatedFees(estimate))
         ))
-        const unsigned = { ...draft, resourceBounds }
+        const unsigned = { ...draft, resourceBounds, tip }
         const hash = yield* Effect.try({ try: () => transactionHash(unsigned), catch: toSignerError })
         const signature = yield* signer.signTransaction(unsigned)
         return { hash, signed: { ...unsigned, signature }, nonce: unsigned.nonce }
       })
-      const unbounded = { resourceBounds: { l1Gas: NO_BOUND, l1DataGas: NO_BOUND, l2Gas: NO_BOUND } }
+      const unbounded = { resourceBounds: { l1Gas: NO_BOUND, l1DataGas: NO_BOUND, l2Gas: NO_BOUND }, tip: BigInt(0) }
       const sign = Effect.fn("StarknetRelayer.sign")(
-        function*({ calls, nonce, resourceBounds, signer, tip }: Parameters<StarknetRelayer["Service"]["sign"]>[0]) {
+        function*({ calls, fees, nonce, signer }: Parameters<StarknetRelayer["Service"]["sign"]>[0]) {
           return yield* finish(signer, {
             ...unbounded,
             type: "INVOKE",
             chainId,
             senderAddress: signer.address,
             calldata: executeCalldata(calls),
-            nonce: nonce ?? (yield* rpc.getNonce({ address: signer.address, blockTag: "pre_confirmed" })),
-            tip: tip ?? BigInt(0)
-          }, resourceBounds)
+            nonce: nonce ?? (yield* rpc.getNonce({ address: signer.address, blockTag: "pre_confirmed" }))
+          }, fees)
         }
       )
       const signDeployAccount = Effect.fn("StarknetRelayer.signDeployAccount")(
         function*(
-          { classHash, constructorCalldata, resourceBounds, salt, signer, tip }: Parameters<
+          { classHash, constructorCalldata, fees, salt, signer }: Parameters<
             StarknetRelayer["Service"]["signDeployAccount"]
           >[0]
         ) {
@@ -383,14 +452,13 @@ export const layer = (options: {
             classHash,
             contractAddressSalt: salt,
             constructorCalldata,
-            nonce: BigInt(0),
-            tip: tip ?? BigInt(0)
+            nonce: BigInt(0)
           }
           const address = yield* Effect.try({ try: () => deployAddress(draft), catch: toSignerError })
           if (address !== signer.address) {
             return yield* toSignerError(new Error(`the account deploys at ${address}, the signer is ${signer.address}`))
           }
-          return yield* finish(signer, draft, resourceBounds)
+          return yield* finish(signer, draft, fees)
         }
       )
       const broadcast = Effect.fn("StarknetRelayer.broadcast")(
@@ -403,19 +471,20 @@ export const layer = (options: {
           if (sent._tag === "Success") return sent.success
           const cause = sent.failure
           const codes = codesOf(cause)
-          if (codes.includes(DUPLICATE_TX)) return transactionHash(signed)
-          const reason = refusals.get(codes.find((code) => refusals.has(code)))?.()
-          if (reason === undefined) return yield* cause
-          if (reason._tag === "InvalidNonce") {
-            // a node that has this transaction in a block answers that its nonce is used
-            const hash = transactionHash(signed)
+          // a transaction whose hash cannot be computed keeps the node's error
+          const computed = Effect.try({ try: () => transactionHash(signed), catch: () => cause })
+          if (codes.includes(DUPLICATE_TX)) return yield* computed
+          // a node that has this transaction in a block answers that its nonce is used
+          if (codes.includes(INVALID_TRANSACTION_NONCE)) {
+            const hash = yield* computed
             if ((yield* rpc.getTransactionStatus({ transactionHash: hash })) !== null) return hash
           }
-          return yield* new StarknetBroadcastError({ reason, cause })
+          const reason = refusals.get(codes.find((code) => refusals.has(code)))?.()
+          return yield* reason === undefined ? cause : new StarknetBroadcastError({ reason, cause })
         }
       )
       const fetchTransactionStatus = Effect.fn("StarknetRelayer.fetchTransactionStatus")(
-        function*({ hash }: { readonly hash: StarknetTransactionHash }) {
+        function*({ hash }: StarknetTransactionStatusOptions) {
           const status = yield* rpc.getTransactionStatus({ transactionHash: hash })
           if (status === null) return { _tag: "NotFound" } as const
           if (status.finalityStatus !== "ACCEPTED_ON_L2" && status.finalityStatus !== "ACCEPTED_ON_L1") {
@@ -445,3 +514,23 @@ export const layer = (options: {
       })
     })
   )
+
+/**
+ * Builds a {@link StarknetRelayer} like {@link layer}, reading the options from `Config`. The `fees` strategy is a
+ * function: pass it to {@link layer}.
+ *
+ * @example
+ * ```ts
+ * import * as StarknetRelayer from "@effect-blockchain/starknet/StarknetRelayer"
+ * import * as Config from "effect/Config"
+ *
+ * const RelayerLive = StarknetRelayer.layerConfig({ confirmations: Config.Int("STARKNET_CONFIRMATIONS") })
+ * ```
+ *
+ * @since 0.3.0
+ * @category layers
+ */
+export const layerConfig = (
+  options: Config.Wrap<Omit<NonNullable<Parameters<typeof layer>[0]>, "fees">>
+): Layer.Layer<StarknetRelayer, Config.ConfigError, StarknetRpc.StarknetRpc> =>
+  Layer.unwrap(Effect.map(Config.unwrap(options), layer))
