@@ -16,7 +16,7 @@ import * as Result from "effect/Result"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
 import * as TestClock from "effect/testing/TestClock"
-import { account, accountKey, ledgerMeta, operation, update } from "./utils/ledgerMeta.ts"
+import { account, accountKey, dataEntry, ledgerMeta, operation, update } from "./utils/ledgerMeta.ts"
 
 const A = StellarAccountAddress.make(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1)))
 const b = (n: number) => BigInt(n)
@@ -100,12 +100,12 @@ const fakeRpc = (
     getLedgerEntries: ({ keys, minLedger }) =>
       Effect.suspend(() => {
         state.accounts++
-        assert.deepStrictEqual(keys, [accountKey(A).toXDR("base64")])
+        assert.deepStrictEqual(keys, [accountKey(A).toXdr("base64")])
         if (minLedger !== undefined && minLedger > state.head) {
           return fail(new JsonRpc.Lagging({ head: state.head, toBlock: minLedger }), "getLedgerEntries")
         }
         const entry = options.entry ?? Option.getOrUndefined(Option.map(lastChange(state.head), (at) => ({
-          xdr: account(A, changes.get(at) ?? 0).data().toXDR("base64"),
+          xdr: account(A, changes.get(at) ?? 0).data.toXdr("base64"),
           lastModifiedLedger: at
         })))
         return Effect.succeed({ entries: entry === undefined ? [] : [entry], latestLedger: state.head })
@@ -182,7 +182,7 @@ describe("StellarIndexer.fetchNativeBalance", () => {
     ))
 
   it.effect("falls back to the account entry when no ledger up to its last change changed it", () => {
-    const entry = { xdr: account(A, 5).data().toXDR("base64"), lastModifiedLedger: b(103) }
+    const entry = { xdr: account(A, 5).data.toXdr("base64"), lastModifiedLedger: b(103) }
     const { layer, state } = fakeRpc(b(200), new Map(), { entry })
     return provide(fetchAt(100), layer).pipe(Effect.map((balance) => {
       assert.strictEqual(balance, b(5))
@@ -190,10 +190,10 @@ describe("StellarIndexer.fetchNativeBalance", () => {
     }))
   })
 
-  it.effect("dies on a malformed account entry or another account's", () =>
+  it.effect("dies on a malformed account entry, another entry type or another account's", () =>
     Effect.gen(function*() {
-      const other = account(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 2)), 5).data().toXDR("base64")
-      for (const xdr of ["AAAA", other]) {
+      const other = account(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 2)), 5).data.toXdr("base64")
+      for (const xdr of ["AAAA", dataEntry(A).data.toXdr("base64"), other]) {
         const exit = yield* Effect.exit(
           provide(fetchAt(100), fakeRpc(b(200), history, { entry: { xdr, lastModifiedLedger: b(103) } }).layer)
         )

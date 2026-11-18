@@ -12,20 +12,29 @@ export interface AccountChange {
   readonly after: bigint
 }
 
+/**
+ * The account of a base64 XDR `LedgerEntryData`. Throws on another entry type or a malformed entry.
+ *
+ * @internal
+ */
+export const accountEntry = (dataXdr: string): xdr.AccountEntry => {
+  const data = xdr.LedgerEntryData.fromXdr(dataXdr, "base64")
+  if (data.type !== "account") throw new Error(`expected an account entry, got ${data.type}`)
+  return data.account
+}
+
 const applyChanges = (meta: xdr.TransactionMeta): ReadonlyArray<xdr.LedgerEntryChange> => {
-  switch (meta.switch()) {
-    case 0:
-      return meta.operations().flatMap((operation) => operation.changes())
-    case 1:
-      return [...meta.v1().txChanges(), ...meta.v1().operations().flatMap((operation) => operation.changes())]
-    default: {
-      const v = meta.switch() === 2 ? meta.v2() : meta.switch() === 3 ? meta.v3() : meta.v4()
+  switch (meta.type) {
+    case "operations":
+      return meta.operations.flatMap((operation) => operation.changes)
+    case "v1":
+      return [...meta.v1.txChanges, ...meta.v1.operations.flatMap((operation) => operation.changes)]
+    default:
       return [
-        ...v.txChangesBefore(),
-        ...v.operations().flatMap((operation: xdr.OperationMeta | xdr.OperationMetaV2) => operation.changes()),
-        ...v.txChangesAfter()
+        ...meta.value.txChangesBefore,
+        ...meta.value.operations.flatMap((operation: xdr.OperationMeta | xdr.OperationMetaV2) => operation.changes),
+        ...meta.value.txChangesAfter
       ]
-    }
   }
 }
 
@@ -33,36 +42,26 @@ const applyChanges = (meta: xdr.TransactionMeta): ReadonlyArray<xdr.LedgerEntryC
 // applies the Soroban fee refunds after all of them:
 // https://github.com/stellar/stellar-xdr/blob/curr/Stellar-ledger.x (`TransactionResultMetaV1`)
 const ledgerChanges = (meta: xdr.LedgerCloseMeta): ReadonlyArray<xdr.LedgerEntryChange> => {
-  const txs: ReadonlyArray<xdr.TransactionResultMeta | xdr.TransactionResultMetaV1> = meta.switch() === 0
-    ? meta.v0().txProcessing()
-    : meta.switch() === 1
-    ? meta.v1().txProcessing()
-    : meta.v2().txProcessing()
+  const txs: ReadonlyArray<xdr.TransactionResultMeta | xdr.TransactionResultMetaV1> = meta.value.txProcessing
   return [
-    ...txs.flatMap((tx) => tx.feeProcessing()),
-    ...txs.flatMap((tx) => applyChanges(tx.txApplyProcessing())),
-    ...txs.flatMap((tx) => tx instanceof xdr.TransactionResultMetaV1 ? tx.postTxApplyFeeProcessing() : [])
+    ...txs.flatMap((tx) => tx.feeProcessing),
+    ...txs.flatMap((tx) => applyChanges(tx.txApplyProcessing)),
+    ...txs.flatMap((tx) => tx instanceof xdr.TransactionResultMetaV1 ? tx.postTxApplyFeeProcessing : [])
   ]
 }
 
-const accountIdOf = (change: xdr.LedgerEntryChange): Buffer | undefined => {
-  if (change.switch().name === "ledgerEntryRemoved") {
-    const key = change.removed()
-    return key.switch().name === "account" ? key.account().accountId().ed25519() : undefined
+const accountIdOf = (change: xdr.LedgerEntryChange): xdr.Uint256Bytes | undefined => {
+  if (change.type === "ledgerEntryRemoved") {
+    return change.removed.type === "account" ? change.removed.account.accountId.ed25519 : undefined
   }
-  const data = change.value()
-  return data instanceof xdr.LedgerEntry && data.data().switch().name === "account"
-    ? data.data().account().accountId().ed25519()
-    : undefined
+  return change.value.data.type === "account" ? change.value.data.account.accountId.ed25519 : undefined
 }
 
 // a removed account (merged) holds nothing, and a created one held nothing before
-const balanceOf = (change: xdr.LedgerEntryChange, missing: string): bigint => {
-  const data = change.value()
-  return change.switch().name === missing || !(data instanceof xdr.LedgerEntry)
+const balanceOf = (change: xdr.LedgerEntryChange, missing: xdr.LedgerEntryChange["type"]): bigint =>
+  change.type === missing || change.type === "ledgerEntryRemoved" || change.value.data.type !== "account"
     ? BigInt(0)
-    : BigInt(data.data().account().balance().toString())
-}
+    : change.value.data.account.balance
 
 /**
  * The native balance of `address` around its changes in a ledger, from the base64 XDR `LedgerCloseMeta` of
@@ -76,8 +75,9 @@ export const accountChange = (metadataXdr: string, address: StellarAccountAddres
   const accountId = StrKey.decodeEd25519PublicKey(address)
   // every change of the account carries its id verbatim: most ledgers are skipped without decoding (1 to 3 MB)
   if (!bytes.includes(accountId)) return Option.none()
-  const changes = ledgerChanges(xdr.LedgerCloseMeta.fromXDR(bytes)).filter((change) =>
-    accountIdOf(change)?.equals(accountId) === true
+  const key = new xdr.Uint256Bytes(accountId)
+  const changes = ledgerChanges(xdr.LedgerCloseMeta.fromXdr(bytes)).filter((change) =>
+    accountIdOf(change)?.equals(key) === true
   )
   const first = changes[0]
   const last = changes[changes.length - 1]

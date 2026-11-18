@@ -9,6 +9,7 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schedule from "effect/Schedule"
+import { accountEntry as decodeAccount } from "../src/internal/accountChange.ts"
 import { accountKey } from "./utils/ledgerMeta.ts"
 
 // runs against a local network (`docker run -p 8000:8000 stellar/quickstart --local --enable rpc`, then
@@ -25,7 +26,7 @@ const fund = (address: string) =>
   })
 
 const payment = (destination: string, amount: string) =>
-  Operation.payment({ destination, asset: Asset.native(), amount }).toXDR("base64")
+  Operation.payment({ destination, asset: Asset.native(), amount }).toXdr("base64")
 
 const layer = StellarRelayer.layer().pipe(
   Layer.provideMerge(
@@ -39,8 +40,8 @@ const poll = Schedule.spaced("200 millis")
 const accountEntry = (address: string) =>
   Effect.gen(function*() {
     const rpc = yield* StellarRpc.StellarRpc
-    const { entries } = yield* rpc.getLedgerEntries({ keys: [accountKey(address).toXDR("base64")] })
-    return xdr.LedgerEntryData.fromXDR(entries[0]?.xdr ?? "", "base64")
+    const { entries } = yield* rpc.getLedgerEntries({ keys: [accountKey(address).toXdr("base64")] })
+    return decodeAccount(entries[0]?.xdr ?? "")
   })
 
 // one sender: the tests share its sequence number
@@ -130,13 +131,13 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
         return yield* relayer.awaitConfirmation({ hash, maxLedger, poll })
       })
       // the contract of the native asset: creating it is an invocation too, which fails once it exists
-      yield* Effect.ignore(send(Operation.createStellarAssetContract({ asset: Asset.native() }).toXDR("base64")))
+      yield* Effect.ignore(send(Operation.createStellarAssetContract({ asset: Asset.native() }).toXdr("base64")))
       const call = (name: string, from: string) =>
         Operation.invokeContractFunction({
           contract: Asset.native().contractId(Networks.STANDALONE),
           function: name,
           args: [new Address(from).toScVal(), new Address(receiver).toScVal(), nativeToScVal(1, { type: "i128" })]
-        }).toXDR("base64")
+        }).toXdr("base64")
       expect(yield* send(call("transfer", signer.address))).toMatchObject({ _tag: "Confirmed" })
       expect(yield* Effect.flip(send(call("transfer", receiver)))).toMatchObject({
         _tag: "StellarSimulationError",
@@ -191,9 +192,9 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
       ).toMatchObject([{ _tag: "Confirmed" }, { _tag: "Confirmed" }])
       const after = yield* accountEntry(signer.address)
       // both payments left the account, whose sequence number did not move
-      expect(after.account().seqNum().toString()).toBe(before.account().seqNum().toString())
+      expect(after.seqNum).toBe(before.seqNum)
       // 2 stroops paid, and the fee of the fee bump: 100 stroops for the payment and 100 for the bump
-      expect(after.account().balance().toBigInt()).toBe(before.account().balance().toBigInt() - BigInt(20_000_200))
+      expect(after.balance).toBe(before.balance - BigInt(20_000_200))
     }).pipe(Effect.provide(layer)))
 
   it.live("creates an account whose reserve is paid by its sponsor", () =>
@@ -209,9 +210,10 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
       })
       yield* relayer.broadcast({ signed })
       expect(yield* relayer.awaitConfirmation({ hash, maxLedger, poll })).toMatchObject({ _tag: "Confirmed" })
-      const { entries: [entry] } = yield* rpc.getLedgerEntries({ keys: [accountKey(account.address).toXDR("base64")] })
-      expect(xdr.LedgerEntryData.fromXDR(entry?.xdr ?? "", "base64").account().balance().toString()).toBe("0")
-      const sponsor = xdr.LedgerEntryExt.fromXDR(entry?.extXdr ?? "", "base64").v1().sponsoringId()
-      expect(sponsor ? StrKey.encodeEd25519PublicKey(sponsor.ed25519()) : undefined).toBe(signer.address)
+      const { entries: [entry] } = yield* rpc.getLedgerEntries({ keys: [accountKey(account.address).toXdr("base64")] })
+      expect(decodeAccount(entry?.xdr ?? "").balance).toBe(BigInt(0))
+      const ext = xdr.LedgerEntryExt.fromXdr(entry?.extXdr ?? "", "base64")
+      const sponsor = ext.type === "v1" ? ext.v1.sponsoringId : null
+      expect(sponsor ? StrKey.encodeEd25519PublicKey(sponsor.ed25519.toBytes()) : undefined).toBe(signer.address)
     }).pipe(Effect.provide(layer)))
 })

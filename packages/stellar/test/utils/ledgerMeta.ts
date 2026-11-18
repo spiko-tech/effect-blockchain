@@ -11,29 +11,30 @@ export const recordedLedger = (provider: string, name: string) =>
   Schema.decodeUnknownSync(Reply)(Replay.load(new URL("../fixtures/", import.meta.url), provider, name).body).result
     .ledgers[0]
 
-const header = xdr.LedgerCloseMeta.fromXDR(recordedLedger("quasar-archive", "getLedgers-v0").metadataXdr, "base64").v0()
-  .ledgerHeader()
+const header =
+  xdr.LedgerCloseMeta.fromXdr(recordedLedger("quasar-archive", "getLedgers-v0").metadataXdr, "base64").value
+    .ledgerHeader
 
 const accountId = (address: string) => Keypair.fromPublicKey(address).xdrAccountId()
 
-export const account = (address: string, balance: number) =>
+export const account = (address: string, balance: number, sequence = 1) =>
   new xdr.LedgerEntry({
     lastModifiedLedgerSeq: 1,
     data: xdr.LedgerEntryData.account(
       new xdr.AccountEntry({
         accountId: accountId(address),
-        balance: xdr.Int64.fromString(String(balance)),
-        seqNum: xdr.Int64.fromString("1"),
+        balance: BigInt(balance),
+        seqNum: BigInt(sequence),
         numSubEntries: 0,
         inflationDest: null,
         flags: 0,
         homeDomain: "",
         thresholds: Buffer.from([1, 0, 0, 0]),
         signers: [],
-        ext: new xdr.AccountEntryExt(0)
+        ext: xdr.AccountEntryExt.v0()
       })
     ),
-    ext: new xdr.LedgerEntryExt(0)
+    ext: xdr.LedgerEntryExt.v0()
   })
 
 /** A data entry of `address`: it carries the account id but is not the account. */
@@ -45,10 +46,10 @@ export const dataEntry = (address: string) =>
         accountId: accountId(address),
         dataName: "name",
         dataValue: Buffer.from("value"),
-        ext: new xdr.DataEntryExt(0)
+        ext: xdr.DataEntryExt.v0()
       })
     ),
-    ext: new xdr.LedgerEntryExt(0)
+    ext: xdr.LedgerEntryExt.v0()
   })
 
 export const dataKey = (address: string) =>
@@ -72,11 +73,11 @@ export const transaction = (
     result: new xdr.TransactionResultPair({
       transactionHash: options.hash ?? Buffer.alloc(32),
       result: new xdr.TransactionResult({
-        feeCharged: xdr.Int64.fromString("100"),
+        feeCharged: BigInt(100),
         result: options.failed === true
           ? xdr.TransactionResultResult.txFailed([])
           : xdr.TransactionResultResult.txSuccess([]),
-        ext: new xdr.TransactionResultExt(0)
+        ext: xdr.TransactionResultExt.v0()
       })
     }),
     feeProcessing: fee,
@@ -85,17 +86,16 @@ export const transaction = (
 
 /** A transaction applying `changes` in one operation. */
 export const operation = (changes: Array<xdr.LedgerEntryChange>, fee: Array<xdr.LedgerEntryChange> = []) =>
-  transaction(fee, new xdr.TransactionMeta(0, [new xdr.OperationMeta({ changes })]))
+  transaction(fee, xdr.TransactionMeta.operations([new xdr.OperationMeta({ changes })]))
 
 /** A base64 `LedgerCloseMeta` v0 processing `transactions` in order. */
 export const ledgerMeta = (transactions: Array<xdr.TransactionResultMeta>) =>
-  new xdr.LedgerCloseMeta(
-    0,
+  xdr.LedgerCloseMeta.v0(
     new xdr.LedgerCloseMetaV0({
       ledgerHeader: header,
-      txSet: new xdr.TransactionSet({ previousLedgerHash: Buffer.alloc(32), txes: [] }),
+      txSet: new xdr.TransactionSet({ previousLedgerHash: Buffer.alloc(32), txs: [] }),
       txProcessing: transactions,
       upgradesProcessing: [],
       scpInfo: []
     })
-  ).toXDR("base64")
+  ).toXdr("base64")

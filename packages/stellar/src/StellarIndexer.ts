@@ -60,7 +60,7 @@ import * as Option from "effect/Option"
 import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
-import { accountChange } from "./internal/accountChange.ts"
+import { accountChange, accountEntry } from "./internal/accountChange.ts"
 import { ledgerEvents, matchesTopics } from "./internal/ledgerEvents.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
@@ -362,18 +362,17 @@ export const layer = (options: {
       const account = (address: StellarAccountAddress, block: bigint) => {
         const key = xdr.LedgerKey.account(
           new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() })
-        ).toXDR("base64")
+        ).toXdr("base64")
         return Effect.map(rpc.getLedgerEntries({ keys: [key], minLedger: block }), ({ entries, latestLedger }) => {
           const entry = entries[0]
           if (entry === undefined) {
             return { account: undefined, latestLedger }
           }
-          const data = xdr.LedgerEntryData.fromXDR(entry.xdr, "base64").account()
-          if (StrKey.encodeEd25519PublicKey(data.accountId().ed25519()) !== address) {
+          const data = accountEntry(entry.xdr)
+          if (StrKey.encodeEd25519PublicKey(data.accountId.ed25519.toBytes()) !== address) {
             throw new Error(`getLedgerEntries returned another account than ${address}`)
           }
-          const balance = BigInt(data.balance().toString())
-          return { account: { balance, lastModifiedLedger: entry.lastModifiedLedger }, latestLedger }
+          return { account: { balance: data.balance, lastModifiedLedger: entry.lastModifiedLedger }, latestLedger }
         })
       }
 

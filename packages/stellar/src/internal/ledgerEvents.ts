@@ -41,12 +41,8 @@ export const ledgerEvents = (
   // an event carries its contract id verbatim: most ledgers are skipped without decoding (1 to 3 MB)
   if (contractIds !== undefined && !contractIds.some((id) => bytes.includes(StrKey.decodeContract(id)))) return []
   const contracts = contractIds === undefined ? undefined : new Set<string>(contractIds)
-  const meta = xdr.LedgerCloseMeta.fromXDR(bytes)
-  const transactions: ReadonlyArray<xdr.TransactionResultMeta | xdr.TransactionResultMetaV1> = meta.switch() === 0
-    ? meta.v0().txProcessing()
-    : meta.switch() === 1
-    ? meta.v1().txProcessing()
-    : meta.v2().txProcessing()
+  const transactions: ReadonlyArray<xdr.TransactionResultMeta | xdr.TransactionResultMetaV1> =
+    xdr.LedgerCloseMeta.fromXdr(bytes).value.txProcessing
   // RFC 3339 without fractional seconds, as stellar-rpc formats it
   const ledgerClosedAt = new Date(ledger.closeTime * 1000).toISOString().replace(".000Z", "Z")
   const events: Array<StellarContractEvent> = []
@@ -55,44 +51,45 @@ export const ledgerEvents = (
   let afterAll = 0
   transactions.forEach((transaction, position) => {
     const order = position + 1
-    const result = transaction.result()
-    const code = result.result().result().switch().name
+    const result = transaction.result
+    const code = result.result.result.type
     const successful = code === "txSuccess" || code === "txFeeBumpInnerSuccess"
-    const transactionHash = StellarTransactionHash.make(`0x${result.transactionHash().toString("hex")}`)
+    const transactionHash = StellarTransactionHash.make(
+      `0x${Buffer.from(result.transactionHash.toBytes()).toString("hex")}`
+    )
     const add = (event: xdr.ContractEvent, toidTransaction: number, operation: number, index: number) => {
-      const contract = event.contractId()
-      // the SDK decodes an absent contract id to `undefined`, though it types it `null`
-      if (!successful || event.type().name !== "contract" || contract === null || contract === undefined) return
+      const contract = event.contractId
+      if (!successful || event.type !== xdr.ContractEventType.contract || contract === null) return
       const contractId = StellarContractAddress.make(
         Address.fromScAddress(xdr.ScAddress.scAddressTypeContract(contract)).toString()
       )
       if (contracts !== undefined && !contracts.has(contractId)) return
-      const body = event.body().v0()
+      const body = event.body.v0
       events.push({
         id: eventId(ledger.sequence, toidTransaction, operation, index),
         type: "contract",
         contractId,
-        topics: body.topics().map((topic) => topic.toXDR("base64")),
-        value: body.data().toXDR("base64"),
+        topics: body.topics.map((topic) => topic.toXdr("base64")),
+        value: body.data.toXdr("base64"),
         blockNumber: ledger.sequence,
         ledgerClosedAt,
         transactionHash,
         inSuccessfulContractCall: true
       })
     }
-    const apply = transaction.txApplyProcessing()
-    if (apply.switch() === 3) {
-      apply.v3().sorobanMeta()?.events().forEach((event, index) => add(event, order, 0, index))
-    } else if (apply.switch() === 4) {
+    const apply = transaction.txApplyProcessing
+    if (apply.type === "v3") {
+      apply.v3.sorobanMeta?.events.forEach((event, index) => add(event, order, 0, index))
+    } else if (apply.type === "v4") {
       let afterTransaction = 0
-      for (const event of apply.v4().events()) {
-        const stage = event.stage().name
-        if (stage === "transactionEventStageBeforeAllTxes") add(event.event(), 0, 0, beforeAll++)
-        else if (stage === "transactionEventStageAfterAllTxes") add(event.event(), TRANSACTION_MASK, 0, afterAll++)
-        else add(event.event(), order, OPERATION_MASK, afterTransaction++)
+      for (const { event, stage } of apply.v4.events) {
+        if (stage === xdr.TransactionEventStage.transactionEventStageBeforeAllTxs) add(event, 0, 0, beforeAll++)
+        else if (stage === xdr.TransactionEventStage.transactionEventStageAfterAllTxs) {
+          add(event, TRANSACTION_MASK, 0, afterAll++)
+        } else add(event, order, OPERATION_MASK, afterTransaction++)
       }
-      apply.v4().operations().forEach((operation, operationIndex) =>
-        operation.events().forEach((event, index) => add(event, order, operationIndex, index))
+      apply.v4.operations.forEach((operation, operationIndex) =>
+        operation.events.forEach((event, index) => add(event, order, operationIndex, index))
       )
     }
   })

@@ -16,7 +16,7 @@ const unsigned = () =>
     .addOperation(Operation.payment({ destination: OTHER.publicKey(), asset: Asset.native(), amount: "1" }))
     .setTimeout(0)
     .build()
-const envelope = unsigned().toEnvelope().toXDR("base64")
+const envelope = unsigned().toEnvelope().toXdr("base64")
 const transaction = { network: "StellarTestnet", envelope } as const
 
 describe("StellarSigner", () => {
@@ -26,10 +26,10 @@ describe("StellarSigner", () => {
       expect(signer.address).toBe(ADDRESS)
       const expected = unsigned()
       expected.sign(keypair)
-      expect(yield* signer.signTransaction(transaction)).toBe(expected.toEnvelope().toXDR("base64"))
+      expect(yield* signer.signTransaction(transaction)).toBe(expected.toEnvelope().toXdr("base64"))
       // the passphrase is part of what is signed
       expect(yield* signer.signTransaction({ ...transaction, network: "Stellar" })).not.toBe(
-        expected.toEnvelope().toXDR("base64")
+        expected.toEnvelope().toXdr("base64")
       )
     }))
 
@@ -50,19 +50,19 @@ describe("StellarSigner", () => {
           return Effect.succeed(new Uint8Array(keypair.sign(Buffer.from(hash.slice(2), "hex"))))
         }
       })
-      const signed = TransactionBuilder.fromXDR(yield* signer.signTransaction(transaction), Networks.TESTNET)
-      expect(hashes).toStrictEqual([`0x${unsigned().hash().toString("hex")}`])
-      expect(signed.signatures.map((signature) => signature.hint())).toStrictEqual([keypair.signatureHint()])
+      const signed = TransactionBuilder.fromXdr(yield* signer.signTransaction(transaction), Networks.TESTNET)
+      expect(hashes).toStrictEqual([`0x${Buffer.from(unsigned().hash()).toString("hex")}`])
+      expect(signed.signatures.map((signature) => signature.hint.toBytes())).toStrictEqual([keypair.signatureHint()])
 
       // a fee bump has its own hash
       const inner = unsigned()
       inner.sign(keypair)
       const bump = TransactionBuilder.buildFeeBumpTransaction(ADDRESS, "200", inner, Networks.TESTNET)
-      const bumped = TransactionBuilder.fromXDR(
-        yield* signer.signTransaction({ ...transaction, envelope: bump.toEnvelope().toXDR("base64") }),
+      const bumped = TransactionBuilder.fromXdr(
+        yield* signer.signTransaction({ ...transaction, envelope: bump.toEnvelope().toXdr("base64") }),
         Networks.TESTNET
       )
-      expect(hashes[1]).toBe(`0x${bump.hash().toString("hex")}`)
+      expect(hashes[1]).toBe(`0x${Buffer.from(bump.hash()).toString("hex")}`)
       expect(bumped.signatures).toHaveLength(1)
     }))
 

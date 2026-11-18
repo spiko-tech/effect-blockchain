@@ -50,11 +50,11 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.1.0",
-    "@stellar/stellar-sdk": "16.4.1",
+    "@stellar/stellar-sdk": "17.4.0",
     "effect": "4.1.0"
   },
   "peerDependencies": {
-    "@stellar/stellar-sdk": "^16.4.1",
+    "@stellar/stellar-sdk": "^17.0.0",
     "effect": "^4.0.0"
   },
   "publishConfig": {

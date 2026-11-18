@@ -48,7 +48,7 @@ const transactions = {
 
 const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
-    .toXDR("base64")
+    .toXdr("base64")
 // an unsigned call of an EUTBL function from Binance's account: a simulation checks neither signature nor sequence
 const simulation = (name: string) => ({
   transaction: new TransactionBuilder(new Account(BINANCE, "0"), { fee: "100", networkPassphrase: Networks.PUBLIC })
@@ -56,7 +56,7 @@ const simulation = (name: string) => ({
     .setTimeout(0)
     .build()
     .toEnvelope()
-    .toXDR("base64")
+    .toXdr("base64")
 })
 const ledgers = (startLedger: number, limit = 1) => ({ startLedger, pagination: { limit } })
 const ledgersAfter = (cursor: string, limit = 1) => ({ pagination: { limit, cursor } })
