@@ -1,5 +1,14 @@
 # @effect-blockchain/starknet
 
+## 0.4.0
+
+### Minor Changes
+
+- [#100](https://github.com/spiko-tech/effect-blockchain/pull/100) [`89b39fd`](https://github.com/spiko-tech/effect-blockchain/commit/89b39fd1ef9c5e9cd87dad38cdd42f6d806bb465) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Require starknet.js 10
+  
+  - Breaking: users of `StarknetRelayer` and `StarknetSigner` must upgrade the optional `starknet` peer dependency from `^8.9.2` to `^10.0.0`.
+  - Bump the `starknet` dev dependency from 8.9.2 to 10.8.0.
+
 ## 0.3.0
 
 ### Minor Changes
