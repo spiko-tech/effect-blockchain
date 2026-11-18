@@ -50,9 +50,9 @@
     "@effect-blockchain/core": "workspace:*"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.0",
-    "effect": "4.1.0",
-    "viem": "2.57.11"
+    "@effect/vitest": "4.1.4",
+    "effect": "4.1.4",
+    "viem": "2.58.0"
   },
   "peerDependencies": {
     "effect": "^4.0.0",
