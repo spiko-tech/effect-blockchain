@@ -28,7 +28,7 @@
     "changeset-publish": "pnpm check && pnpm lint && pnpm build && pnpm check-dist-types && pnpm check-packages && pnpm test run && changeset publish"
   },
   "devDependencies": {
-    "@babel/cli": "^8.0.6",
+    "@babel/cli": "^8.1.0",
     "@babel/core": "^8.0.9",
     "@changesets/changelog-github": "^1.0.1",
     "@changesets/cli": "^3.0.3",
