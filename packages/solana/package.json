@@ -48,9 +48,9 @@
     "@effect-blockchain/core": "workspace:*"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.0",
-    "@solana/kit": "^8.5.0",
-    "effect": "4.1.0"
+    "@effect/vitest": "4.1.4",
+    "@solana/kit": "^8.6.0",
+    "effect": "4.1.4"
   },
   "peerDependencies": {
     "@solana/kit": "^8.5.0",
