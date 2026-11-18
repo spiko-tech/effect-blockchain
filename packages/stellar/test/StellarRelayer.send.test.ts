@@ -6,6 +6,7 @@ import { StellarTransactionHash } from "@effect-blockchain/stellar/StellarTransa
 import { describe, expect, it, vi } from "@effect/vitest"
 import {
   Account,
+  Address,
   Asset,
   FeeBumpTransaction,
   Keypair,
@@ -28,7 +29,7 @@ const PAYMENT = Operation.payment({
   destination: Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2)).publicKey(),
   asset: Asset.native(),
   amount: "1"
-}).toXDR("base64")
+}).toXdr("base64")
 
 const signer = StellarSigner.fromHashSigner({
   address: ADDRESS,
@@ -36,9 +37,7 @@ const signer = StellarSigner.fromHashSigner({
 })
 
 const accountEntry = (sequence: number) => {
-  const entry = account(ADDRESS, 7)
-  entry.data().account().seqNum(xdr.Int64.fromString(String(sequence)))
-  return { xdr: entry.data().toXDR("base64"), lastModifiedLedger: BigInt(1) }
+  return { xdr: account(ADDRESS, 7, sequence).data.toXdr("base64"), lastModifiedLedger: BigInt(1) }
 }
 
 const fees = (fee: number, p90 = fee): StellarRelayer.StellarFeeEstimate => {
@@ -147,19 +146,30 @@ const setup = <E = never>(
 }
 
 const decode = (signed: string) => {
-  const transaction = TransactionBuilder.fromXDR(signed, Networks.TESTNET)
+  const transaction = TransactionBuilder.fromXdr(signed, Networks.TESTNET)
   if (transaction instanceof FeeBumpTransaction) throw new Error("not a transaction")
   return transaction
 }
 
 const CONTRACT = StrKey.encodeContract(Buffer.alloc(32, 3))
 const INVOCATION = Operation.invokeContractFunction({ contract: CONTRACT, function: "transfer", args: [] })
+const INVOKE_CONTRACT = new xdr.InvokeContractArgs({
+  contractAddress: new Address(CONTRACT).toScAddress(),
+  functionName: "transfer",
+  args: []
+})
+const HOST_FUNCTION = xdr.HostFunction.hostFunctionTypeInvokeContract(INVOKE_CONTRACT)
+const withAuth = (auth: Array<xdr.SorobanAuthorizationEntry>) =>
+  new xdr.Operation({
+    sourceAccount: null,
+    body: xdr.OperationBody.invokeHostFunction(new xdr.InvokeHostFunctionOp({ hostFunction: HOST_FUNCTION, auth }))
+  })
 const authEntry = (credentials: xdr.SorobanCredentials) =>
   new xdr.SorobanAuthorizationEntry({
     credentials,
     rootInvocation: new xdr.SorobanAuthorizedInvocation({
       function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-        INVOCATION.body().invokeHostFunctionOp().hostFunction().invokeContract()
+        INVOKE_CONTRACT
       ),
       subInvocations: []
     })
@@ -174,14 +184,14 @@ const ADDRESS_AUTH = authEntry(xdr.SorobanCredentials.sorobanCredentialsAddress(
   })
 ))
 const simulation = (auth: xdr.SorobanAuthorizationEntry): StellarRpc.StellarSimulation => ({
-  transactionData: new SorobanDataBuilder().setResourceFee("5000").build().toXDR("base64"),
+  transactionData: new SorobanDataBuilder().setResourceFee("5000").build().toXdr("base64"),
   minResourceFee: BigInt(5000),
-  results: [{ auth: [auth.toXDR("base64")], xdr: xdr.ScVal.scvVoid().toXDR("base64") }],
+  results: [{ auth: [auth.toXdr("base64")], xdr: xdr.ScVal.scvVoid().toXdr("base64") }],
   latestLedger: BigInt(100)
 })
 const authOf = (signed: string) => {
   const operation = decode(signed).operations[0]
-  return operation.type === "invokeHostFunction" ? (operation.auth ?? []).map((entry) => entry.toXDR("base64")) : []
+  return operation.type === "invokeHostFunction" ? (operation.auth ?? []).map((entry) => entry.toXdr("base64")) : []
 }
 
 const broadcast = (node: Node) => {
@@ -199,7 +209,7 @@ describe("StellarRelayer sign", () => {
       const signed = yield* run((relayer) => relayer.sign({ signer, operations: [PAYMENT, PAYMENT] }))
       const transaction = decode(signed.signed)
       expect(signed).toStrictEqual({
-        hash: `0x${transaction.hash().toString("hex")}`,
+        hash: `0x${Buffer.from(transaction.hash()).toString("hex")}`,
         signed: signed.signed,
         sequence: BigInt(42),
         maxLedger: BigInt(160)
@@ -211,7 +221,7 @@ describe("StellarRelayer sign", () => {
       expect(transaction.ledgerBounds).toStrictEqual({ minLedger: 0, maxLedger: 160 })
       expect(transaction.timeBounds).toStrictEqual({ minTime: "0", maxTime: "0" })
       expect(transaction.operations).toHaveLength(2)
-      expect(keypair.verify(transaction.hash(), transaction.signatures[0].signature())).toBe(true)
+      expect(keypair.verify(transaction.hash(), transaction.signatures[0].signature.toBytes())).toBe(true)
       expect(calls.slice().sort()).toStrictEqual(["getFeeStats", "getLedgerEntries"])
     }))
 
@@ -331,30 +341,27 @@ describe("StellarRelayer broadcast", () => {
   it.effect("drops a result code the schemas do not list instead of failing", () =>
     Effect.gen(function*() {
       const decoded = (code: string, operations: ReadonlyArray<string>) => ({
-        result: () => ({
-          switch: () => ({ name: code }),
-          results: () => operations.map((name) => ({ switch: () => ({ name }) }))
-        })
+        result: { type: code, results: operations.map((type) => ({ type })) }
       })
-      const fromXDR = vi.spyOn(xdr.TransactionResult, "fromXDR")
-      fromXDR.mockReturnValueOnce(decoded("txFromTheFuture", []) as never)
+      const fromXdr = vi.spyOn(xdr.TransactionResult, "fromXdr")
+      fromXdr.mockReturnValueOnce(decoded("txFromTheFuture", []) as never)
       const transaction = yield* broadcast({ sent: { status: "ERROR", errorResultXdr: "AAAA" } })
       expect(transaction.result).toMatchObject({
         _tag: "Failure",
         failure: { reason: { _tag: "Refused", code: undefined, operations: [] } }
       })
-      fromXDR.mockReturnValueOnce(decoded("txFailed", ["opFromTheFuture", "opBadAuth"]) as never)
+      fromXdr.mockReturnValueOnce(decoded("txFailed", ["opFromTheFuture", "opBadAuth"]) as never)
       const operation = yield* broadcast({ sent: { status: "ERROR", errorResultXdr: "AAAA" } })
       expect(operation.result).toMatchObject({
         _tag: "Failure",
         failure: { reason: { _tag: "Refused", code: "txFailed", operations: [undefined, "opBadAuth"] } }
       })
-      fromXDR.mockRestore()
+      fromXdr.mockRestore()
     }))
 })
 
 describe("StellarRelayer sign of a Soroban invocation", () => {
-  const operations = [INVOCATION.toXDR("base64")] as const
+  const operations = [INVOCATION.toXdr("base64")] as const
 
   it.effect("takes the footprint, the resource fee and the authorization entries of the simulation", () =>
     Effect.gen(function*() {
@@ -363,10 +370,10 @@ describe("StellarRelayer sign of a Soroban invocation", () => {
       const transaction = decode(signed.signed)
       // the Soroban inclusion fee of the fake, plus the resource fee
       expect(transaction.fee).toBe("14999")
-      expect(transaction.toEnvelope().v1().tx().ext().sorobanData().resourceFee().toString()).toBe("5000")
-      expect(authOf(signed.signed)).toStrictEqual([SOURCE_AUTH.toXDR("base64")])
-      expect(signed.hash).toBe(`0x${transaction.hash().toString("hex")}`)
-      expect(keypair.verify(transaction.hash(), transaction.signatures[0].signature())).toBe(true)
+      expect(transaction.toEnvelope().value.tx.ext.value?.resourceFee).toBe(BigInt(5000))
+      expect(authOf(signed.signed)).toStrictEqual([SOURCE_AUTH.toXdr("base64")])
+      expect(signed.hash).toBe(`0x${Buffer.from(transaction.hash()).toString("hex")}`)
+      expect(keypair.verify(transaction.hash(), transaction.signatures[0].signature.toBytes())).toBe(true)
       expect(calls.slice().sort()).toStrictEqual(["getFeeStats", "getLedgerEntries", "simulateTransaction"])
       const explicit = yield* run((relayer) => relayer.sign({ signer, operations, fees: { fee: BigInt(100) } }))
       expect(decode(explicit.signed).fee).toBe("5100")
@@ -374,12 +381,11 @@ describe("StellarRelayer sign of a Soroban invocation", () => {
 
   it.effect("keeps the authorization entries the operation comes with", () =>
     Effect.gen(function*() {
-      const authorized = xdr.Operation.fromXDR(INVOCATION.toXDR())
-      authorized.body().invokeHostFunctionOp().auth([ADDRESS_AUTH])
+      const authorized = withAuth([ADDRESS_AUTH])
       const signed = yield* setup({ sequence: 41, simulation: simulation(SOURCE_AUTH) }).run((relayer) =>
-        relayer.sign({ signer, operations: [authorized.toXDR("base64")] })
+        relayer.sign({ signer, operations: [authorized.toXdr("base64")] })
       )
-      expect(authOf(signed.signed)).toStrictEqual([ADDRESS_AUTH.toXDR("base64")])
+      expect(authOf(signed.signed)).toStrictEqual([ADDRESS_AUTH.toXdr("base64")])
     }))
 
   it.effect("fails on a failed simulation and on an entry another address must sign", () =>
@@ -439,16 +445,16 @@ describe("StellarRelayer feeBump", () => {
     Effect.gen(function*() {
       const { calls, run, signed } = yield* bump({ p90: 5000 }, { operations: [PAYMENT, PAYMENT], fee: 100 })
       const bumped = yield* run((relayer) => relayer.feeBump({ signer: sponsor, signed: signed.signed }))
-      const transaction = TransactionBuilder.fromXDR(bumped.signed, Networks.TESTNET)
+      const transaction = TransactionBuilder.fromXdr(bumped.signed, Networks.TESTNET)
       if (!(transaction instanceof FeeBumpTransaction)) throw new Error("not a fee bump")
-      expect(bumped.hash).toBe(`0x${transaction.hash().toString("hex")}`)
+      expect(bumped.hash).toBe(`0x${Buffer.from(transaction.hash()).toString("hex")}`)
       expect(bumped.hash).not.toBe(signed.hash)
       expect([bumped.sequence, bumped.maxLedger]).toStrictEqual([signed.sequence, signed.maxLedger])
       expect(transaction.feeSource).toBe(payer.publicKey())
       // 5000 stroops for each of the two operations and for the fee bump
       expect(transaction.fee).toBe("15000")
-      expect(`0x${transaction.innerTransaction.hash().toString("hex")}`).toBe(signed.hash)
-      expect(payer.verify(transaction.hash(), transaction.signatures[0].signature())).toBe(true)
+      expect(`0x${Buffer.from(transaction.innerTransaction.hash()).toString("hex")}`).toBe(signed.hash)
+      expect(payer.verify(transaction.hash(), transaction.signatures[0].signature.toBytes())).toBe(true)
       expect(calls).toStrictEqual(["getFeeStats"])
     }))
 
@@ -456,12 +462,12 @@ describe("StellarRelayer feeBump", () => {
     Effect.gen(function*() {
       const { calls, run, signed } = yield* bump({}, { operations: [PAYMENT], fee: 700 })
       const bumped = yield* run((relayer) => relayer.feeBump({ signer: sponsor, signed: signed.signed }))
-      expect(TransactionBuilder.fromXDR(bumped.signed, Networks.TESTNET).fee).toBe("1400")
+      expect(TransactionBuilder.fromXdr(bumped.signed, Networks.TESTNET).fee).toBe("1400")
       calls.length = 0
       const explicit = yield* run((relayer) =>
         relayer.feeBump({ signer: sponsor, signed: signed.signed, fees: { fee: BigInt(900) } })
       )
-      expect(TransactionBuilder.fromXDR(explicit.signed, Networks.TESTNET).fee).toBe("1800")
+      expect(TransactionBuilder.fromXdr(explicit.signed, Networks.TESTNET).fee).toBe("1800")
       expect(calls).toStrictEqual([])
     }))
 
@@ -470,10 +476,10 @@ describe("StellarRelayer feeBump", () => {
       const unbounded = new TransactionBuilder(new Account(ADDRESS, "41"), {
         fee: "100",
         networkPassphrase: Networks.TESTNET
-      }).addOperation(xdr.Operation.fromXDR(PAYMENT, "base64")).setTimeout(0).build()
+      }).addOperation(xdr.Operation.fromXdr(PAYMENT, "base64")).setTimeout(0).build()
       unbounded.sign(keypair)
       const bumped = yield* setup({}).run((relayer) =>
-        relayer.feeBump({ signer: sponsor, signed: unbounded.toEnvelope().toXDR("base64") })
+        relayer.feeBump({ signer: sponsor, signed: unbounded.toEnvelope().toXdr("base64") })
       )
       expect([bumped.sequence, bumped.maxLedger]).toStrictEqual([BigInt(42), BigInt(0)])
     }))
@@ -481,12 +487,12 @@ describe("StellarRelayer feeBump", () => {
   it.effect("adds the resource fee of a Soroban invocation once", () =>
     Effect.gen(function*() {
       const { run, signed } = yield* bump({ simulation: simulation(SOURCE_AUTH) }, {
-        operations: [INVOCATION.toXDR("base64")],
+        operations: [INVOCATION.toXdr("base64")],
         fee: 100
       })
       const bumped = yield* run((relayer) => relayer.feeBump({ signer: sponsor, signed: signed.signed }))
       // the Soroban inclusion fee of the fake for the invocation and for the fee bump, plus the resource fee
-      expect(TransactionBuilder.fromXDR(bumped.signed, Networks.TESTNET).fee).toBe("24998")
+      expect(TransactionBuilder.fromXdr(bumped.signed, Networks.TESTNET).fee).toBe("24998")
     }))
 
   it.effect("fails with a StellarSignerError on a fee below the inner one, a fee bump and a broken envelope", () =>
@@ -510,7 +516,7 @@ describe("StellarRelayer sign through a channel", () => {
     const address = StellarAccountAddress.make(pair.publicKey())
     return {
       address,
-      hint: pair.signatureHint().toString("hex"),
+      hint: Buffer.from(pair.signatureHint()).toString("hex"),
       signer: StellarSigner.fromHashSigner({
         address,
         signHash: (hash) => Effect.succeed(new Uint8Array(pair.sign(Buffer.from(hash.slice(2), "hex"))))
@@ -519,7 +525,8 @@ describe("StellarRelayer sign through a channel", () => {
   }
   const channel = other(5)
   const third = other(6)
-  const hints = (signed: string) => decode(signed).signatures.map((signature) => signature.hint().toString("hex"))
+  const hints = (signed: string) =>
+    decode(signed).signatures.map((signature) => Buffer.from(signature.hint.toBytes()).toString("hex"))
 
   it.effect("uses the channel as the source and the signer as the source of the operations", () =>
     Effect.gen(function*() {
@@ -529,7 +536,7 @@ describe("StellarRelayer sign through a channel", () => {
         asset: Asset.native(),
         amount: "1",
         source: third.address
-      }).toXDR("base64")
+      }).toXdr("base64")
       const signed = yield* run((relayer) =>
         relayer.sign({ signer, channel: channel.signer, operations: [PAYMENT, sourced] })
       )
@@ -537,9 +544,9 @@ describe("StellarRelayer sign through a channel", () => {
       expect(transaction.source).toBe(channel.address)
       // the sequence number of the channel, the only account read
       expect([transaction.sequence, signed.sequence]).toStrictEqual(["42", BigInt(42)])
-      expect(read).toStrictEqual([accountKey(channel.address).toXDR("base64")])
+      expect(read).toStrictEqual([accountKey(channel.address).toXdr("base64")])
       expect(transaction.operations.map((operation) => operation.source)).toStrictEqual([ADDRESS, third.address])
-      expect(hints(signed.signed)).toStrictEqual([channel.hint, keypair.signatureHint().toString("hex")])
+      expect(hints(signed.signed)).toStrictEqual([channel.hint, Buffer.from(keypair.signatureHint()).toString("hex")])
     }))
 
   it.effect("leaves the operations without a source and adds the cosigners without a channel", () =>
@@ -548,13 +555,17 @@ describe("StellarRelayer sign through a channel", () => {
         relayer.sign({ signer, operations: [PAYMENT], cosigners: [third.signer, channel.signer] })
       )
       expect(decode(signed.signed).operations[0].source).toBeUndefined()
-      expect(hints(signed.signed)).toStrictEqual([keypair.signatureHint().toString("hex"), third.hint, channel.hint])
+      expect(hints(signed.signed)).toStrictEqual([
+        Buffer.from(keypair.signatureHint()).toString("hex"),
+        third.hint,
+        channel.hint
+      ])
     }))
 
   it("createSponsoredAccount opens the sponsorship, creates the account and closes it", () => {
     const operations = StellarRelayer.createSponsoredAccount({ sponsor: ADDRESS, account: third.address }).map((
       operation
-    ) => Operation.fromXDRObject(xdr.Operation.fromXDR(operation, "base64")))
+    ) => Operation.fromXdrObject(xdr.Operation.fromXdr(operation, "base64")))
     expect(operations).toMatchObject([
       { type: "beginSponsoringFutureReserves", source: ADDRESS, sponsoredId: third.address },
       { type: "createAccount", source: ADDRESS, destination: third.address, startingBalance: "0.0000000" },

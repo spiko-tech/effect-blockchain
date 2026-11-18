@@ -4,7 +4,7 @@ import { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddres
 import * as StellarIndexer from "@effect-blockchain/stellar/StellarIndexer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import { assert, describe, it } from "@effect/vitest"
-import { Address, StrKey, xdr } from "@stellar/stellar-sdk"
+import { StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Effect from "effect/Effect"
@@ -61,7 +61,7 @@ describe("StellarIndexer.fetchArchivedEvents", () => {
       assert.deepStrictEqual(replay.served, ["quasar-archive getNetwork", "quasar-archive getLedgers-recent"])
 
       // a topic filter keeps what the same filter keeps of the `getEvents` events: the `transfer` events
-      const transfer = xdr.ScVal.scvSymbol("transfer").toXDR("base64")
+      const transfer = xdr.ScVal.scvSymbol("transfer").toXdr("base64")
       const transfers = yield* fetch({ contractIds, topics: [[transfer, "**"]] })
       assert.deepStrictEqual(transfers.events, expected.filter((event) => event.topics[0] === transfer))
       assert.isAbove(transfers.events.length, 0)
@@ -75,22 +75,20 @@ const C = StellarContractAddress.make(StrKey.encodeContract(Buffer.alloc(32, 7))
 const meta = ledgerMeta([
   transaction(
     [],
-    new xdr.TransactionMeta(
-      3,
+    xdr.TransactionMeta.v3(
       new xdr.TransactionMetaV3({
-        ext: new xdr.ExtensionPoint(0),
+        ext: xdr.ExtensionPoint.v0(),
         txChangesBefore: [],
         operations: [],
         txChangesAfter: [],
         sorobanMeta: new xdr.SorobanTransactionMeta({
-          ext: new xdr.SorobanTransactionMetaExt(0),
+          ext: xdr.SorobanTransactionMetaExt.v0(),
           events: [
             new xdr.ContractEvent({
-              ext: new xdr.ExtensionPoint(0),
-              contractId: new Address(C).toScAddress().contractId(),
-              type: xdr.ContractEventType.contract(),
-              body: new xdr.ContractEventBody(
-                0,
+              ext: xdr.ExtensionPoint.v0(),
+              contractId: new xdr.ContractId(StrKey.decodeContract(C)),
+              type: xdr.ContractEventType.contract,
+              body: xdr.ContractEventBody.v0(
                 new xdr.ContractEventV0({ topics: [], data: xdr.ScVal.scvVoid() })
               )
             })

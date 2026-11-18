@@ -36,7 +36,7 @@
  *
  * const program = Effect.gen(function*() {
  *   const relayer = yield* StellarRelayer.StellarRelayer
- *   const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" }).toXDR("base64")
+ *   const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" }).toXdr("base64")
  *   const { hash, maxLedger, sequence, signed } = yield* relayer.sign({ signer, operations: [payment] })
  *   yield* store(hash, sequence, maxLedger)
  *   yield* relayer.broadcast({ signed })
@@ -75,6 +75,7 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import type * as Schedule from "effect/Schedule"
 import * as Schema from "effect/Schema"
+import { accountEntry } from "./internal/accountChange.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
 import * as StellarRpc from "./StellarRpc.ts"
@@ -266,19 +267,18 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
 
 // a code the SDK decodes and the schemas do not list is dropped: a schema constructor would throw on it
 const operationCode = (operation: xdr.OperationResult): StellarOperationResultCode | undefined => {
-  const outer = operation.switch().name
-  const code: string = outer === "opInner" ? operation.tr().value().switch().name : outer
+  const code: string = operation.type === "opInner" ? operation.tr.value.type : operation.type
   return isOperationResultCode(code) ? code : undefined
 }
 
 const failureOf = (resultXdr: string): StellarTransactionFailure | undefined => {
   try {
-    const outer = xdr.TransactionResult.fromXDR(resultXdr, "base64").result()
-    const result = outer.switch().name === "txFeeBumpInnerFailed" ? outer.innerResultPair().result().result() : outer
-    const code: string = result.switch().name
+    const outer = xdr.TransactionResult.fromXdr(resultXdr, "base64").result
+    const result = outer.type === "txFeeBumpInnerFailed" ? outer.innerResultPair.result.result : outer
+    const code: string = result.type
     return {
       code: isTransactionResultCode(code) ? code : undefined,
-      operations: code === "txFailed" ? result.results().map(operationCode) : []
+      operations: result.type === "txFailed" ? result.results.map(operationCode) : []
     }
   } catch {
     return undefined
@@ -318,17 +318,17 @@ export const createSponsoredAccount = (options: {
   readonly sponsor: StellarAccountAddress
   readonly account: StellarAccountAddress
 }): readonly [string, string, string] => [
-  Operation.beginSponsoringFutureReserves({ sponsoredId: options.account, source: options.sponsor }).toXDR("base64"),
+  Operation.beginSponsoringFutureReserves({ sponsoredId: options.account, source: options.sponsor }).toXdr("base64"),
   Operation.createAccount({ destination: options.account, startingBalance: "0", source: options.sponsor })
-    .toXDR("base64"),
-  Operation.endSponsoringFutureReserves({ source: options.account }).toXDR("base64")
+    .toXdr("base64"),
+  Operation.endSponsoringFutureReserves({ source: options.account }).toXdr("base64")
 ]
 
 const toSignerError = (cause: unknown) => new StellarSignerError({ cause })
 
 const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(address).xdrAccountId() }))
-    .toXDR("base64")
+    .toXdr("base64")
 
 /**
  * Builds a {@link StellarRelayer} over the provided {@link StellarRpc.StellarRpc}. `confirmations` overrides the
@@ -361,7 +361,7 @@ export const layer = (options: {
         Effect.try({
           try: () =>
             StellarTransactionHash.make(
-              `0x${TransactionBuilder.fromXDR(envelope, networkPassphrase).hash().toString("hex")}`
+              `0x${Buffer.from(TransactionBuilder.fromXdr(envelope, networkPassphrase).hash()).toString("hex")}`
             ),
           catch: toSignerError
         })
@@ -373,18 +373,20 @@ export const layer = (options: {
           const parsed = yield* Effect.try({
             try: () =>
               operations.map((operation) => {
-                const decoded = xdr.Operation.fromXDR(operation, "base64")
+                const decoded = xdr.Operation.fromXdr(operation, "base64")
                 // an operation without a source account acts for the source of the transaction: the channel
-                if (channel !== undefined && !decoded.sourceAccount()) {
-                  decoded.sourceAccount(decodeAddressToMuxedAccount(signer.address))
-                }
-                return decoded
+                return channel !== undefined && decoded.sourceAccount === null
+                  ? new xdr.Operation({
+                    sourceAccount: decodeAddressToMuxedAccount(signer.address),
+                    body: decoded.body
+                  })
+                  : decoded
               }),
             catch: toSignerError
           })
           const [first] = parsed
-          const invocation = parsed.length === 1 && first?.body().switch().name === "invokeHostFunction"
-            ? first.body().invokeHostFunctionOp()
+          const invocation = parsed.length === 1 && first?.body.type === "invokeHostFunction"
+            ? { operation: first, op: first.body.invokeHostFunctionOp }
             : undefined
           const [{ entries: [account], latestLedger }, fee] = yield* Effect.all([
             rpc.getLedgerEntries({ keys: [accountKey(source)] }),
@@ -393,8 +395,8 @@ export const layer = (options: {
           const maxLedger = given.maxLedger ?? latestLedger + BigInt(options.validity ?? 60)
           const sequence = given.sequence ?? (account === undefined
             ? yield* new StellarSignerError({ cause: new Error(`account ${source} does not exist`) })
-            : BigInt(xdr.LedgerEntryData.fromXDR(account.xdr, "base64").account().seqNum().toString()) + BigInt(1))
-          const build = (fee: bigint, sorobanData?: string) =>
+            : accountEntry(account.xdr).seqNum + BigInt(1))
+          const build = (operations: ReadonlyArray<xdr.Operation>, fee: bigint, sorobanData?: string) =>
             Effect.try({
               try: () => {
                 // the builder signs with the sequence number after the account's
@@ -406,35 +408,41 @@ export const layer = (options: {
                   timebounds: { minTime: 0, maxTime: 0 },
                   ...(sorobanData === undefined ? {} : { sorobanData })
                 })
-                parsed.forEach((operation) => builder.addOperation(operation))
-                return builder.build().toEnvelope().toXDR("base64")
+                operations.forEach((operation) => builder.addOperation(operation))
+                return builder.build().toEnvelope().toXdr("base64")
               },
               catch: toSignerError
             })
-          const prepare = Effect.fnUntraced(function*(invocation: xdr.InvokeHostFunctionOp) {
-            const simulation = yield* rpc.simulateTransaction({ transaction: yield* build(fee) })
-            if ("error" in simulation) {
-              return yield* new StellarSimulationError({ reason: new SimulationFailed({ error: simulation.error }) })
-            }
-            // signed as is, the invocation would fail in a ledger on its archived entries and still pay its fee
-            if (simulation.restorePreamble !== undefined) {
-              return yield* new StellarSimulationError({ reason: new RestoreRequired(simulation.restorePreamble) })
-            }
-            // entries the caller built and signed are kept
-            if (invocation.auth().length === 0) {
+          const prepare = Effect.fnUntraced(
+            function*({ op, operation }: { operation: xdr.Operation; op: xdr.InvokeHostFunctionOp }) {
+              const simulation = yield* rpc.simulateTransaction({ transaction: yield* build(parsed, fee) })
+              if ("error" in simulation) {
+                return yield* new StellarSimulationError({ reason: new SimulationFailed({ error: simulation.error }) })
+              }
+              // signed as is, the invocation would fail in a ledger on its archived entries and still pay its fee
+              if (simulation.restorePreamble !== undefined) {
+                return yield* new StellarSimulationError({ reason: new RestoreRequired(simulation.restorePreamble) })
+              }
+              // entries the caller built and signed are kept
+              if (op.auth.length > 0) return yield* build(parsed, fee, simulation.transactionData)
               const auth = (simulation.results?.[0]?.auth ?? []).map((entry) =>
-                xdr.SorobanAuthorizationEntry.fromXDR(entry, "base64")
+                xdr.SorobanAuthorizationEntry.fromXdr(entry, "base64")
               )
               // any other credentials carry a signature of their own, which the transaction's does not replace
-              if (auth.some((entry) => entry.credentials().switch().name !== "sorobanCredentialsSourceAccount")) {
+              if (auth.some((entry) => entry.credentials.type !== "sorobanCredentialsSourceAccount")) {
                 return yield* new StellarSimulationError({ reason: new UnsupportedAuth() })
               }
-              invocation.auth(auth)
+              const authorized = new xdr.Operation({
+                sourceAccount: operation.sourceAccount,
+                body: xdr.OperationBody.invokeHostFunction(
+                  new xdr.InvokeHostFunctionOp({ hostFunction: op.hostFunction, auth })
+                )
+              })
+              // the builder adds the resource fee `transactionData` holds, the simulation's `minResourceFee`
+              return yield* build([authorized], fee, simulation.transactionData)
             }
-            // the builder adds the resource fee `transactionData` holds, the simulation's `minResourceFee`
-            return yield* build(fee, simulation.transactionData)
-          })
-          const envelope = yield* (invocation === undefined ? build(fee) : prepare(invocation))
+          )
+          const envelope = yield* (invocation === undefined ? build(parsed, fee) : prepare(invocation))
           let signed = envelope
           for (const each of [...(channel === undefined ? [] : [channel]), signer, ...cosigners]) {
             signed = yield* each.signTransaction({ network: rpc.network, envelope: signed })
@@ -446,24 +454,24 @@ export const layer = (options: {
         function*({ signed, signer, ...given }: Parameters<StellarRelayer["Service"]["feeBump"]>[0]) {
           const inner = yield* Effect.try({
             try: () => {
-              const transaction = TransactionBuilder.fromXDR(signed, networkPassphrase)
+              const transaction = TransactionBuilder.fromXdr(signed, networkPassphrase)
               if (transaction instanceof FeeBumpTransaction) throw new Error("already a fee bump")
               return transaction
             },
             catch: toSignerError
           })
-          const sorobanData = inner.tx instanceof xdr.Transaction && inner.tx.ext().switch() === 1
-            ? inner.tx.ext().sorobanData()
+          const sorobanData = inner.tx instanceof xdr.Transaction && inner.tx.ext.type === "sorobanData"
+            ? inner.tx.ext.sorobanData
             : undefined
           const count = BigInt(inner.operations.length)
-          const resourceFee = BigInt(sorobanData?.resourceFee().toString() ?? 0)
+          const resourceFee = sorobanData?.resourceFee ?? BigInt(0)
           // a fee bump must offer at least the inclusion fee per operation of its inner transaction (CAP-0015)
           const innerFee = (BigInt(inner.fee) - resourceFee + count - BigInt(1)) / count
           const fee = given.fees?.fee ?? BigInt_.max(innerFee, yield* estimateFee(sorobanData !== undefined))
           const envelope = yield* Effect.try({
             try: () =>
               TransactionBuilder.buildFeeBumpTransaction(signer.address, fee.toString(), inner, networkPassphrase)
-                .toEnvelope().toXDR("base64"),
+                .toEnvelope().toXdr("base64"),
             catch: toSignerError
           })
           const bumped = yield* signer.signTransaction({ network: rpc.network, envelope })

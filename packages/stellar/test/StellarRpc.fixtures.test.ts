@@ -11,6 +11,7 @@ import * as Arr from "effect/Array"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
+import { accountEntry } from "../src/internal/accountChange.ts"
 import { accountKey } from "./utils/ledgerMeta.ts"
 
 const network = ["getNetwork", "getHealth"]
@@ -19,7 +20,7 @@ const EUTBL = StellarContractAddress.make("CBGV2QFQBBGEQRUKUMCPO3SZOHDDYO6SCP5CH
 const USTBL = StellarContractAddress.make("CARUUX2FZNPH6DGJOEUFSIUQWYHNL5AVDV7PMVSHWL7OBYIBFC76F4TO")
 const BINANCE = StellarAccountAddress.make("GABFQIK63R2NETJM7T673EAMZN4RJLLGP3OFUEJU5SZVTGWUKULZJNL6")
 const MISSING = StellarAccountAddress.make("GD7777777777777777777777777777777777777777777777777773DB")
-const key = (address: string) => accountKey(address).toXDR("base64")
+const key = (address: string) => accountKey(address).toXdr("base64")
 // pruned on the regular endpoint, served by the archive one
 const V1_LEDGER = BigInt(55000004)
 // the pinned range, as recorded: `endLedger` is `toBlock + 1`
@@ -70,7 +71,7 @@ const simulation = (name: string) => ({
     .setTimeout(0)
     .build()
     .toEnvelope()
-    .toXDR("base64")
+    .toXdr("base64")
 })
 
 const eutbl = { contractIds: [EUTBL], fromBlock: FROM, toBlock: TO, limit: 3 } as const
@@ -174,8 +175,8 @@ describe("StellarRpc fixtures", () => {
         Effect.all([rpc.getLedgerEntries({ keys: [key(BINANCE)] }), rpc.getLedgerEntries({ keys: [key(MISSING)] })])
       )
       assert.strictEqual(
-        xdr.LedgerEntryData.fromXDR(binance.entries[0].xdr, "base64").account().balance().toString(),
-        "378110440136408"
+        accountEntry(binance.entries[0].xdr).balance,
+        BigInt("378110440136408")
       )
       assert.strictEqual(binance.entries[0].lastModifiedLedger, BigInt(65338911))
       assert.strictEqual(binance.latestLedger, BigInt(65338914))
@@ -298,16 +299,13 @@ describe("StellarRpc fixtures", () => {
           (ledger) => rpc.getLedgers({ startLedger: BigInt(ledger), limit: 1, archive: true })
         )
       )
-      const metas = pages.map(({ ledgers }) => xdr.LedgerCloseMeta.fromXDR(ledgers[0].metadataXdr, "base64"))
+      const metas = pages.map(({ ledgers }) => xdr.LedgerCloseMeta.fromXdr(ledgers[0].metadataXdr, "base64"))
       assert.deepStrictEqual(pages.map(({ ledgers }) => [ledgers[0].sequence, ledgers[0].closeTime]), [
         [BigInt(58000008), 1752508309],
         [BigInt(59000000), 1758285731]
       ])
-      assert.deepStrictEqual(metas.map((meta) => meta.switch()), [1, 2])
-      assert.deepStrictEqual([
-        metas[0].v1().ledgerHeader().header().ledgerVersion(),
-        metas[1].v2().ledgerHeader().header().ledgerVersion()
-      ], [22, 23])
+      assert.deepStrictEqual(metas.map((meta) => meta.type), ["v1", "v2"])
+      assert.deepStrictEqual(metas.map((meta) => meta.value.ledgerHeader.header.ledgerVersion), [22, 23])
     }))
 
   it.effect("fixture: quasar getTransaction of a successful, a failed and an unknown transaction", () =>
@@ -379,8 +377,8 @@ describe("StellarRpc fixtures", () => {
       // U32(5), with no authorization entry
       assert.deepStrictEqual(decimals.results, [{ auth: [], xdr: "AAAAAwAAAAU=" }])
       assert.strictEqual(
-        xdr.SorobanTransactionData.fromXDR(decimals.transactionData, "base64").resourceFee().toString(),
-        "6343"
+        xdr.SorobanTransactionData.fromXdr(decimals.transactionData, "base64").resourceFee,
+        BigInt(6343)
       )
       assert("error" in missing)
       assert.match(missing.error, /^HostError: Error\(WasmVm, MissingValue\)/u)

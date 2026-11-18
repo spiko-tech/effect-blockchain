@@ -1,7 +1,7 @@
 import { StellarContractAddress } from "@effect-blockchain/stellar/StellarAddress"
 import type { StellarContractEvent } from "@effect-blockchain/stellar/StellarContractEvent"
 import { assert, describe, it } from "@effect/vitest"
-import { Address, StrKey, xdr } from "@stellar/stellar-sdk"
+import { StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Arr from "effect/Array"
 import * as Order from "effect/Order"
 import { ledgerEvents, matchesTopics } from "../src/internal/ledgerEvents.ts"
@@ -12,33 +12,31 @@ const C = contract(7)
 const D = contract(8)
 const hash = (byte: number) => Buffer.alloc(32, byte)
 const topic = (name: string) => xdr.ScVal.scvSymbol(name)
-const point = new xdr.ExtensionPoint(0)
+const point = xdr.ExtensionPoint.v0()
 
 const event = (
   address: StellarContractAddress | null,
   name: string,
-  type: xdr.ContractEventType = xdr.ContractEventType.contract()
+  type: xdr.ContractEventType = xdr.ContractEventType.contract
 ) =>
   new xdr.ContractEvent({
     ext: point,
-    contractId: address === null ? null : new Address(address).toScAddress().contractId(),
+    contractId: address === null ? null : new xdr.ContractId(StrKey.decodeContract(address)),
     type,
-    body: new xdr.ContractEventBody(
-      0,
+    body: xdr.ContractEventBody.v0(
       new xdr.ContractEventV0({ topics: [topic(name)], data: xdr.ScVal.scvU32(1) })
     )
   })
 
 const v3 = (events: Array<xdr.ContractEvent> | null) =>
-  new xdr.TransactionMeta(
-    3,
+  xdr.TransactionMeta.v3(
     new xdr.TransactionMetaV3({
       ext: point,
       txChangesBefore: [],
       operations: [],
       txChangesAfter: [],
       sorobanMeta: events === null ? null : new xdr.SorobanTransactionMeta({
-        ext: new xdr.SorobanTransactionMetaExt(0),
+        ext: xdr.SorobanTransactionMetaExt.v0(),
         events,
         returnValue: xdr.ScVal.scvVoid(),
         diagnosticEvents: []
@@ -50,8 +48,7 @@ const v4 = (
   operations: Array<Array<xdr.ContractEvent>>,
   events: Array<readonly [xdr.TransactionEventStage, xdr.ContractEvent]> = []
 ) =>
-  new xdr.TransactionMeta(
-    4,
+  xdr.TransactionMeta.v4(
     new xdr.TransactionMetaV4({
       ext: point,
       txChangesBefore: [],
@@ -77,7 +74,7 @@ const id = (transaction: number, operation: number, index: number) =>
   }`
 
 const summary = (events: ReadonlyArray<StellarContractEvent>) =>
-  events.map((event) => [event.id, xdr.ScVal.fromXDR(event.topics[0], "base64").sym().toString()])
+  events.map((event) => [event.id, xdr.ScVal.fromXdr(event.topics[0], "base64").value?.toString()])
 
 describe("ledgerEvents on recorded ledgers", () => {
   it("a protocol 22 ledger of the archive: fee, classic and Soroban events in id order", () => {
@@ -93,7 +90,7 @@ describe("ledgerEvents on recorded ledgers", () => {
     )
     // the fee of the first transaction, charged before all of them on the native asset contract
     assert.deepStrictEqual(
-      { ...events[0], topics: events[0].topics.map((topic) => xdr.ScVal.fromXDR(topic, "base64").switch().name) },
+      { ...events[0], topics: events[0].topics.map((topic) => xdr.ScVal.fromXdr(topic, "base64").type) },
       {
         id: "0249108137527738368-0000000000",
         type: "contract",
@@ -131,8 +128,8 @@ describe("ledgerEvents on built metas", () => {
         id: id(1, 0, 0),
         type: "contract",
         contractId: C,
-        topics: [topic("a").toXDR("base64")],
-        value: xdr.ScVal.scvU32(1).toXDR("base64"),
+        topics: [topic("a").toXdr("base64")],
+        value: xdr.ScVal.scvU32(1).toXdr("base64"),
         blockNumber: LEDGER,
         ledgerClosedAt: "2023-11-14T22:13:20Z",
         transactionHash: `0x${"01".repeat(32)}`,
@@ -146,15 +143,15 @@ describe("ledgerEvents on built metas", () => {
   it("skips failed transactions, system events and events without a contract, which still count in the index", () => {
     const events = ledgerEvents(ledger([
       transaction([], v3([event(C, "failed")]), { failed: true }),
-      transaction([], v3([event(C, "system", xdr.ContractEventType.system()), event(null, "none"), event(C, "kept")]))
+      transaction([], v3([event(C, "system", xdr.ContractEventType.system), event(null, "none"), event(C, "kept")]))
     ]))
     assert.deepStrictEqual(summary(events), [[id(2, 0, 2), "kept"]])
   })
 
   it("TransactionMeta v4: operation events by operation, transaction events on the stage sentinels", () => {
-    const before = xdr.TransactionEventStage.transactionEventStageBeforeAllTxes()
-    const after = xdr.TransactionEventStage.transactionEventStageAfterTx()
-    const afterAll = xdr.TransactionEventStage.transactionEventStageAfterAllTxes()
+    const before = xdr.TransactionEventStage.transactionEventStageBeforeAllTxs
+    const after = xdr.TransactionEventStage.transactionEventStageAfterTx
+    const afterAll = xdr.TransactionEventStage.transactionEventStageAfterAllTxs
     const events = ledgerEvents(ledger([
       transaction(
         [],
@@ -177,8 +174,7 @@ describe("ledgerEvents on built metas", () => {
       ),
       transaction(
         [],
-        new xdr.TransactionMeta(
-          2,
+        xdr.TransactionMeta.v2(
           new xdr.TransactionMetaV2({
             txChangesBefore: [],
             operations: [],

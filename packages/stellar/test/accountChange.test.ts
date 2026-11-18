@@ -57,8 +57,7 @@ describe("accountChange on synthetic ledgers", () => {
   const ops = (changes: Array<xdr.LedgerEntryChange>) => [new xdr.OperationMeta({ changes })]
 
   it("reads every TransactionMeta version", () => {
-    const v1 = new xdr.TransactionMeta(
-      1,
+    const v1 = xdr.TransactionMeta.v1(
       new xdr.TransactionMetaV1({ txChanges: update(A, 1, 2), operations: ops(update(A, 2, 3)) })
     )
     const fields = {
@@ -66,9 +65,9 @@ describe("accountChange on synthetic ledgers", () => {
       operations: ops(update(A, 4, 5)),
       txChangesAfter: update(A, 5, 6)
     }
-    const v2 = new xdr.TransactionMeta(2, new xdr.TransactionMetaV2(fields))
-    const ext = new xdr.ExtensionPoint(0)
-    const v3 = new xdr.TransactionMeta(3, new xdr.TransactionMetaV3({ ...fields, ext, sorobanMeta: null }))
+    const v2 = xdr.TransactionMeta.v2(new xdr.TransactionMetaV2(fields))
+    const ext = xdr.ExtensionPoint.v0()
+    const v3 = xdr.TransactionMeta.v3(new xdr.TransactionMetaV3({ ...fields, ext, sorobanMeta: null }))
     assert.deepStrictEqual(accountChange(ledgerMeta([operation(update(A, 0, 1))]), A), change(0, 1))
     assert.deepStrictEqual(accountChange(ledgerMeta([transaction([], v1)]), A), change(1, 3))
     assert.deepStrictEqual(accountChange(ledgerMeta([transaction([], v2)]), A), change(3, 6))

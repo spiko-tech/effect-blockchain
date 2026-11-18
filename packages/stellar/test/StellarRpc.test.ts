@@ -39,9 +39,9 @@ const transaction = new TransactionBuilder(new Account(ACCOUNT, "1"), {
   .addOperation(Operation.bumpSequence({ bumpTo: "5" }))
   .setTimeout(0)
   .build()
-const ENVELOPE = transaction.toEnvelope().toXDR("base64")
-const ENVELOPE_HASH = transaction.hash().toString("hex")
-const accountEntryXdr = (address: string) => account(address, 7).data().toXDR("base64")
+const ENVELOPE = transaction.toEnvelope().toXdr("base64")
+const ENVELOPE_HASH = Buffer.from(transaction.hash()).toString("hex")
+const accountEntryXdr = (address: string) => account(address, 7).data.toXdr("base64")
 
 const ledgers = (sequences: ReadonlyArray<number>, cursor = String(sequences.at(-1) ?? 0)) => ({
   result: {

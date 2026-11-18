@@ -191,7 +191,7 @@ declare const store: (hash: StellarTransactionHash, sequence: bigint, maxLedger:
 
 const program = Effect.gen(function*() {
   const relayer = yield* StellarRelayer.StellarRelayer
-  const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" }).toXDR("base64")
+  const payment = Operation.payment({ destination, asset: Asset.native(), amount: "1" }).toXdr("base64")
   const { hash, maxLedger, sequence, signed } = yield* relayer.sign({ signer, operations: [payment] })
   yield* store(hash, sequence, maxLedger)
   yield* relayer.broadcast({ signed })

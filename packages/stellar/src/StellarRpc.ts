@@ -641,7 +641,8 @@ export const layer = (options: {
           withFallback((endpoint) => {
             const method = RpcMethods.sendTransaction.name
             return Effect.try({
-              try: () => TransactionBuilder.fromXDR(options.transaction, passphrase).hash().toString("hex"),
+              try: () =>
+                Buffer.from(TransactionBuilder.fromXdr(options.transaction, passphrase).hash()).toString("hex"),
               catch: () =>
                 fail(
                   endpoint,

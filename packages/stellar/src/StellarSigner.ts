@@ -67,16 +67,16 @@ export const fromHashSigner = <E>(options: {
   address: options.address,
   signTransaction: Effect.fnUntraced(function*({ envelope, network }) {
     const transaction = yield* Effect.try({
-      try: () => TransactionBuilder.fromXDR(envelope, toPassphrase(network)),
+      try: () => TransactionBuilder.fromXdr(envelope, toPassphrase(network)),
       catch: toError
     })
-    const hash = StellarTransactionHash.make(`0x${transaction.hash().toString("hex")}`)
+    const hash = StellarTransactionHash.make(`0x${Buffer.from(transaction.hash()).toString("hex")}`)
     const signature = yield* Effect.mapError(options.signHash(hash), toError)
     return yield* Effect.try({
       try: () => {
         // verifies the signature against the hash and the address
         transaction.addSignature(options.address, Buffer.from(signature).toString("base64"))
-        return transaction.toEnvelope().toXDR("base64")
+        return transaction.toEnvelope().toXdr("base64")
       },
       catch: toError
     })
