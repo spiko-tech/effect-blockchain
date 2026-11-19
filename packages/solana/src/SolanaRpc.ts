@@ -329,6 +329,53 @@ export interface SolanaTokenAccounts {
 }
 
 /**
+ * The `getAccountInfo` encodings of the account data.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export type SolanaAccountEncoding = "base64" | "jsonParsed"
+
+/**
+ * The `data` of an account, by encoding: the `[data, "base64"]` tuple, or the node's parsed account as raw JSON
+ * (integers as decimal strings). With `jsonParsed`, a node without a parser for the owner program answers the base64
+ * tuple, see `encode_ui_account` in https://github.com/anza-xyz/agave/blob/master/account-decoder/src/lib.rs.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface SolanaAccountData {
+  readonly base64: readonly [data: string, encoding: "base64"]
+  readonly jsonParsed: Schema.Json
+}
+
+/**
+ * An account: its owner program, its balance in lamports, whether it holds a program, and its `data` in the requested
+ * encoding. Every other field (`rentEpoch`, `space`...) is kept as raw JSON, integers as decimal strings.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface SolanaAccount<Encoding extends SolanaAccountEncoding = SolanaAccountEncoding> {
+  readonly owner: SolanaAddress
+  readonly lamports: bigint
+  readonly executable: boolean
+  readonly data: SolanaAccountData[Encoding]
+  readonly [field: string]: SolanaRpcJson
+}
+
+/**
+ * A `getAccountInfo` result: the account (`value`) at the context `slot`, `null` when the address holds none.
+ *
+ * @since 0.5.0
+ * @category models
+ */
+export interface SolanaAccountInfo<Encoding extends SolanaAccountEncoding = SolanaAccountEncoding> {
+  readonly slot: bigint
+  readonly value: SolanaAccount<Encoding> | null
+}
+
+/**
  * A `getEpochInfo` result: the `absoluteSlot` and `blockHeight` of one bank of the answering endpoint, and where that
  * slot stands in its `epoch` (`slotIndex` of `slotsInEpoch`).
  *
@@ -500,6 +547,16 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
     readonly signatures: ReadonlyArray<SolanaTransactionHash>
     readonly searchTransactionHistory?: boolean | undefined
   }) => Effect.Effect<SolanaSignatureStatuses, SolanaRpcError>
+  /**
+   * `getAccountInfo`: the account at `address` with its data in `encoding`. `minContextSlot` works as in
+   * {@link SolanaSignaturesQuery}.
+   */
+  readonly getAccountInfo: <Encoding extends SolanaAccountEncoding>(options: {
+    readonly address: SolanaAddress
+    readonly commitment: SolanaCommitment
+    readonly encoding: Encoding
+    readonly minContextSlot?: bigint | undefined
+  }) => Effect.Effect<SolanaAccountInfo<Encoding>, SolanaRpcError>
   /** `getBalance` at `finalized` commitment. */
   readonly getBalance: (options: {
     readonly address: SolanaAddress
@@ -662,6 +719,27 @@ export const layer = (options: {
         return rpc.withFallback((endpoint) => getTransactionOn(endpoint, { ...options, encoding }))
       }
 
+      function getAccountInfo<Encoding extends SolanaAccountEncoding>(options: {
+        readonly address: SolanaAddress
+        readonly commitment: SolanaCommitment
+        readonly encoding: Encoding
+        readonly minContextSlot?: bigint | undefined
+      }): Effect.Effect<SolanaAccountInfo<Encoding>, SolanaRpcError>
+      function getAccountInfo(
+        { address, ...config }: {
+          readonly address: SolanaAddress
+          readonly commitment: SolanaCommitment
+          readonly encoding: SolanaAccountEncoding
+          readonly minContextSlot?: bigint | undefined
+        }
+      ): Effect.Effect<SolanaAccountInfo, SolanaRpcError> {
+        return rpc.withFallback((endpoint) =>
+          rpc.call(endpoint, RpcMethods.getAccountInfo(config.encoding), [address, config]).pipe(
+            Effect.map(({ context, value }) => ({ slot: context.slot, value }))
+          )
+        )
+      }
+
       return SolanaRpc.of({
         network,
         getGenesisHash: rpc.withFallback(rpc.checkNetwork),
@@ -700,6 +778,7 @@ export const layer = (options: {
               Effect.map(({ context, value }) => ({ slot: context.slot, value }))
             )
           ),
+        getAccountInfo,
         getBalance: ({ address }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getBalance, [address, { commitment: "finalized" }]).pipe(

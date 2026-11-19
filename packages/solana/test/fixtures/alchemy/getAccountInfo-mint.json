@@ -1,0 +1,17 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-19",
+  "request": {
+    "method": "getAccountInfo",
+    "params": [
+      "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      {
+        "commitment": "finalized",
+        "encoding": "base64"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":471493779},\"value\":{\"data\":[\"AQAAAJj+huiNm+Lqi8HMpIeLKYjCQPUrhCS/tA7Rot3LXhmbhDOJKKFrHgAGAQEAAABicKqKWcWUBbRShshncubNEm6bil06OFNtN/e0FOi2Zw==\",\"base64\"],\"executable\":false,\"lamports\":563062142200,\"owner\":\"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\",\"rentEpoch\":18446744073709551615,\"space\":82}},\"id\":1}\n"
+}

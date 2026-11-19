@@ -429,6 +429,89 @@ describe("SolanaRpc", () => {
     }))
   })
 
+  it.effect("encodes getAccountInfo params and decodes the account by encoding, null when missing", () => {
+    const params: Array<ReadonlyArray<Schema.Json>> = []
+    const account = `"executable":false,"lamports":2039280,"owner":"${ADDRESS}","rentEpoch":18446744073709551615,` +
+      `"space":82`
+    const replies = [
+      `"result":{"context":{"slot":7},"value":{"data":["AQ==","base64"],${account}}}`,
+      `"result":{"context":{"slot":8},"value":{"data":{"parsed":{"info":{"decimals":6}},"program":"spl-token"},` +
+      `${account}}}`,
+      `"result":{"context":{"slot":9},"value":null}`
+    ]
+    const { run } = setup({
+      a: {
+        getAccountInfo: (p) => {
+          params.push(p)
+          return raw(replies[params.length - 1] ?? "")()
+        }
+      }
+    })
+    return run((rpc) =>
+      Effect.all([
+        rpc.getAccountInfo({ address: OWNER, encoding: "base64", ...confirmed }),
+        rpc.getAccountInfo({
+          address: OWNER,
+          encoding: "jsonParsed",
+          commitment: "finalized",
+          minContextSlot: BigInt(42)
+        }),
+        rpc.getAccountInfo({ address: OWNER, encoding: "base64", ...confirmed })
+      ])
+    ).pipe(Effect.map(([base64, jsonParsed, missing]) => {
+      expect(params).toStrictEqual([
+        [OWNER, { ...confirmed, encoding: "base64" }],
+        [OWNER, { commitment: "finalized", encoding: "jsonParsed", minContextSlot: 42 }],
+        [OWNER, { ...confirmed, encoding: "base64" }]
+      ])
+      const fields = {
+        executable: false,
+        lamports: BigInt(2039280),
+        owner: ADDRESS,
+        rentEpoch: "18446744073709551615",
+        space: "82"
+      }
+      expect(base64).toStrictEqual({ slot: BigInt(7), value: { data: ["AQ==", "base64"], ...fields } })
+      expect(jsonParsed).toStrictEqual({
+        slot: BigInt(8),
+        value: { data: { parsed: { info: { decimals: "6" } }, program: "spl-token" }, ...fields }
+      })
+      expect(missing).toStrictEqual({ slot: BigInt(9), value: null })
+    }))
+  })
+
+  it.effect("maps getAccountInfo minContextSlot not reached to Lagging and falls back", () => {
+    const { calls, run } = setup({
+      a: {
+        getAccountInfo: () => ({ error: { code: -32016, message: "Minimum context slot has not been reached" } })
+      },
+      b: { getAccountInfo: () => ({ result: { context: { slot: 50 }, value: null } }) }
+    })
+    return run((rpc) =>
+      rpc.getAccountInfo({ address: OWNER, encoding: "base64", minContextSlot: BigInt(50), ...confirmed })
+    ).pipe(Effect.map((info) => {
+      expect(info).toStrictEqual({ slot: BigInt(50), value: null })
+      expect(calls).toStrictEqual(["a:getGenesisHash", "a:getAccountInfo", "b:getGenesisHash", "b:getAccountInfo"])
+    }))
+  })
+
+  it.effect("fails getAccountInfo Lagging when no endpoint has reached minContextSlot", () => {
+    const { run } = setup({
+      a: {
+        getAccountInfo: () => ({ error: { code: -32016, message: "Minimum context slot has not been reached" } })
+      }
+    })
+    return run((rpc) =>
+      Effect.flip(
+        rpc.getAccountInfo({ address: OWNER, encoding: "jsonParsed", minContextSlot: BigInt(50), ...confirmed })
+      )
+    ).pipe(
+      Effect.map((error) =>
+        expect(error).toMatchObject({ reason: { _tag: "Lagging" }, code: -32016, method: "getAccountInfo" })
+      )
+    )
+  })
+
   it.effect("fails sendTransaction Rejected with the node's message when the preflight fails", () => {
     const { run } = setup({
       a: {

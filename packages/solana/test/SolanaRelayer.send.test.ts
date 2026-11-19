@@ -96,6 +96,7 @@ const setup = (node: Node = {}, options?: Parameters<typeof SolanaRelayer.layer>
       getBlockTime: () => Effect.die("unused"),
       getBlocksWithLimit: () => Effect.die("unused"),
       getTokenAccountsByOwner: () => Effect.die("unused"),
+      getAccountInfo: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: () => Effect.die("unused"),
       getSignaturesForAddress: () => Effect.die("unused"),
