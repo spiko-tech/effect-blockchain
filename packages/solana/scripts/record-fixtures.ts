@@ -29,8 +29,12 @@ const TRANSFER_UNFUNDED =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABAzmZGF4hAZXnrjzCLzvpuAbmKzGFNed473dzSiOxrvGWVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
 // far above the head for years
 const FUTURE_SLOT = 999_999_999_999
+// slots 400001264 to 400001267 were skipped: the public endpoint answers `-32009` for them, Alchemy `null`
+const SKIPPED_SLOT = 400_001_264
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 const finalized = { commitment: "finalized" }
+const tokenAccounts = { ...finalized, encoding: "base64", dataSlice: { offset: 0, length: 0 } }
 const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 1 }
 const json = { ...base64, encoding: "json" }
 // the signatures are zeroes and the blockhash a placeholder: the node skips the first and replaces the second
@@ -85,7 +89,21 @@ const cases: ReadonlyArray<Case> = [
   { name: "simulateTransaction-failed", method: "simulateTransaction", params: [TRANSFER_UNFUNDED, simulation] },
   // Alchemy accepts a `limit` from 1 to 10000
   { name: "invalid-params", method: "getSignaturesForAddress", params: [EUTBL, { limit: 0, ...finalized }] },
-  { name: "invalid-key", method: "getGenesisHash", params: [], invalidKey: true }
+  { name: "invalid-key", method: "getGenesisHash", params: [], invalidKey: true },
+  { name: "getBlockTime", method: "getBlockTime", params: [SKIPPED_SLOT - 4] },
+  { name: "getBlockTime-skipped", method: "getBlockTime", params: [SKIPPED_SLOT] },
+  { name: "getBlockTime-future", method: "getBlockTime", params: [FUTURE_SLOT] },
+  { name: "getBlocksWithLimit", method: "getBlocksWithLimit", params: [SKIPPED_SLOT - 4, 10, finalized] },
+  {
+    name: "getTokenAccountsByOwner",
+    method: "getTokenAccountsByOwner",
+    params: [BINANCE, { mint: USDC }, tokenAccounts]
+  },
+  {
+    name: "getTokenAccountsByOwner-min-context-slot",
+    method: "getTokenAccountsByOwner",
+    params: [BINANCE, { mint: USDC }, { ...tokenAccounts, minContextSlot: FUTURE_SLOT }]
+  }
 ]
 
 await record({

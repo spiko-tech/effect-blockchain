@@ -212,6 +212,54 @@ export const getBalance = JsonRpc.method({
 })
 
 /** @internal */
+export const getBlockTime = JsonRpc.method({
+  name: "getBlockTime",
+  params: Schema.Tuple([JsonRpc.BigIntFromInt]),
+  // `null` when the node has no time for the block
+  result: Schema.NullOr(Schema.BigInt)
+})
+
+/**
+ * The largest `limit` of `getBlocksWithLimit`: `MAX_GET_CONFIRMED_BLOCKS_RANGE` in
+ * https://github.com/anza-xyz/agave/blob/master/rpc-client-types/src/request.rs, above which `get_blocks_with_limit`
+ * in https://github.com/anza-xyz/agave/blob/master/rpc/src/rpc.rs fails `-32602`.
+ *
+ * @internal
+ */
+export const maxBlocksLimit = 500_000
+
+/** @internal */
+export const getBlocksWithLimit = JsonRpc.method({
+  name: "getBlocksWithLimit",
+  params: Schema.Tuple([JsonRpc.BigIntFromInt, Schema.Int, Schema.Struct({ commitment: Commitment })]),
+  result: Schema.Array(Schema.BigInt)
+})
+
+/** @internal */
+export const getTokenAccountsByOwner = JsonRpc.method({
+  name: "getTokenAccountsByOwner",
+  params: Schema.Tuple([
+    SolanaAddress,
+    Schema.Union([Schema.Struct({ mint: SolanaAddress }), Schema.Struct({ programId: SolanaAddress })]),
+    Schema.Struct({
+      commitment: Commitment,
+      encoding: Schema.Literal("base64"),
+      // no account data: the reply lists the accounts only
+      dataSlice: Schema.Struct({ offset: Schema.Literal(0), length: Schema.Literal(0) }),
+      minContextSlot: JsonRpc.optionalOmitted(JsonRpc.BigIntFromInt)
+    })
+  ]),
+  result: Schema.Struct({
+    context: Schema.Struct({ slot: Schema.BigInt }),
+    value: Schema.Array(Schema.Struct({
+      pubkey: SolanaAddress,
+      // `data`, `executable`, `rentEpoch` (u64, often its maximum) and `space` kept raw
+      account: Schema.StructWithRest(Schema.Struct({ owner: SolanaAddress, lamports: Schema.BigInt }), [Rest])
+    }))
+  })
+})
+
+/** @internal */
 export const getSignaturesForAddress = JsonRpc.method({
   name: "getSignaturesForAddress",
   params: Schema.Tuple([

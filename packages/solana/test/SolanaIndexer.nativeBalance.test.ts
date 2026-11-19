@@ -104,6 +104,9 @@ const fakeRpc = (options: {
       getSlot: () => call("getSlot", () => state.head),
       getBlockHeight: () => Effect.die("unused"),
       getEpochInfo: () => Effect.die("unused"),
+      getBlockTime: () => Effect.die("unused"),
+      getBlocksWithLimit: () => Effect.die("unused"),
+      getTokenAccountsByOwner: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: ({ address }) =>
         call("getBalance", () => {
