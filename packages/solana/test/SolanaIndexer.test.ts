@@ -85,8 +85,11 @@ const setup = (options: {
       if (options.lagging?.includes(name)) {
         return reply(json.id, { error: { code: -32016, message: "min context slot" } })
       }
-      const start = options.history.findIndex((e) => e.signature === config.before) + 1
-      return reply(json.id, { result: options.history.slice(start, start + (config.limit ?? 1000)) })
+      const index = options.history.findIndex((e) => e.signature === config.before)
+      if (config.before !== undefined && index === -1) {
+        return reply(json.id, { result: [] })
+      }
+      return reply(json.id, { result: options.history.slice(index + 1, index + 1 + (config.limit ?? 1000)) })
     }
     if (json.method === "getSlot" && options.head !== undefined) {
       return reply(json.id, { result: options.head })
@@ -439,6 +442,96 @@ const allCalls = [
   "getSignaturesForAddress",
   ...chain.map((_, i) => `getTransaction ${i}`)
 ]
+
+describe("SolanaIndexer.fetchTransactionBatch", () => {
+  // 5 signatures per slot from slot 10000 down to 9501: the pages end at slots 9801 and 9601, then a short page
+  const busy = Array.from({ length: 2500 }, (_, i) => entry(i, 10_000 - Math.floor(i / 5)))
+  const window = (fromBlock: number, toBlock: number) => ({
+    address: EUTBL,
+    fromBlock: BigInt(fromBlock),
+    toBlock: BigInt(toBlock)
+  })
+  const befores = (pages: ReadonlyArray<string>) =>
+    pages.map((page): string | undefined => JSON.parse(page.slice(page.indexOf(" ") + 1)).before)
+  const anchors = (...ns: ReadonlyArray<number>) =>
+    ns.map((n) => ({ signature: signature(n), slot: BigInt(10_000 - Math.floor(n / 5)) }))
+
+  it.effect("resumes the next range below the lowest cursor entry above it, with the transactions of a listing from the head", () => {
+    const { pages, run } = setup({ history: busy, synthetic: busy })
+    return run((indexer) =>
+      Effect.gen(function*() {
+        const first = yield* indexer.fetchTransactionBatch(window(9501, 9502))
+        const listed = pages.length
+        const second = yield* indexer.fetchTransactionBatch(window(9503, 9503), { cursor: first.cursor })
+        const resumed = pages.slice(listed)
+        const fromHead = yield* indexer.fetchTransactions(window(9503, 9503))
+        return { first, second, resumed, fromHead }
+      })
+    ).pipe(Effect.map(({ first, fromHead, resumed, second }) => {
+      expect(first.transactions.map((tx) => tx.slot)).toStrictEqual(
+        [9501, 9501, 9501, 9501, 9501, 9502, 9502, 9502, 9502, 9502].map(BigInt)
+      )
+      expect(first.cursor).toStrictEqual({ address: EUTBL, signatures: anchors(1999, 999) })
+      expect(befores(resumed)).toStrictEqual([signature(1999)])
+      expect(second).toMatchObject({ fromBlock: BigInt(9503), toBlock: BigInt(9503) })
+      expect(second.transactions).toStrictEqual(fromHead)
+      expect(second.cursor).toStrictEqual(first.cursor)
+    }))
+  })
+
+  it.effect("skips a cursor entry at toBlock, which would hide the signatures of its slot", () => {
+    const { pages, run } = setup({ history: busy, synthetic: busy })
+    return run((indexer) =>
+      indexer.fetchTransactionBatch(window(9601, 9601), { cursor: { address: EUTBL, signatures: anchors(1999, 999) } })
+    ).pipe(Effect.map((batch) => {
+      expect(befores(pages)).toStrictEqual([signature(999), signature(1999)])
+      expect(batch.transactions.map((tx) => tx.signature)).toStrictEqual(
+        [1999, 1998, 1997, 1996, 1995].map(signature)
+      )
+      expect(batch.cursor.signatures).toStrictEqual(anchors(999))
+    }))
+  })
+
+  it.effect("lists from the head when the node does not know the cursor entry", () => {
+    const { pages, run } = setup({ history: busy, synthetic: busy })
+    const unknown = { signature: SolanaTransactionHash.make(UNKNOWN_TX), slot: BigInt(9900) }
+    return run((indexer) =>
+      Effect.all([
+        indexer.fetchTransactionBatch(window(9503, 9503), { cursor: { address: EUTBL, signatures: [unknown] } }),
+        indexer.fetchTransactions(window(9503, 9503))
+      ])
+    ).pipe(Effect.map(([batch, fromHead]) => {
+      expect(befores(pages).slice(0, 4)).toStrictEqual([UNKNOWN_TX, undefined, signature(999), signature(1999)])
+      expect(batch.transactions).toStrictEqual(fromHead)
+      expect(batch.cursor.signatures).toStrictEqual(anchors(1999, 999))
+    }))
+  })
+
+  it.effect("ignores a cursor of another address", () => {
+    const { pages, run } = setup({ history: busy, synthetic: busy })
+    const cursor = {
+      address: SolanaAddress.make("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"),
+      signatures: anchors(1999)
+    }
+    return run((indexer) => indexer.fetchTransactionBatch(window(9503, 9503), { cursor })).pipe(
+      Effect.map((batch) => {
+        expect(befores(pages)).toStrictEqual([undefined, signature(999), signature(1999)])
+        expect(batch.cursor).toStrictEqual({ address: EUTBL, signatures: anchors(1999, 999) })
+      })
+    )
+  })
+
+  it.effect("returns the cursor without a call when fromBlock > toBlock", () => {
+    const { pages, run } = setup({ history: busy })
+    const cursor = { address: EUTBL, signatures: anchors(1999) }
+    return run((indexer) => indexer.fetchTransactionBatch(window(9503, 9502), { cursor })).pipe(
+      Effect.map((batch) => {
+        expect(batch).toStrictEqual({ fromBlock: BigInt(9503), toBlock: BigInt(9502), transactions: [], cursor })
+        expect(pages).toStrictEqual([])
+      })
+    )
+  })
+})
 
 describe("SolanaIndexer.streamTransactions", () => {
   it.effect("catches up in groups of maxBatchSize without splitting a slot, tiling the range up to toBlock", () => {

@@ -6,7 +6,8 @@
  *
  * `getSignaturesForAddress` takes no slot range, so a range is paged from the head backwards until it passes
  * `fromBlock`: the cost grows with the history of the address since `fromBlock`, then each transaction costs one
- * `getTransaction`. A failure fails the whole call, and the caller retries the same range.
+ * `getTransaction`. A failure fails the whole call, and the caller retries the same range. Over consecutive ranges,
+ * `fetchTransactionBatch` returns a cursor from which the next range is paged instead of the head.
  *
  * @example
  * ```ts
@@ -108,6 +109,34 @@ export interface SolanaIndexerBatch<Encoding extends SolanaTransactionEncoding =
 }
 
 /**
+ * Where {@link SolanaIndexer.Service.fetchTransactionBatch} resumes listing the signatures of `address`: the last
+ * signature of each full page read above the previous range, oldest first.
+ *
+ * A cursor only saves pages: the call skips entries at or below its `toBlock`, ignores a cursor of another address,
+ * and lists from the head again when the node no longer knows the entry it starts from.
+ *
+ * @since 0.4.0
+ * @category models
+ */
+export interface SolanaSignatureCursor {
+  readonly address: SolanaAddress
+  readonly signatures: ReadonlyArray<Pick<SolanaSignatureInfo, "signature" | "slot">>
+}
+
+/**
+ * The transactions of slots `[fromBlock, toBlock]` returned by {@link SolanaIndexer.Service.fetchTransactionBatch},
+ * with the cursor to pass to the call over the next range.
+ *
+ * @since 0.4.0
+ * @category models
+ */
+export interface SolanaIndexerCursorBatch<Encoding extends SolanaTransactionEncoding = "base64">
+  extends SolanaIndexerBatch<Encoding>
+{
+  readonly cursor: SolanaSignatureCursor
+}
+
+/**
  * The {@link SolanaIndexer.Service.streamTransactions} options, `encoding` aside. `toBlock`, `poll` and `retry` are
  * described in
  * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
@@ -172,6 +201,24 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
       filter: SolanaIndexerFilter,
       options: { readonly encoding: Encoding }
     ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<Encoding>>, SolanaRpcError>
+  }
+  /**
+   * The transactions of `fetchTransactions`, with a cursor for the next range. Over consecutive ascending ranges,
+   * passing each returned `cursor` to the next call lists every signature page about once instead of paging from the
+   * head each time.
+   */
+  readonly fetchTransactionBatch: {
+    (
+      filter: SolanaIndexerFilter,
+      options?: {
+        readonly encoding?: "base64" | undefined
+        readonly cursor?: SolanaSignatureCursor | undefined
+      }
+    ): Effect.Effect<SolanaIndexerCursorBatch, SolanaRpcError>
+    <Encoding extends SolanaTransactionEncoding>(
+      filter: SolanaIndexerFilter,
+      options: { readonly encoding: Encoding; readonly cursor?: SolanaSignatureCursor | undefined }
+    ): Effect.Effect<SolanaIndexerCursorBatch<Encoding>, SolanaRpcError>
   }
   /**
    * The transactions touching `filter.address` from slot `fromBlock` on, in batches of at most `maxBatchSize`
@@ -307,10 +354,11 @@ export const layer = (options: {
         Effect.map((slot) => Confirmations.lastConfirmedBlock(slot, confirmations)),
         Effect.withSpan("SolanaIndexer.lastConfirmedBlock")
       )
-      // the signatures of `address`, newest first, a page read only when the previous one is consumed
-      const signatures = (address: SolanaAddress, minContextSlot: bigint) =>
+      // the signature pages of `address` older than `before` (from the head when none), newest first, a page read only
+      // when the previous one is consumed
+      const pages = (address: SolanaAddress, minContextSlot: bigint, before: Option.Option<SolanaTransactionHash>) =>
         Stream.paginate(
-          Option.none<SolanaTransactionHash>(),
+          before,
           (before) =>
             rpc.getSignaturesForAddress({
               address,
@@ -321,21 +369,52 @@ export const layer = (options: {
             }).pipe(Effect.map((page) => {
               const last = page.at(-1)
               return [
-                page,
+                [page],
                 last === undefined || page.length < PAGE_SIZE ? Option.none() : Option.some(Option.some(last.signature))
               ] as const
             }))
         )
-      // the signatures of `[fromBlock, toBlock]` in chain order, paged from the head back to the first short page or
-      // the first page reaching below `fromBlock`
-      const fetchSignatures = (filter: SolanaIndexerFilter) =>
-        signatures(filter.address, filter.toBlock).pipe(
-          Stream.takeWhile(({ slot }) => slot >= filter.fromBlock),
-          Stream.runCollect,
+      const signatures = (address: SolanaAddress, minContextSlot: bigint) =>
+        pages(address, minContextSlot, Option.none()).pipe(Stream.flattenIterable)
+      // the pages down to the first short page or the first page reaching below `fromBlock`
+      const listPages = (filter: SolanaIndexerFilter, before: Option.Option<SolanaTransactionHash>) =>
+        pages(filter.address, filter.toBlock, before).pipe(
+          Stream.takeUntil((page) => {
+            const last = page.at(-1)
+            return last === undefined || last.slot < filter.fromBlock
+          }),
+          Stream.runCollect
+        )
+      // the signatures of `[fromBlock, toBlock]` in chain order, and the cursor past them. A listing from a cursor
+      // entry above `toBlock` reads the same signatures of the range as a listing from the head
+      const fetchSignatures = Effect.fnUntraced(function*(
+        filter: SolanaIndexerFilter,
+        cursor: SolanaSignatureCursor["signatures"]
+      ) {
+        const above = Arr.filter(cursor, ({ slot }) => slot > filter.toBlock)
+        const resumed = Arr.isReadonlyArrayNonEmpty(above)
+          ? yield* listPages(filter, Option.some(above[0].signature))
+          : []
+        // Agave answers an unknown `before` with an empty page (`get_confirmed_signatures_for_address2` in
+        // `ledger/src/blockstore.rs`), so an empty first page lists from the head again
+        const known = (resumed[0]?.length ?? 0) > 0
+        const read = known ? resumed : yield* listPages(filter, Option.none())
+        // each page but the last was followed by the page older than its last signature
+        const ends = read.slice(0, -1).flatMap((page) => {
+          const last = page.at(-1)
+          return last !== undefined && last.slot > filter.toBlock
+            ? [{ signature: last.signature, slot: last.slot }]
+            : []
+        })
+        return {
           // newest first, so reversed slots ascend. The order within a slot is undocumented: reversing it is a best
           // guess at execution order (`transactionIndex`, which some providers add, is not in the RPC model)
-          Effect.map((signatures) => Arr.reverse(Arr.filter(signatures, ({ slot }) => slot <= filter.toBlock)))
-        )
+          signatures: Arr.reverse(
+            Arr.filter(read.flat(), ({ slot }) => slot >= filter.fromBlock && slot <= filter.toBlock)
+          ),
+          cursor: [...Arr.reverse(ends), ...(known ? above : [])]
+        }
+      })
       const fetchEach = (signatures: ReadonlyArray<SolanaSignatureInfo>, encoding: SolanaTransactionEncoding) =>
         Effect.forEach(signatures, ({ err, signature }) =>
           rpc.getTransaction({ signature, commitment: COMMITMENT, encoding }).pipe(
@@ -346,7 +425,23 @@ export const layer = (options: {
           if (filter.fromBlock > filter.toBlock) {
             return []
           }
-          return yield* fetchEach(yield* fetchSignatures(filter), encoding)
+          return yield* fetchEach((yield* fetchSignatures(filter, [])).signatures, encoding)
+        }
+      )
+      const fetchBatch = Effect.fn("SolanaIndexer.fetchTransactionBatch")(
+        function*(
+          filter: SolanaIndexerFilter,
+          encoding: SolanaTransactionEncoding,
+          cursor: SolanaSignatureCursor | undefined
+        ) {
+          const { fromBlock, toBlock } = filter
+          const entries = cursor?.address === filter.address ? cursor.signatures : []
+          if (fromBlock > toBlock) {
+            return { fromBlock, toBlock, transactions: [], cursor: { address: filter.address, signatures: entries } }
+          }
+          const listed = yield* fetchSignatures(filter, entries)
+          const transactions = yield* fetchEach(listed.signatures, encoding)
+          return { fromBlock, toBlock, transactions, cursor: { address: filter.address, signatures: listed.cursor } }
         }
       )
 
@@ -363,6 +458,24 @@ export const layer = (options: {
         { encoding = "base64" }: { readonly encoding?: SolanaTransactionEncoding | undefined } = {}
       ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<SolanaTransactionEncoding>>, SolanaRpcError> {
         return fetchRange(filter, encoding)
+      }
+
+      function fetchTransactionBatch(
+        filter: SolanaIndexerFilter,
+        options?: { readonly encoding?: "base64" | undefined; readonly cursor?: SolanaSignatureCursor | undefined }
+      ): Effect.Effect<SolanaIndexerCursorBatch, SolanaRpcError>
+      function fetchTransactionBatch<Encoding extends SolanaTransactionEncoding>(
+        filter: SolanaIndexerFilter,
+        options: { readonly encoding: Encoding; readonly cursor?: SolanaSignatureCursor | undefined }
+      ): Effect.Effect<SolanaIndexerCursorBatch<Encoding>, SolanaRpcError>
+      function fetchTransactionBatch(
+        filter: SolanaIndexerFilter,
+        { cursor, encoding = "base64" }: {
+          readonly encoding?: SolanaTransactionEncoding | undefined
+          readonly cursor?: SolanaSignatureCursor | undefined
+        } = {}
+      ): Effect.Effect<SolanaIndexerCursorBatch<SolanaTransactionEncoding>, SolanaRpcError> {
+        return fetchBatch(filter, encoding, cursor)
       }
 
       function streamTransactions(
@@ -406,8 +519,8 @@ export const layer = (options: {
               if (next > end) {
                 return Effect.succeed([[], Option.none()] as const)
               }
-              return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }).pipe(
-                Effect.map((signatures): Step =>
+              return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }, []).pipe(
+                Effect.map(({ signatures }): Step =>
                   Arr.isReadonlyArrayNonEmpty(signatures)
                     ? [[], Option.some({ next, cap: end, groups: groupBySlot(signatures, maxBatchSize) })]
                     : [[{ fromBlock: next, toBlock: end, transactions: [] }], after(end, end, [])]
@@ -522,6 +635,7 @@ export const layer = (options: {
       return SolanaIndexer.of({
         lastConfirmedBlock,
         fetchTransactions,
+        fetchTransactionBatch,
         streamTransactions,
         fetchNativeBalance,
         streamNativeBalance
