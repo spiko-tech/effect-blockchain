@@ -134,7 +134,8 @@ export interface SolanaSignatureInfo {
 
 /**
  * The `getTransaction` encodings. `base64` is the signed wire transaction, for the `@solana/kit` decoders (e.g.
- * `getTransactionDecoder`) and for storing the exact bytes. `json` splits it into signatures, account keys and compiled
+ * `getTransactionDecoder`, which decodes version 1 in `@solana/kit` 8.6.0, where `TransactionVersion` is
+ * `'legacy' | 0 | 1`) and for storing the exact bytes. `json` splits it into signatures, account keys and compiled
  * instructions; `jsonParsed` is not offered, as its shape depends on the programs the node knows.
  *
  * @since 0.1.0
@@ -149,14 +150,15 @@ export type SolanaTransactionEncoding = "base64" | "json"
  * @since 0.1.0
  * @category models
  */
-export interface SolanaCompiledInstruction {
+export type SolanaCompiledInstruction = {
   readonly programIdIndex: number
   readonly accounts: ReadonlyArray<number>
   readonly data: string
 }
 
 /**
- * A `json` transaction. `addressTableLookups` is absent from legacy transactions.
+ * A `json` transaction. `addressTableLookups` is absent from legacy and version 1 transactions, and every other message
+ * field (`transactionConfig` on version 1) is kept as raw JSON, integers as decimal strings.
  *
  * @since 0.1.0
  * @category models
@@ -177,6 +179,7 @@ export interface SolanaJsonTransaction {
       readonly writableIndexes: ReadonlyArray<number>
       readonly readonlyIndexes: ReadonlyArray<number>
     }>
+    readonly [field: string]: SolanaRpcJson | undefined
   }
 }
 
@@ -451,8 +454,8 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
     query: SolanaSignaturesQuery
   ) => Effect.Effect<ReadonlyArray<SolanaSignatureInfo>, SolanaRpcError>
   /**
-   * `getTransaction` in `encoding`, `base64` by default, versioned transactions included. A transaction the endpoint
-   * lacks fails `Pruned`.
+   * `getTransaction` in `encoding`, `base64` by default, for legacy, version 0 and version 1 transactions. A
+   * transaction the endpoint lacks fails `Pruned`.
    */
   readonly getTransaction: {
     (
@@ -575,7 +578,7 @@ export const layer = (options: {
         rpc.call(endpoint, RpcMethods.getTransaction(encoding), [signature, {
           commitment,
           encoding,
-          maxSupportedTransactionVersion: 0
+          maxSupportedTransactionVersion: RpcMethods.maxSupportedTransactionVersion
         }]).pipe(
           Effect.flatMap((tx) =>
             tx === null

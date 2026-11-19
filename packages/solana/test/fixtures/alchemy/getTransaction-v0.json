@@ -1,7 +1,7 @@
 {
   "provider": "alchemy",
   "network": "Solana",
-  "recordedAt": "2026-11-06",
+  "recordedAt": "2026-11-19",
   "request": {
     "method": "getTransaction",
     "params": [
@@ -9,7 +9,7 @@
       {
         "commitment": "finalized",
         "encoding": "base64",
-        "maxSupportedTransactionVersion": 0
+        "maxSupportedTransactionVersion": 1
       }
     ]
   },

@@ -146,7 +146,7 @@ describe("SolanaRpc", () => {
       expect(params).toStrictEqual([SIGNATURE, {
         commitment: "confirmed",
         encoding: "base64",
-        maxSupportedTransactionVersion: 0
+        maxSupportedTransactionVersion: 1
       }])
       expect(tx).toStrictEqual({
         slot: BigInt(12),
@@ -192,7 +192,7 @@ describe("SolanaRpc", () => {
       expect(params[0]).toStrictEqual([SIGNATURE, {
         commitment: "confirmed",
         encoding: "json",
-        maxSupportedTransactionVersion: 0
+        maxSupportedTransactionVersion: 1
       }])
       expect(legacy?.transaction.message).toStrictEqual({ ...message, instructions })
       expect(v0?.transaction.message).toStrictEqual({ ...message, instructions, addressTableLookups: lookups })

@@ -12,6 +12,8 @@ const TX_1 = "2ijR446DGZ3zFMDdp5JrbonSpRwrvN4bGK7oGiLpn5DpR9eCFHZjMPh89feRiuygcV
 const TX_2 = "2X2K6U3mUT7PFkcuh3N3u5T7ZaVdYKZh9eEHjfD4U92sYLqduHddwbCDDbZhyQbZZjMPdeKCzLEiNLR2LDWZzake"
 // a v0 swap loading 7 writable and 13 readonly addresses from lookup tables
 const TX_V0 = "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRGfurA7J4yk1cZY4Ybs4J59NF"
+// a v1 transaction on the USDC mint, slot 471288908: a `transactionConfig` and no lookup tables
+const TX_V1 = "5Z8AvFjGGhuHVN8DwFGY1Q5uYifPYfXAHYia2Bfx4WTzhr3XoGbpKKrmwHHRsoGcVST7sSAJ4itWwCmtkSuBcL5S"
 // a Binance hot wallet: its balance moves on every recording
 const BINANCE = "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
 // well-formed, never sent on chain
@@ -29,7 +31,7 @@ const TRANSFER_UNFUNDED =
 const FUTURE_SLOT = 999_999_999_999
 
 const finalized = { commitment: "finalized" }
-const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }
+const base64 = { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 1 }
 const json = { ...base64, encoding: "json" }
 // the signatures are zeroes and the blockhash a placeholder: the node skips the first and replaces the second
 const simulation = { encoding: "base64", ...finalized, sigVerify: false, replaceRecentBlockhash: true }
@@ -54,6 +56,8 @@ const cases: ReadonlyArray<Case> = [
   { name: "getTransaction-eutbl-2-json", method: "getTransaction", params: [TX_2, json] },
   { name: "getTransaction-v0", method: "getTransaction", params: [TX_V0, base64] },
   { name: "getTransaction-v0-json", method: "getTransaction", params: [TX_V0, json] },
+  { name: "getTransaction-v1", method: "getTransaction", params: [TX_V1, base64] },
+  { name: "getTransaction-v1-json", method: "getTransaction", params: [TX_V1, json] },
   { name: "getBalance", method: "getBalance", params: [BINANCE, finalized] },
   { name: "getTransaction-unknown", method: "getTransaction", params: [UNKNOWN_TX, base64] },
   {
