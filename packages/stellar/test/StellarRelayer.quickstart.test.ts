@@ -135,8 +135,12 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
     Effect.gen(function*() {
       const relayer = yield* StellarRelayer.StellarRelayer
       const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
-      const send = Effect.fnUntraced(function*(operation: string) {
-        const { hash, maxLedger, signed } = yield* relayer.sign({ signer, operations: [operation] })
+      const send = Effect.fnUntraced(function*(operation: string, resourceFeeMultiplier?: number) {
+        const { hash, maxLedger, signed } = yield* relayer.sign({
+          signer,
+          operations: [operation],
+          resourceFeeMultiplier
+        })
         yield* relayer.broadcast({ signed })
         return yield* relayer.awaitConfirmation({ hash, maxLedger, poll })
       })
@@ -149,6 +153,7 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
           args: [new Address(from).toScVal(), new Address(receiver).toScVal(), nativeToScVal(1, { type: "i128" })]
         }).toXdr("base64")
       expect(yield* send(call("transfer", signer.address))).toMatchObject({ _tag: "Confirmed" })
+      expect(yield* send(call("transfer", signer.address), 1.5)).toMatchObject({ _tag: "Confirmed" })
       expect(yield* Effect.flip(send(call("transfer", receiver)))).toMatchObject({
         _tag: "StellarSimulationError",
         reason: { _tag: "UnsupportedAuth" }

@@ -81,6 +81,8 @@ interface Node {
   readonly sent?: Pick<StellarRpc.StellarSentTransaction, "status" | "errorResultXdr">
   readonly inLedger?: boolean
   readonly simulation?: StellarRpc.StellarSimulation
+  // the answer from the second simulation on, `simulation` by default
+  readonly resimulation?: StellarRpc.StellarSimulation
 }
 
 const setup = <E = never>(
@@ -114,8 +116,10 @@ const setup = <E = never>(
       }),
       simulateTransaction: () =>
         Effect.sync(() => {
+          const again = calls.includes("simulateTransaction")
           calls.push("simulateTransaction")
-          return node.simulation ?? { error: "unused", latestLedger: BigInt(100) }
+          return (again ? node.resimulation : undefined) ?? node.simulation ??
+            { error: "unused", latestLedger: BigInt(100) }
         }),
       sendTransaction: () =>
         Effect.sync(() => {
@@ -183,9 +187,9 @@ const ADDRESS_CREDENTIALS = new xdr.SorobanAddressCredentials({
   signature: xdr.ScVal.scvVoid()
 })
 const ADDRESS_AUTH = authEntry(xdr.SorobanCredentials.sorobanCredentialsAddress(ADDRESS_CREDENTIALS))
-const simulation = (auth: xdr.SorobanAuthorizationEntry): StellarRpc.StellarSimulation => ({
-  transactionData: new SorobanDataBuilder().setResourceFee("5000").build().toXdr("base64"),
-  minResourceFee: BigInt(5000),
+const simulation = (auth: xdr.SorobanAuthorizationEntry, resourceFee = 5000): StellarRpc.StellarSimulation => ({
+  transactionData: new SorobanDataBuilder().setResourceFee(resourceFee).build().toXdr("base64"),
+  minResourceFee: BigInt(resourceFee),
   results: [{ auth: [auth.toXdr("base64")], xdr: xdr.ScVal.scvVoid().toXdr("base64") }],
   latestLedger: BigInt(100)
 })
@@ -379,6 +383,39 @@ describe("StellarRelayer sign of a Soroban invocation", () => {
       expect(decode(explicit.signed).fee).toBe("5100")
     }))
 
+  it.effect("multiplies the resource fee by the layer's resourceFeeMultiplier, or the call's, rounded up", () =>
+    Effect.gen(function*() {
+      const fees = (signed: string) => {
+        const transaction = decode(signed)
+        return [transaction.fee, transaction.toEnvelope().value.tx.ext.value?.resourceFee]
+      }
+      const layered = setup({ sequence: 41, simulation: simulation(SOURCE_AUTH, 5001) }, { resourceFeeMultiplier: 1.5 })
+      const margin = yield* layered.run((relayer) => relayer.sign({ signer, operations }))
+      // 5001 * 1.5 = 7501.5, on top of the inclusion fee of 9999
+      expect(fees(margin.signed)).toStrictEqual(["17501", BigInt(7502)])
+      const call = yield* layered.run((relayer) => relayer.sign({ signer, operations, resourceFeeMultiplier: 2 }))
+      expect(fees(call.signed)).toStrictEqual(["20001", BigInt(10002)])
+      const configured = yield* setup(
+        { sequence: 41, simulation: simulation(SOURCE_AUTH) },
+        undefined,
+        StellarRelayer.layerConfig({ resourceFeeMultiplier: Config.succeed(1.2) })
+      ).run((relayer) => relayer.sign({ signer, operations }))
+      expect(fees(configured.signed)).toStrictEqual(["15999", BigInt(6000)])
+    }))
+
+  it.effect("fails with a StellarSignerError on a resourceFeeMultiplier below 1", () =>
+    Effect.gen(function*() {
+      const { calls, run } = setup({ sequence: 41, simulation: simulation(SOURCE_AUTH) }, {
+        resourceFeeMultiplier: 0.9
+      })
+      for (const resourceFeeMultiplier of [undefined, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const error = yield* Effect.flip(run((relayer) => relayer.sign({ signer, operations, resourceFeeMultiplier })))
+        expect(error._tag).toBe("StellarSignerError")
+        expect(String(error.cause)).toContain("resourceFeeMultiplier")
+      }
+      expect(calls).toStrictEqual([])
+    }))
+
   it.effect("keeps the authorization entries the operation comes with", () =>
     Effect.gen(function*() {
       const authorized = withAuth([ADDRESS_AUTH])
@@ -436,6 +473,24 @@ describe("StellarRelayer sign of a Soroban invocation", () => {
       expect(decode(signed.signed).signatures.map((signature) => signature.hint.toBytes())).toStrictEqual([
         keypair.signatureHint()
       ])
+    }))
+
+  it.effect("applies resourceFeeMultiplier to the resource fee of the simulation after signing address entries", () =>
+    Effect.gen(function*() {
+      const owner = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2))
+      const cosigner = StellarSigner.fromHashSigner({
+        address: StellarAccountAddress.make(owner.publicKey()),
+        signHash: (hash) => Effect.succeed(new Uint8Array(owner.sign(Buffer.from(hash.slice(2), "hex"))))
+      })
+      const signed = yield* setup({
+        sequence: 41,
+        simulation: simulation(ADDRESS_AUTH),
+        resimulation: simulation(ADDRESS_AUTH, 6001)
+      }).run((relayer) => relayer.sign({ signer, cosigners: [cosigner], operations, resourceFeeMultiplier: 1.5 }))
+      const transaction = decode(signed.signed)
+      // 6001 * 1.5 = 9001.5, on top of the inclusion fee of 9999
+      expect(transaction.toEnvelope().value.tx.ext.value?.resourceFee).toBe(BigInt(9002))
+      expect(transaction.fee).toBe("19001")
     }))
 
   it.effect("fails on an address entry of a signer without signAuthEntry or of no signer", () =>
