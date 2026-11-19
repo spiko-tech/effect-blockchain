@@ -197,6 +197,42 @@ describe("EvmRpc", () => {
     )
   })
 
+  it.effect("encodes call params, decodes its data and falls back on a revert", () => {
+    const sent: Array<ReadonlyArray<Schema.Json>> = []
+    const revert = (params: ReadonlyArray<Schema.Json>) => {
+      sent.push(params)
+      return { error: { code: 3, message: "execution reverted", data: "0x08c379a0" } }
+    }
+    const { calls, run } = setup({
+      a: { eth_call: revert },
+      b: {
+        eth_call: (params) => {
+          sent.push(params)
+          return { result: "0x" + "AB".repeat(32) }
+        }
+      }
+    })
+    const data = EvmHexData.make("0x313ce567")
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.call({ to: OTHER, data, blockTag: "latest" })).toBe("0x" + "ab".repeat(32))
+        expect(sent).toStrictEqual([[{ to: OTHER, data }, "latest"], [{ to: OTHER, data }, "latest"]])
+        expect(calls).toStrictEqual(["a:eth_chainId", "a:eth_call", "b:eth_chainId", "b:eth_call"])
+      })
+    ).pipe(
+      Effect.andThen(
+        setup({ a: { eth_call: revert }, b: { eth_call: revert } }).run((rpc) =>
+          Effect.flip(rpc.call({ to: OTHER, data, from: TOKEN, blockTag: "pending" }))
+        )
+      ),
+      Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: 3, endpoint: "b" })
+        expect(error.cause).toMatchObject({ errors: [{}, { cause: { message: "execution reverted" } }] })
+        expect(sent[sent.length - 1]).toStrictEqual([{ from: TOKEN, to: OTHER, data }, "pending"])
+      })
+    )
+  })
+
   it.effect("does not fall back on an unknown transaction, and rejects a receipt without a status", () => {
     const { calls, run } = setup({
       a: {

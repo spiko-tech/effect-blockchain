@@ -172,6 +172,22 @@ describe("EvmRpc fixtures", () => {
         })
       )))
 
+    it.effect(`fixture: ${provider} call`, () =>
+      setup([{ name: provider, cases: ["chainId", "call"] }]).run((rpc) =>
+        rpc.call({ to: USDC, data: EvmHexData.make("0x313ce567"), blockTag: "latest" })
+      ).pipe(Effect.map((data) => expect(data).toBe(`0x${"6".padStart(64, "0")}`))))
+
+    it.effect(`fixture: ${provider} call-reverted`, () =>
+      setup([{ name: provider, cases: ["chainId", "call-reverted"] }]).run((rpc) =>
+        Effect.flip(rpc.call({ from: BURN, to: USDC, data: OVERDRAWN, blockTag: "latest" }))
+      ).pipe(Effect.map((error) =>
+        expect(error).toMatchObject({
+          reason: { _tag: "Rejected" },
+          code: 3,
+          cause: { message: "execution reverted: ERC20: transfer amount exceeds balance" }
+        })
+      )))
+
     // read at the head of each recording: only the shape is stable
     it.effect(`fixture: ${provider} feeHistory`, () =>
       setup([{ name: provider, cases: ["chainId", "feeHistory"] }]).run((rpc) =>

@@ -1,4 +1,5 @@
 import { EvmAddress } from "@effect-blockchain/evm/EvmAddress"
+import { EvmHexData } from "@effect-blockchain/evm/EvmHexData"
 import * as EvmRelayer from "@effect-blockchain/evm/EvmRelayer"
 import * as EvmRpc from "@effect-blockchain/evm/EvmRpc"
 import * as EvmSigner from "@effect-blockchain/evm/EvmSigner"
@@ -108,4 +109,19 @@ describe.skipIf(url === "")("EvmRelayer on Anvil", { concurrent: false }, () => 
       const unfunded = yield* Effect.flip(relayer.broadcast({ signed: poor.signed }))
       expect(unfunded).toMatchObject({ _tag: "EvmBroadcastError", reason: { _tag: "InsufficientFunds" } })
     }).pipe(Effect.ensuring(anvil("evm_setAutomine", [true])), Effect.provide(layer)))
+})
+
+describe.skipIf(url === "")("EvmRpc on Anvil", () => {
+  it.live("returns a call's data and rejects a revert", () =>
+    Effect.gen(function*() {
+      const rpc = yield* EvmRpc.EvmRpc
+      const returning = Schema.decodeSync(EvmAddress)("0x" + "2a".repeat(20))
+      // PUSH1 42 PUSH1 0 MSTORE PUSH1 32 PUSH1 0 RETURN
+      yield* anvil("anvil_setCode", [returning, "0x602a60005260206000f3"])
+      yield* anvil("anvil_setCode", [REVERTING, "0x60006000fd"])
+      const data = Schema.decodeSync(EvmHexData)("0x")
+      expect(yield* rpc.call({ to: returning, data, blockTag: "latest" })).toBe(`0x${"2a".padStart(64, "0")}`)
+      const reverted = yield* Effect.flip(rpc.call({ from: TO, to: REVERTING, data, blockTag: "pending" }))
+      expect(reverted).toMatchObject({ reason: { _tag: "Rejected" }, code: 3 })
+    }).pipe(Effect.provide(layer)))
 })
