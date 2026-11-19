@@ -295,6 +295,36 @@ describe("SolanaIndexer", () => {
     )
   })
 
+  it.effect("fetches a version 1 transaction in both encodings, and a native balance from it", () => {
+    const TX_V1_SLOT = 471288908
+    const TX_V1 = "5Z8AvFjGGhuHVN8DwFGY1Q5uYifPYfXAHYia2Bfx4WTzhr3XoGbpKKrmwHHRsoGcVST7sSAJ4itWwCmtkSuBcL5S"
+    const { run } = setup({
+      history: [{ ...entry(0, TX_V1_SLOT), signature: TX_V1 }],
+      cases: ["getTransaction-v1", "getTransaction-v1-json"],
+      head: TX_V1_SLOT + 1000
+    })
+    const block = { address: EUTBL, fromBlock: BigInt(TX_V1_SLOT), toBlock: BigInt(TX_V1_SLOT) }
+    // the fee payer, then the last static key (index 14): no address is loaded from a lookup table
+    const cases = [
+      ["GeaTp2ihgQRMmvBc8m4cEcH3XtpknrZruuioeDy8pocD", 833606898, 833553898],
+      ["wMNFSTkir3HgyZTsB7uqu3i7FA73grFCptPXgrZjksL", 1141440, 1141440]
+    ] as const
+    return run((indexer) =>
+      Effect.gen(function*() {
+        const [base64] = yield* indexer.fetchTransactions(block)
+        const [json] = yield* indexer.fetchTransactions(block, { encoding: "json" })
+        expect(base64).toMatchObject({ signature: TX_V1, slot: BigInt(TX_V1_SLOT), meta: { fee: BigInt(8000) } })
+        expect({ ...json, transaction: null }).toStrictEqual({ ...base64, transaction: null })
+        expect(json.transaction.message.transactionConfig).toMatchObject({ computeUnitLimit: "100000" })
+        for (const [address, pre, post] of cases) {
+          const at = (block: number) =>
+            indexer.fetchNativeBalance({ address: SolanaAddress.make(address), block: BigInt(block) })
+          expect([yield* at(TX_V1_SLOT - 1), yield* at(TX_V1_SLOT)]).toStrictEqual([BigInt(pre), BigInt(post)])
+        }
+      })
+    )
+  })
+
   it.effect("lastConfirmedBlock is the finalized slot minus the confirmations, never below 0", () =>
     Effect.gen(function*() {
       const run = (confirmations?: number) =>

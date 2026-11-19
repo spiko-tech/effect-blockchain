@@ -50,6 +50,10 @@ const NumberFromBigInt = Schema.BigInt.pipe(
 
 const Indexes = Schema.Array(NumberFromBigInt)
 
+// `StructWithRest` also runs the rest schema on the typed keys, whose decoded values are not all JSON (a `bigint` fee):
+// `RpcJson` encodes those as they are, and the typed schema keeps their decoded value
+const Rest = Schema.Record(Schema.String, Schema.Union([JsonFromRpc, RpcJson]))
+
 // the `transaction` codec by encoding, checked against `SolanaEncodedTransaction` where `SolanaRpc.ts` uses it
 const transactions = {
   base64: Schema.Tuple([Schema.String, Schema.Literal("base64")]).pipe(
@@ -60,34 +64,34 @@ const transactions = {
   ),
   json: Schema.Struct({
     signatures: Schema.Array(SolanaTransactionHash),
-    message: Schema.Struct({
-      accountKeys: Schema.Array(SolanaAddress),
-      header: Schema.Struct({
-        numRequiredSignatures: NumberFromBigInt,
-        numReadonlySignedAccounts: NumberFromBigInt,
-        numReadonlyUnsignedAccounts: NumberFromBigInt
+    // the fields the library reads, typed, any other field (`transactionConfig` on version 1) kept raw
+    message: Schema.StructWithRest(
+      Schema.Struct({
+        accountKeys: Schema.Array(SolanaAddress),
+        header: Schema.Struct({
+          numRequiredSignatures: NumberFromBigInt,
+          numReadonlySignedAccounts: NumberFromBigInt,
+          numReadonlyUnsignedAccounts: NumberFromBigInt
+        }),
+        recentBlockhash: Schema.String,
+        instructions: Schema.Array(Schema.Struct({
+          programIdIndex: NumberFromBigInt,
+          accounts: Indexes,
+          data: Schema.String
+        })),
+        // absent from legacy and version 1 transactions
+        addressTableLookups: Schema.optionalKey(Schema.Array(Schema.Struct({
+          accountKey: SolanaAddress,
+          writableIndexes: Indexes,
+          readonlyIndexes: Indexes
+        })))
       }),
-      recentBlockhash: Schema.String,
-      instructions: Schema.Array(Schema.Struct({
-        programIdIndex: NumberFromBigInt,
-        accounts: Indexes,
-        data: Schema.String
-      })),
-      // absent from legacy transactions
-      addressTableLookups: Schema.optionalKey(Schema.Array(Schema.Struct({
-        accountKey: SolanaAddress,
-        writableIndexes: Indexes,
-        readonlyIndexes: Indexes
-      })))
-    })
+      [Rest]
+    )
   })
 }
 
 const Lamports = Schema.Array(Schema.BigInt)
-
-// `StructWithRest` also runs the rest schema on the typed keys, whose decoded values are not all JSON (a `bigint` fee):
-// `RpcJson` encodes those as they are, and the typed schema keeps their decoded value
-const Rest = Schema.Record(Schema.String, Schema.Union([JsonFromRpc, RpcJson]))
 
 // a field absent or `null` as the node's `OptionSerializer` writes it, see `UiTransactionStatusMeta` in
 // https://github.com/anza-xyz/agave/blob/master/transaction-status-client-types/src/lib.rs
@@ -229,6 +233,14 @@ export const getSignaturesForAddress = JsonRpc.method({
   }))
 })
 
+/**
+ * The `maxSupportedTransactionVersion` of every `getTransaction`: a ceiling, the node answers legacy, version 0 and
+ * version 1 transactions and fails `-32015` on a newer one.
+ *
+ * @internal
+ */
+export const maxSupportedTransactionVersion = 1
+
 /** @internal */
 export const getTransaction = (encoding: keyof typeof transactions) =>
   JsonRpc.method({
@@ -238,7 +250,7 @@ export const getTransaction = (encoding: keyof typeof transactions) =>
       Schema.Struct({
         commitment: Commitment,
         encoding: Schema.Literal(encoding),
-        maxSupportedTransactionVersion: Schema.Literal(0)
+        maxSupportedTransactionVersion: Schema.Literal(maxSupportedTransactionVersion)
       })
     ]),
     // `null` when the endpoint does not have the transaction

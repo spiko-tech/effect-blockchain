@@ -52,6 +52,9 @@ const UNKNOWN_TX = SolanaTransactionHash.make(
 const TX_V0 = SolanaTransactionHash.make(
   "4RDVWk5s7nJUceFyi9XivKi8BYgogvhqyGv3u4HPXiAHyq8Eu6o5QFTHUqrx48vRGfurA7J4yk1cZY4Ybs4J59NF"
 )
+const TX_V1 = SolanaTransactionHash.make(
+  "5Z8AvFjGGhuHVN8DwFGY1Q5uYifPYfXAHYia2Bfx4WTzhr3XoGbpKKrmwHHRsoGcVST7sSAJ4itWwCmtkSuBcL5S"
+)
 const FAILED_CUSTOM = SolanaTransactionHash.make(
   "65AsgMptVkfYADN4Jv4Av1SJJAErag2FnDaYE8FJGzDAejiDyJr2JUawciHHUG5ApDX38U4w3kNW48cViH7sCWyd"
 )
@@ -225,6 +228,40 @@ describe("SolanaRpc fixtures", () => {
         expect(json.meta?.loadedAddresses?.writable).toHaveLength(7)
         expect(json.meta?.loadedAddresses?.readonly).toHaveLength(13)
         expect(json.meta).toMatchObject({ err: null, fee: BigInt(9000) })
+      })
+    ))
+
+  it.effect("fixture: alchemy getTransaction-v1 and -v1-json decode, the message config kept raw", () =>
+    alchemy("getTransaction-v1", "getTransaction-v1-json").run((rpc) =>
+      Effect.gen(function*() {
+        const base64 = yield* rpc.getTransaction({ signature: TX_V1, ...finalized })
+        const json = yield* rpc.getTransaction({ signature: TX_V1, ...finalized, encoding: "json" })
+        expect({ ...json, transaction: null }).toStrictEqual({ ...base64, transaction: null })
+        expect(json.slot).toBe(BigInt(471288908))
+        expect(json.meta?.loadedAddresses).toStrictEqual({ writable: [], readonly: [] })
+        // the json message is the base64 wire message, decoded by `@solana/kit`
+        const wire = getTransactionDecoder().decode(getBase64Encoder().encode(base64.transaction))
+        const message = getCompiledTransactionMessageDecoder().decode(wire.messageBytes)
+        expect(message.version).toBe(1)
+        const { accountKeys, addressTableLookups, header, instructions, recentBlockhash, transactionConfig } =
+          json.transaction.message
+        expect({ accountKeys, header, recentBlockhash, addressTableLookups }).toStrictEqual({
+          accountKeys: message.staticAccounts,
+          header: {
+            numRequiredSignatures: message.header.numSignerAccounts,
+            numReadonlySignedAccounts: message.header.numReadonlySignerAccounts,
+            numReadonlyUnsignedAccounts: message.header.numReadonlyNonSignerAccounts
+          },
+          recentBlockhash: message.lifetimeToken,
+          addressTableLookups: undefined
+        })
+        expect(instructions.length).toBeGreaterThan(0)
+        expect(transactionConfig).toStrictEqual({
+          computeUnitLimit: "100000",
+          heapSize: "32768",
+          loadedAccountsDataSizeLimit: "67108864",
+          priorityFee: "3000"
+        })
       })
     ))
 
