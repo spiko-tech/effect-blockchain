@@ -194,6 +194,18 @@ export class EvmRpc extends Context.Service<EvmRpc, {
     readonly data?: EvmHexData | undefined
   }) => Effect.Effect<bigint, EvmRpcError>
   /**
+   * `eth_call`: the data returned by a call from `from` to `to` with `data` at `blockTag`, without a transaction. A
+   * call that reverts is `Rejected` (code 3 on geth and its forks), with the node's message in `cause`.
+   *
+   * @since 0.5.0
+   */
+  readonly call: (options: {
+    readonly to: EvmAddress
+    readonly data: EvmHexData
+    readonly from?: EvmAddress | undefined
+    readonly blockTag: EvmBlockTag
+  }) => Effect.Effect<EvmHexData, EvmRpcError>
+  /**
    * `eth_feeHistory`: the fees of the `blockCount` blocks ending at `newestBlock`, with the priority fees at
    * `rewardPercentiles` (each between 0 and 100, in ascending order). A node may return fewer blocks.
    *
@@ -340,6 +352,7 @@ export const layer = (options: {
         sendRawTransaction: ({ signed }) => callOn(RpcMethods.sendRawTransaction, [signed]),
         getTransactionCount: ({ address, blockTag }) => callOn(RpcMethods.getTransactionCount, [address, blockTag]),
         estimateGas: (call) => callOn(RpcMethods.estimateGas, [call]),
+        call: ({ blockTag, ...call }) => callOn(RpcMethods.call, [call, blockTag]),
         feeHistory: ({ blockCount, newestBlock, rewardPercentiles }) =>
           callOn(RpcMethods.feeHistory, [blockCount, newestBlock, rewardPercentiles])
       })

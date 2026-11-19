@@ -97,6 +97,16 @@ export const estimateGas = JsonRpc.method({
 })
 
 /** @internal */
+export const call = JsonRpc.method({
+  name: "eth_call",
+  params: Schema.Tuple([
+    Schema.Struct({ from: JsonRpc.optionalOmitted(EvmAddress), to: EvmAddress, data: EvmHexData }),
+    BlockTag
+  ]),
+  result: EvmHexData
+})
+
+/** @internal */
 export const feeHistory = JsonRpc.method({
   name: "eth_feeHistory",
   params: Schema.Tuple([IntFromHex, BlockTag, Schema.Array(Schema.Number)]),

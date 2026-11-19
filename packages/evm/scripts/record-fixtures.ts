@@ -21,6 +21,7 @@ const BURN = "0x000000000000000000000000000000000000dead"
 const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 // `transfer(BURN, 2^255)`: more than any balance
 const OVERDRAWN = `0xa9059cbb${BURN.slice(2).padStart(64, "0")}8${"0".repeat(63)}`
+const DECIMALS = "0x313ce567"
 
 const hex = (n: number) => `0x${n.toString(16)}`
 const logsFilter = (fromBlock: string, toBlock: string, topics: Json = [TRANSFER]) => [
@@ -51,6 +52,9 @@ const cases: ReadonlyArray<Case> = [
   // 1 wei to an address without code: the 21000 gas of a plain transfer
   { name: "estimateGas", method: "eth_estimateGas", params: [{ from: FOUNDATION, to: BURN, value: "0x1" }] },
   { name: "estimateGas-reverted", method: "eth_estimateGas", params: [{ from: BURN, to: USDC, data: OVERDRAWN }] },
+  // USDC `decimals()`: 6, the same at any block
+  { name: "call", method: "eth_call", params: [{ to: USDC, data: DECIMALS }, "latest"] },
+  { name: "call-reverted", method: "eth_call", params: [{ from: BURN, to: USDC, data: OVERDRAWN }, "latest"] },
   { name: "feeHistory", method: "eth_feeHistory", params: ["0x4", "latest", [25, 75]] }
 ]
 

@@ -244,6 +244,7 @@ const fakeRpc = (
       sendRawTransaction: () => Effect.die("unused"),
       getTransactionCount: () => Effect.die("unused"),
       estimateGas: () => Effect.die("unused"),
+      call: () => Effect.die("unused"),
       feeHistory: () => Effect.die("unused"),
       getBalance: ({ blockNumber }) =>
         Effect.suspend(() => {
