@@ -1,5 +1,22 @@
 # @effect-blockchain/solana
 
+## 0.4.0
+
+### Minor Changes
+
+- [#105](https://github.com/spiko-tech/effect-blockchain/pull/105) [`94db245`](https://github.com/spiko-tech/effect-blockchain/commit/94db245363eba9b45d3a5ac818d97babfc1e90e4) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Add `getBlockTime`, `getBlocksWithLimit` and `getTokenAccountsByOwner` to `SolanaRpc`.
+  
+  - `SolanaRpc.getBlockTime({ slot })` returns the estimated production time of a block in Unix seconds, `null` when the node has no time for it. A skipped slot fails `Pruned` and a slot not produced yet fails `Lagging`.
+  - `SolanaRpc.getBlocksWithLimit({ startSlot, limit, commitment })` returns the produced slots from `startSlot` on, at most `limit`. A `limit` above 500,000 fails `Rejected` before any request.
+  - `SolanaRpc.getTokenAccountsByOwner({ owner, filter, commitment, minContextSlot? })` returns `{ slot, value }`, the token accounts of `owner` by `mint` or `programId` without their data, with the `SolanaTokenAccount` and `SolanaTokenAccounts` models.
+  
+  The `SolanaRpc` service gains members, so a hand-written fake (`SolanaRpc.of(...)`) needs the three new entries.
+
+- [#109](https://github.com/spiko-tech/effect-blockchain/pull/109) [`d066bbe`](https://github.com/spiko-tech/effect-blockchain/commit/d066bbebbd648d508620eeab84b3ca1fd6bb7337) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Page consecutive ranges from a signature cursor
+  
+  - `SolanaIndexer.fetchTransactionBatch` returns the transactions of `fetchTransactions` with a `SolanaSignatureCursor`: the last signature of each full `getSignaturesForAddress` page read above the range. Passed to the call over the next range, it starts the listing below its lowest entry above that range instead of at the head, so a backfill in ascending ranges no longer reads every newer page again for each range.
+  - A cursor never changes the transactions returned: entries at or below `toBlock` and cursors of another address are ignored, and when the node answers the starting signature with an empty page (unknown or pruned), the range is listed from the head again.
+
 ## 0.3.2
 
 ### Patch Changes
