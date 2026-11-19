@@ -301,6 +301,34 @@ export interface SolanaBalance {
 }
 
 /**
+ * A `getTokenAccountsByOwner` entry: the token account at `pubkey`, without its data. `owner` is its token program and
+ * `lamports` its balance, every other field (`executable`, `rentEpoch`, `space`...) is kept as raw JSON, integers as
+ * decimal strings.
+ *
+ * @since 0.4.0
+ * @category models
+ */
+export interface SolanaTokenAccount {
+  readonly pubkey: SolanaAddress
+  readonly account: {
+    readonly owner: SolanaAddress
+    readonly lamports: bigint
+    readonly [field: string]: SolanaRpcJson
+  }
+}
+
+/**
+ * A `getTokenAccountsByOwner` result: the token accounts (`value`) at the context `slot`.
+ *
+ * @since 0.4.0
+ * @category models
+ */
+export interface SolanaTokenAccounts {
+  readonly slot: bigint
+  readonly value: ReadonlyArray<SolanaTokenAccount>
+}
+
+/**
  * A `getEpochInfo` result: the `absoluteSlot` and `blockHeight` of one bank of the answering endpoint, and where that
  * slot stands in its `epoch` (`slotIndex` of `slotsInEpoch`).
  *
@@ -436,6 +464,33 @@ export class SolanaRpc extends Context.Service<SolanaRpc, {
   readonly getEpochInfo: (options: {
     readonly commitment: SolanaCommitment
   }) => Effect.Effect<SolanaEpochInfo, SolanaRpcError>
+  /**
+   * `getBlockTime`: the estimated production time of the block at `slot` in Unix seconds, `null` when the node has no
+   * time for it. A skipped slot fails `Pruned` (`-32007`, or `-32009` from long-term storage, where some providers
+   * answer `null` instead), and a slot not produced yet fails `Lagging` (`-32004`).
+   */
+  readonly getBlockTime: (options: {
+    readonly slot: bigint
+  }) => Effect.Effect<bigint | null, SolanaRpcError>
+  /**
+   * `getBlocksWithLimit`: the produced slots from `startSlot` on, ascending, at most `limit`. A `limit` above the
+   * node's maximum of 500,000 fails `Rejected` before any request.
+   */
+  readonly getBlocksWithLimit: (options: {
+    readonly startSlot: bigint
+    readonly limit: number
+    readonly commitment: SolanaCommitment
+  }) => Effect.Effect<ReadonlyArray<bigint>, SolanaRpcError>
+  /**
+   * `getTokenAccountsByOwner`: the token accounts of `owner` holding `mint`, or owned by the token program
+   * `programId`, without their data. `minContextSlot` works as in {@link SolanaSignaturesQuery}.
+   */
+  readonly getTokenAccountsByOwner: (options: {
+    readonly owner: SolanaAddress
+    readonly filter: { readonly mint: SolanaAddress } | { readonly programId: SolanaAddress }
+    readonly commitment: SolanaCommitment
+    readonly minContextSlot?: bigint | undefined
+  }) => Effect.Effect<SolanaTokenAccounts, SolanaRpcError>
   /**
    * `getSignatureStatuses` of at most 256 `signatures`, read from the blocks the node has processed, whatever their
    * commitment. Without `searchTransactionHistory` (sent as `false`), only the node's cache of recent slots is
@@ -616,6 +671,28 @@ export const layer = (options: {
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getBlockHeight, [{ commitment }])),
         getEpochInfo: ({ commitment }) =>
           rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getEpochInfo, [{ commitment }])),
+        getBlockTime: ({ slot }) => rpc.withFallback((endpoint) => rpc.call(endpoint, RpcMethods.getBlockTime, [slot])),
+        getBlocksWithLimit: ({ commitment, limit, startSlot }) =>
+          limit > RpcMethods.maxBlocksLimit
+            ? Effect.fail(
+              new SolanaRpcError({
+                reason: new JsonRpc.Rejected(),
+                method: RpcMethods.getBlocksWithLimit.name,
+                endpoint: "none",
+                cause: new Error(`limit ${limit} is above the maximum of ${RpcMethods.maxBlocksLimit}`)
+              })
+            )
+            : rpc.withFallback((endpoint) =>
+              rpc.call(endpoint, RpcMethods.getBlocksWithLimit, [startSlot, limit, { commitment }])
+            ),
+        getTokenAccountsByOwner: ({ filter, owner, ...config }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getTokenAccountsByOwner, [owner, filter, {
+              ...config,
+              encoding: "base64",
+              dataSlice: { offset: 0, length: 0 }
+            }]).pipe(Effect.map(({ context, value }) => ({ slot: context.slot, value })))
+          ),
         // Agave refuses a config without `searchTransactionHistory`
         getSignatureStatuses: ({ searchTransactionHistory = false, signatures }) =>
           rpc.withFallback((endpoint) =>

@@ -62,6 +62,10 @@ const FAILED_NAMED = SolanaTransactionHash.make(
   "57i2325snWTEZzhRwxfkePj15s5XTKZMEgNCaxzLzVWWjnP7soGfY66iPEm8QK5pkWSF4Y74eHsF6TwaB44ZUnDZ"
 )
 const BINANCE = SolanaAddress.make("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9")
+const USDC = SolanaAddress.make("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+const TOKEN_PROGRAM = SolanaAddress.make("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+// slots 400001264 to 400001267 were skipped
+const SKIPPED_SLOT = 400_001_264
 // unsigned v0 transfers of 1 lamport to EUTBL: from BINANCE, then from an address that holds no account
 const TRANSFER =
   "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABA0jAG1BZAFRV2dywxrzs3LT7Wy6rwamoK1c5K6qkDwTmVvRNf1zV6IwhSfE1H6LSw93Y1mp8rd/3ORnMY9EIQE4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQICAAEMAgAAAAEAAAAAAAAAAA=="
@@ -320,6 +324,64 @@ describe("SolanaRpc fixtures", () => {
     alchemy("getSignaturesForAddress-min-context-slot").run((rpc) =>
       rpc.getSignaturesForAddress({ ...page1, minContextSlot: BigInt(999_999_999_999) })
     ).pipe(Effect.map((page) => expect(page.map((s) => s.signature)[0]).toBe(TX_1))))
+
+  it.effect("fixture: alchemy getBlockTime, -skipped and -future", () =>
+    alchemy("getBlockTime", "getBlockTime-skipped", "getBlockTime-future").run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.getBlockTime({ slot: BigInt(SKIPPED_SLOT - 4) })).toBe(BigInt(1770992168))
+        // the public endpoint fails -32009 (`Pruned`) on this skipped slot, Alchemy answers `null`
+        expect(yield* rpc.getBlockTime({ slot: BigInt(SKIPPED_SLOT) })).toBeNull()
+        const error = yield* Effect.flip(rpc.getBlockTime({ slot: BigInt(999_999_999_999) }))
+        expect(error).toMatchObject({ reason: { _tag: "Lagging" }, code: -32004, method: "getBlockTime" })
+      })
+    ))
+
+  it.effect("fixture: alchemy getBlocksWithLimit", () =>
+    alchemy("getBlocksWithLimit").run((rpc) =>
+      rpc.getBlocksWithLimit({ startSlot: BigInt(SKIPPED_SLOT - 4), limit: 10, ...finalized })
+    ).pipe(
+      Effect.map((slots) =>
+        expect(slots).toStrictEqual(
+          [400001260, 400001261, 400001262, 400001263, 400001268, 400001269, 400001270, 400001271, 400001272, 400001273]
+            .map(BigInt)
+        )
+      )
+    ))
+
+  it.effect("fixture: alchemy getTokenAccountsByOwner", () =>
+    alchemy("getTokenAccountsByOwner").run((rpc) =>
+      rpc.getTokenAccountsByOwner({ owner: BINANCE, filter: { mint: USDC }, ...finalized })
+    ).pipe(
+      // the accounts and the slot move on every recording
+      Effect.map(({ slot, value }) => {
+        expect(slot >= BigInt(471326423)).toBe(true)
+        expect(value.length).toBeGreaterThan(0)
+        expect(value.every(({ account }) => account.owner === TOKEN_PROGRAM && account.lamports > BigInt(0))).toBe(true)
+        // the fields the library does not type kept as JSON, the u64 `rentEpoch` exact
+        expect(value[0]?.account).toMatchObject({
+          data: ["", "base64"],
+          executable: false,
+          rentEpoch: "18446744073709551615",
+          space: "165"
+        })
+      })
+    ))
+
+  it.effect("fixture: alchemy getTokenAccountsByOwner-min-context-slot", () =>
+    alchemy("getTokenAccountsByOwner-min-context-slot").run((rpc) =>
+      Effect.flip(
+        rpc.getTokenAccountsByOwner({
+          owner: BINANCE,
+          filter: { mint: USDC },
+          ...finalized,
+          minContextSlot: BigInt(999_999_999_999)
+        })
+      )
+    ).pipe(
+      Effect.map((error) =>
+        expect(error).toMatchObject({ reason: { _tag: "Lagging" }, code: -32016, method: "getTokenAccountsByOwner" })
+      )
+    ))
 
   it.effect("fixture: alchemy invalid-params", () =>
     alchemy("invalid-params").run((rpc) =>

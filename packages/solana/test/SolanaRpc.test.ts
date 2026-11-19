@@ -20,6 +20,7 @@ type Node = Record<
 
 const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 const ADDRESS = SolanaAddress.make("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+const OWNER = SolanaAddress.make("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9")
 const SIGNATURE = SolanaTransactionHash.make(
   "5UfDuX7WXYZdgnWkLhKnga5PsaFdMNQdi5SBPYB4RY5UBbQDN3kQz3VEABDaGbNkYPhGMaFKaLwUMcnMnEHG77v"
 )
@@ -304,6 +305,128 @@ describe("SolanaRpc", () => {
         })
       })
     )
+  })
+
+  it.effect("encodes getBlockTime and getBlocksWithLimit params", () => {
+    const seen = new Map<string, ReadonlyArray<Schema.Json>>()
+    const reply = (method: string, result: Schema.Json) => (params: ReadonlyArray<Schema.Json>) => {
+      seen.set(method, params)
+      return { result }
+    }
+    const { run } = setup({
+      a: {
+        getBlockTime: reply("getBlockTime", 1700000000),
+        getBlocksWithLimit: reply("getBlocksWithLimit", [10, 12])
+      }
+    })
+    return run((rpc) =>
+      Effect.gen(function*() {
+        expect(yield* rpc.getBlockTime({ slot: BigInt(10) })).toBe(BigInt(1700000000))
+        expect(yield* rpc.getBlocksWithLimit({ startSlot: BigInt(10), limit: 500_000, ...confirmed })).toStrictEqual(
+          [BigInt(10), BigInt(12)]
+        )
+        expect(Object.fromEntries(seen)).toStrictEqual({
+          getBlockTime: [10],
+          getBlocksWithLimit: [10, 500_000, confirmed]
+        })
+      })
+    )
+  })
+
+  it.effect("returns getBlockTime null and fails Pruned on a skipped slot", () => {
+    const skipped = (code: number) => () => ({ error: { code, message: "Slot 400001264 was skipped" } })
+    const { calls, run } = setup({
+      a: { getBlockTime: skipped(-32007) },
+      b: { getBlockTime: skipped(-32009) },
+      c: { getBlockTime: () => ({ result: null }) }
+    })
+    return run((rpc) => rpc.getBlockTime({ slot: BigInt(400001264) })).pipe(Effect.map((time) => {
+      expect(time).toBeNull()
+      expect(calls.filter((call) => call.endsWith("getBlockTime"))).toStrictEqual([
+        "a:getBlockTime",
+        "b:getBlockTime",
+        "c:getBlockTime"
+      ])
+    }))
+  })
+
+  it.effect("fails getBlocksWithLimit Rejected before any request when limit is above 500,000", () => {
+    const { calls, run } = setup({ a: {} })
+    return run((rpc) => Effect.flip(rpc.getBlocksWithLimit({ startSlot: BigInt(10), limit: 500_001, ...confirmed })))
+      .pipe(Effect.map((error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Rejected" }, method: "getBlocksWithLimit" })
+        expect(error.cause).toMatchObject({ message: "limit 500001 is above the maximum of 500000" })
+        expect(calls).toStrictEqual([])
+      }))
+  })
+
+  it.effect("encodes getTokenAccountsByOwner params and keeps the account fields it does not type", () => {
+    const params: Array<ReadonlyArray<Schema.Json>> = []
+    const { run } = setup({
+      a: {
+        getTokenAccountsByOwner: (p) => {
+          params.push(p)
+          return raw(
+            `"result":{"context":{"apiVersion":"4.4.1","slot":7},"value":[{"pubkey":"${OWNER}","account":` +
+              `{"data":["","base64"],"executable":false,"lamports":2039280,"owner":"${ADDRESS}",` +
+              `"rentEpoch":18446744073709551615,"space":165}}]}`
+          )()
+        }
+      }
+    })
+    return run((rpc) =>
+      Effect.all([
+        rpc.getTokenAccountsByOwner({ owner: OWNER, filter: { mint: OWNER }, ...confirmed }),
+        rpc.getTokenAccountsByOwner({
+          owner: OWNER,
+          filter: { programId: ADDRESS },
+          commitment: "finalized",
+          minContextSlot: BigInt(42)
+        })
+      ])
+    ).pipe(Effect.map(([accounts]) => {
+      const config = { encoding: "base64", dataSlice: { offset: 0, length: 0 } }
+      expect(params).toStrictEqual([
+        [OWNER, { mint: OWNER }, { ...confirmed, ...config }],
+        [OWNER, { programId: ADDRESS }, { commitment: "finalized", ...config, minContextSlot: 42 }]
+      ])
+      expect(accounts).toStrictEqual({
+        slot: BigInt(7),
+        value: [{
+          pubkey: OWNER,
+          account: {
+            data: ["", "base64"],
+            executable: false,
+            lamports: BigInt(2039280),
+            owner: ADDRESS,
+            rentEpoch: "18446744073709551615",
+            space: "165"
+          }
+        }]
+      })
+    }))
+  })
+
+  it.effect("maps getTokenAccountsByOwner minContextSlot not reached to Lagging and falls back", () => {
+    const { calls, run } = setup({
+      a: {
+        getTokenAccountsByOwner: () => ({
+          error: { code: -32016, message: "Minimum context slot has not been reached" }
+        })
+      },
+      b: { getTokenAccountsByOwner: () => ({ result: { context: { slot: 50 }, value: [] } }) }
+    })
+    return run((rpc) =>
+      rpc.getTokenAccountsByOwner({ owner: OWNER, filter: { mint: OWNER }, minContextSlot: BigInt(50), ...confirmed })
+    ).pipe(Effect.map((accounts) => {
+      expect(accounts).toStrictEqual({ slot: BigInt(50), value: [] })
+      expect(calls).toStrictEqual([
+        "a:getGenesisHash",
+        "a:getTokenAccountsByOwner",
+        "b:getGenesisHash",
+        "b:getTokenAccountsByOwner"
+      ])
+    }))
   })
 
   it.effect("fails sendTransaction Rejected with the node's message when the preflight fails", () => {

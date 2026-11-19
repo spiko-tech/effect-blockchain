@@ -1,0 +1,25 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-19",
+  "request": {
+    "method": "getTokenAccountsByOwner",
+    "params": [
+      "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+      {
+        "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      },
+      {
+        "commitment": "finalized",
+        "encoding": "base64",
+        "dataSlice": {
+          "offset": 0,
+          "length": 0
+        },
+        "minContextSlot": 999999999999
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32016,\"message\":\"Minimum context slot has not been reached\",\"data\":{\"contextSlot\":471326424}},\"id\":1}\n"
+}
