@@ -8,6 +8,7 @@ import {
   Account,
   Address,
   Asset,
+  authorizeEntry,
   FeeBumpTransaction,
   Keypair,
   Networks,
@@ -175,14 +176,13 @@ const authEntry = (credentials: xdr.SorobanCredentials) =>
     })
   })
 const SOURCE_AUTH = authEntry(xdr.SorobanCredentials.sorobanCredentialsSourceAccount())
-const ADDRESS_AUTH = authEntry(xdr.SorobanCredentials.sorobanCredentialsAddress(
-  new xdr.SorobanAddressCredentials({
-    address: xdr.ScAddress.scAddressTypeAccount(Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2)).xdrAccountId()),
-    nonce: xdr.Int64.fromString("1"),
-    signatureExpirationLedger: 0,
-    signature: xdr.ScVal.scvVoid()
-  })
-))
+const ADDRESS_CREDENTIALS = new xdr.SorobanAddressCredentials({
+  address: xdr.ScAddress.scAddressTypeAccount(Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2)).xdrAccountId()),
+  nonce: xdr.Int64.fromString("1"),
+  signatureExpirationLedger: 0,
+  signature: xdr.ScVal.scvVoid()
+})
+const ADDRESS_AUTH = authEntry(xdr.SorobanCredentials.sorobanCredentialsAddress(ADDRESS_CREDENTIALS))
 const simulation = (auth: xdr.SorobanAuthorizationEntry): StellarRpc.StellarSimulation => ({
   transactionData: new SorobanDataBuilder().setResourceFee("5000").build().toXdr("base64"),
   minResourceFee: BigInt(5000),
@@ -405,6 +405,58 @@ describe("StellarRelayer sign of a Soroban invocation", () => {
         )
       )
       expect(foreign).toMatchObject({ _tag: "StellarSimulationError", reason: { _tag: "UnsupportedAuth" } })
+    }))
+
+  it.effect("signs the address entries of the signers like authorizeEntry and simulates again", () =>
+    Effect.gen(function*() {
+      const owner = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2))
+      const cosigner = StellarSigner.fromHashSigner({
+        address: StellarAccountAddress.make(owner.publicKey()),
+        signHash: (hash) => Effect.succeed(new Uint8Array(owner.sign(Buffer.from(hash.slice(2), "hex"))))
+      })
+      const { calls, run } = setup({
+        sequence: 41,
+        simulation: {
+          ...simulation(SOURCE_AUTH),
+          results: [{
+            auth: [SOURCE_AUTH.toXdr("base64"), ADDRESS_AUTH.toXdr("base64")],
+            xdr: xdr.ScVal.scvVoid().toXdr("base64")
+          }]
+        }
+      })
+      const signed = yield* run((relayer) =>
+        relayer.sign({ signer, cosigners: [cosigner], operations, maxLedger: BigInt(160) })
+      )
+      const expected = yield* Effect.promise(() => authorizeEntry(ADDRESS_AUTH, owner, 160, Networks.TESTNET))
+      expect(authOf(signed.signed)).toStrictEqual([SOURCE_AUTH.toXdr("base64"), expected.toXdr("base64")])
+      expect(expected.credentials.type === "sorobanCredentialsAddress" && expected.credentials.address)
+        .toMatchObject({ signatureExpirationLedger: 160 })
+      expect(calls.filter((call) => call === "simulateTransaction")).toHaveLength(2)
+      // the cosigner is the source of no operation: its signature of the transaction would be extra
+      expect(decode(signed.signed).signatures.map((signature) => signature.hint.toBytes())).toStrictEqual([
+        keypair.signatureHint()
+      ])
+    }))
+
+  it.effect("fails on an address entry of a signer without signAuthEntry or of no signer", () =>
+    Effect.gen(function*() {
+      const owner = StellarAccountAddress.make(Keypair.fromRawEd25519Seed(Buffer.alloc(32, 2)).publicKey())
+      const sign = (cosigners: ReadonlyArray<StellarSigner.StellarSigner>, entry = ADDRESS_AUTH) =>
+        Effect.flip(
+          setup({ sequence: 41, simulation: simulation(entry) }).run((relayer) =>
+            relayer.sign({ signer, cosigners, operations })
+          )
+        )
+      const unsupported = { _tag: "StellarSimulationError", reason: { _tag: "UnsupportedAuth" } }
+      expect(yield* sign([{ address: owner, signTransaction: () => Effect.die("signed") }])).toMatchObject(unsupported)
+      const wrong = StellarSigner.fromHashSigner({
+        address: owner,
+        signHash: (hash) => Effect.succeed(new Uint8Array(keypair.sign(Buffer.from(hash.slice(2), "hex"))))
+      })
+      expect(yield* sign([wrong])).toMatchObject({ _tag: "StellarSignerError" })
+      // address-bound credentials (CAP-71) are not signed
+      const bound = authEntry(xdr.SorobanCredentials.sorobanCredentialsAddressV2(ADDRESS_CREDENTIALS))
+      expect(yield* sign([signer], bound)).toMatchObject(unsupported)
     }))
 
   it.effect("fails before signing when the simulation asks to restore archived entries", () =>

@@ -66,6 +66,20 @@ describe("StellarSigner", () => {
       expect(bumped.signatures).toHaveLength(1)
     }))
 
+  it.effect("signAuthEntry signs the hash of an authorization entry", () =>
+    Effect.gen(function*() {
+      const hash = new Uint8Array(32).fill(7)
+      const signAuthEntry = (signer: StellarSigner.StellarSigner) =>
+        signer.signAuthEntry?.({ network: "StellarTestnet", hash }) ?? Effect.die("no signAuthEntry")
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(SEED) })
+      expect(yield* signAuthEntry(signer)).toStrictEqual(new Uint8Array(keypair.sign(Buffer.from(hash))))
+      const failing = StellarSigner.fromHashSigner({ address: ADDRESS, signHash: () => Effect.fail("policy refused") })
+      expect(yield* Effect.flip(signAuthEntry(failing))).toMatchObject({
+        _tag: "StellarSignerError",
+        cause: "policy refused"
+      })
+    }))
+
   it.effect("fromHashSigner fails on a failing signer, a foreign signature and a broken envelope", () =>
     Effect.gen(function*() {
       const failing = StellarSigner.fromHashSigner({ address: ADDRESS, signHash: () => Effect.fail("policy refused") })
