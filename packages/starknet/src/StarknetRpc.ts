@@ -248,6 +248,16 @@ export class StarknetRpc extends Context.Service<StarknetRpc, {
     readonly blockTag: StarknetBlockTag
   }) => Effect.Effect<bigint, StarknetRpcError>
   /**
+   * `starknet_getClassHashAt`: the hash of the class of the contract at `address`, as a 64-digit felt. An address
+   * without a contract is `Rejected` with the code 20 (`CONTRACT_NOT_FOUND`), as in `getNonce`.
+   *
+   * @since 0.5.0
+   */
+  readonly getClassHashAt: (options: {
+    readonly address: StarknetAddress
+    readonly blockTag: StarknetBlockTag
+  }) => Effect.Effect<string, StarknetRpcError>
+  /**
    * `starknet_estimateFee`: one estimate per transaction, each executed on top of the previous ones at `blockTag`
    * (a reply without an estimate is an `InvalidResponse`).
    * `skipValidate` sends the `SKIP_VALIDATE` flag, which accepts unsigned transactions. A transaction that fails is
@@ -475,6 +485,10 @@ export const layer = (options: {
         getNonce: ({ address, blockTag }) =>
           rpc.withFallback((endpoint) =>
             rpc.call(endpoint, RpcMethods.getNonce, { block_id: blockTag, contract_address: address })
+          ),
+        getClassHashAt: ({ address, blockTag }) =>
+          rpc.withFallback((endpoint) =>
+            rpc.call(endpoint, RpcMethods.getClassHashAt, { block_id: blockTag, contract_address: address })
           ),
         estimateFee: ({ blockTag, skipValidate, transactions }) =>
           rpc.withFallback((endpoint) =>

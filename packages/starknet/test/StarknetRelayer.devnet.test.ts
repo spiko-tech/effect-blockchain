@@ -51,7 +51,12 @@ describe.skipIf(url === "")("StarknetRelayer on starknet-devnet", { concurrent: 
       const rpc = yield* StarknetRpc.StarknetRpc
       const signer = yield* StarknetSigner.fromPrivateKey({ address: ADDRESS, key: Redacted.make(KEY) })
       const next = yield* rpc.getNonce({ address: ADDRESS, blockTag: "latest" })
+      const fees = yield* relayer.estimateFees({ address: ADDRESS, calls: [transfer(TO, BigInt(1))] })
       const { hash, nonce, signed } = yield* relayer.sign({ signer, calls: [transfer(TO, BigInt(1))] })
+      expect({ resourceBounds: signed.resourceBounds, tip: signed.tip, overallFee: fees.overallFee }).toStrictEqual(
+        fees
+      )
+      expect(fees.overallFee > BigInt(0)).toBe(true)
       expect(nonce).toBe(next)
       expect(yield* relayer.fetchTransactionStatus({ hash })).toStrictEqual({ _tag: "NotFound" })
       expect(yield* relayer.broadcast({ signed })).toBe(hash)
@@ -133,11 +138,20 @@ describe.skipIf(url === "")("StarknetRelayer on starknet-devnet", { concurrent: 
       expect(yield* Effect.flip(relayer.signDeployAccount({ signer, ...account, salt: "0x1" }))).toBeInstanceOf(
         StarknetSigner.StarknetSignerError
       )
+      expect(yield* Effect.flip(rpc.getClassHashAt({ address, blockTag: "latest" }))).toMatchObject({
+        reason: { _tag: "Rejected" },
+        code: 20
+      })
+      const fees = yield* relayer.estimateDeployAccountFees({ signer, ...account })
       const deployment = yield* relayer.signDeployAccount({ signer, ...account })
       expect(deployment.nonce).toBe(BigInt(0))
+      expect({ ...fees, resourceBounds: deployment.signed.resourceBounds, tip: deployment.signed.tip }).toStrictEqual(
+        fees
+      )
       expect(yield* relayer.broadcast(deployment)).toBe(deployment.hash)
       expect(yield* relayer.awaitConfirmation({ hash: deployment.hash, poll })).toMatchObject({ _tag: "Confirmed" })
       expect(yield* rpc.getNonce({ address, blockTag: "latest" })).toBe(BigInt(1))
+      expect(yield* rpc.getClassHashAt({ address, blockTag: "latest" })).toBe(ACCOUNT_CLASS_HASH)
       expect(yield* relayer.broadcast(deployment)).toBe(deployment.hash)
 
       const sent = yield* relayer.sign({ signer, calls: [transfer(TO, BigInt(1))] })

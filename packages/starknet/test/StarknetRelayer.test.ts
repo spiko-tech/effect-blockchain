@@ -53,6 +53,7 @@ const setup = (initial: Node, options?: Parameters<typeof StarknetRelayer.layer>
       getEvents: () => Effect.die("unused"),
       call: () => Effect.die("unused"),
       getNonce: () => Effect.die("unused"),
+      getClassHashAt: () => Effect.die("unused"),
       estimateFee: () => Effect.die("unused"),
       addInvokeTransaction: () => Effect.die("unused"),
       addDeployAccountTransaction: () => Effect.die("unused"),
@@ -224,6 +225,7 @@ const sender = (
       call: () => Effect.die("unused"),
       getTransactionReceipt: () => Effect.die("unused"),
       getNonce: (options) => Effect.sync(() => (seen.nonces.push(options), BigInt(7))),
+      getClassHashAt: () => Effect.die("unused"),
       estimateFee: (options) =>
         Effect.suspend(() => {
           seen.estimates.push(options)
@@ -401,6 +403,41 @@ describe("StarknetRelayer sending", () => {
         _tag: "StarknetSignerError",
         cause: "policy refused"
       })
+    })
+  })
+
+  it.effect("estimateFees returns the fees sign uses, from a signer or an address, and the node's overall fee", () => {
+    const { run, seen } = sender()
+    const { signer } = hashSigner()
+    return Effect.gen(function*() {
+      const { signed } = yield* run((relayer) => relayer.sign({ signer, calls }))
+      const expected = { ...FEES, overallFee: ESTIMATE.overallFee }
+      expect(yield* run((relayer) => relayer.estimateFees({ signer, calls }))).toStrictEqual(expected)
+      expect(yield* run((relayer) => relayer.estimateFees({ address: ADDRESS, calls, nonce: BigInt(7) })))
+        .toStrictEqual(expected)
+      expect({ resourceBounds: signed.resourceBounds, tip: signed.tip }).toStrictEqual(FEES)
+      expect(seen.estimates).toStrictEqual([seen.estimates[0], seen.estimates[0], seen.estimates[0]])
+      expect(seen.nonces).toHaveLength(2)
+    })
+  })
+
+  it.effect("estimateDeployAccountFees estimates the deployment signDeployAccount signs", () => {
+    const { run, seen } = sender()
+    const account = { classHash: CLASS_HASH, salt: PUBLIC_KEY, constructorCalldata: [PUBLIC_KEY] }
+    return Effect.gen(function*() {
+      const { signer } = hashSigner(DEPLOYED)
+      expect(yield* run((relayer) => relayer.estimateDeployAccountFees({ signer, ...account }))).toStrictEqual({
+        ...FEES,
+        overallFee: ESTIMATE.overallFee
+      })
+      yield* run((relayer) => relayer.signDeployAccount({ signer, ...account }))
+      expect(seen.estimates).toStrictEqual([seen.estimates[0], seen.estimates[0]])
+      expect(seen.estimates[0]).toMatchObject({ transactions: [{ type: "DEPLOY_ACCOUNT", nonce: BigInt(0) }] })
+      const elsewhere = yield* Effect.flip(
+        run((relayer) => relayer.estimateDeployAccountFees({ signer: hashSigner().signer, ...account }))
+      )
+      expect(elsewhere).toBeInstanceOf(StarknetSigner.StarknetSignerError)
+      expect(seen.estimates).toHaveLength(2)
     })
   })
 

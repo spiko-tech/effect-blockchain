@@ -179,6 +179,13 @@ export const getNonce = JsonRpc.method({
 })
 
 /** @internal */
+export const getClassHashAt = JsonRpc.method({
+  name: "starknet_getClassHashAt",
+  params: Schema.Struct({ block_id: BlockTag, contract_address: StarknetAddress }),
+  result: PaddedFelt
+})
+
+/** @internal */
 export const estimateFee = JsonRpc.method({
   name: "starknet_estimateFee",
   params: Schema.Struct({

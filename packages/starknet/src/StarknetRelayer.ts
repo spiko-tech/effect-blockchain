@@ -274,6 +274,37 @@ export class StarknetRelayer extends Context.Service<StarknetRelayer, {
     StarknetRpc.StarknetRpcError | StarknetSignerError | StarknetSimulationError
   >
   /**
+   * The fees `sign` would use for the same `calls` from the account at `signer.address` or `address`, with the
+   * node's `overallFee` for that estimate in FRI, which leaves out the account's validation. A missing `nonce` is read
+   * as in `sign`, and calls that revert fail with a {@link StarknetSimulationError}.
+   *
+   * @since 0.5.0
+   */
+  readonly estimateFees: (
+    options: ({ readonly signer: StarknetSigner } | { readonly address: StarknetAddress }) & {
+      readonly calls: Arr.NonEmptyReadonlyArray<StarknetCall>
+      readonly nonce?: bigint | undefined
+    }
+  ) => Effect.Effect<
+    StarknetFees & { readonly overallFee: bigint },
+    StarknetRpc.StarknetRpcError | StarknetSimulationError
+  >
+  /**
+   * The fees `signDeployAccount` would use for the same deployment, with the node's `overallFee` as in
+   * `estimateFees`. It checks the deployed address against `signer.address` as `signDeployAccount` does.
+   *
+   * @since 0.5.0
+   */
+  readonly estimateDeployAccountFees: (options: {
+    readonly signer: StarknetSigner
+    readonly classHash: string
+    readonly salt: string
+    readonly constructorCalldata: ReadonlyArray<string>
+  }) => Effect.Effect<
+    StarknetFees & { readonly overallFee: bigint },
+    StarknetRpc.StarknetRpcError | StarknetSignerError | StarknetSimulationError
+  >
+  /**
    * Sends a signed transaction and returns its hash. Sending the same transaction again is safe: a node answering
    * `DUPLICATE_TX`, or that the nonce is invalid while it knows this hash, is a success.
    */
@@ -404,57 +435,80 @@ export const layer = (options: {
       const confirmations = options.confirmations ?? StarknetNetwork.defaultConfirmations(rpc.network)
       const chainId = StarknetNetwork.toChainId(rpc.network)
       const estimatedFees = options.fees ?? feesWith(options.feeMultiplier ?? 1.5)
+      const estimate = (draft: StarknetUnsignedTransaction) =>
+        rpc.estimateFee({ transactions: [{ ...draft, signature: [] }], skipValidate: true, blockTag: "pre_confirmed" })
+          .pipe(
+            Effect.mapError(toSimulationError),
+            Effect.map(([estimate]) => {
+              const { resourceBounds, tip } = estimatedFees(estimate)
+              return { resourceBounds, tip, overallFee: estimate.overallFee }
+            })
+          )
       const finish = Effect.fnUntraced(function*(
         signer: StarknetSigner,
         draft: StarknetUnsignedTransaction,
         given: StarknetFees | undefined
       ) {
-        const { resourceBounds, tip } = given ?? (yield* rpc.estimateFee({
-          transactions: [{ ...draft, signature: [] }],
-          skipValidate: true,
-          blockTag: "pre_confirmed"
-        }).pipe(
-          Effect.mapError(toSimulationError),
-          Effect.map(([estimate]) => estimatedFees(estimate))
-        ))
+        const { resourceBounds, tip } = given ?? (yield* estimate(draft))
         const unsigned = { ...draft, resourceBounds, tip }
         const hash = yield* Effect.try({ try: () => transactionHash(unsigned), catch: toSignerError })
         const signature = yield* signer.signTransaction(unsigned)
         return { hash, signed: { ...unsigned, signature }, nonce: unsigned.nonce }
       })
       const unbounded = { resourceBounds: { l1Gas: NO_BOUND, l1DataGas: NO_BOUND, l2Gas: NO_BOUND }, tip: BigInt(0) }
+      const invokeDraft = Effect.fnUntraced(function*(
+        senderAddress: StarknetAddress,
+        calls: ReadonlyArray<StarknetCall>,
+        nonce: bigint | undefined
+      ) {
+        return {
+          ...unbounded,
+          type: "INVOKE" as const,
+          chainId,
+          senderAddress,
+          calldata: executeCalldata(calls),
+          nonce: nonce ?? (yield* rpc.getNonce({ address: senderAddress, blockTag: "pre_confirmed" }))
+        }
+      })
+      const deployAccountDraft = Effect.fnUntraced(function*(
+        { classHash, constructorCalldata, salt, signer }: Parameters<
+          StarknetRelayer["Service"]["estimateDeployAccountFees"]
+        >[0]
+      ) {
+        const draft = {
+          ...unbounded,
+          type: "DEPLOY_ACCOUNT" as const,
+          chainId,
+          classHash,
+          contractAddressSalt: salt,
+          constructorCalldata,
+          nonce: BigInt(0)
+        }
+        const address = yield* Effect.try({ try: () => deployAddress(draft), catch: toSignerError })
+        if (address !== signer.address) {
+          return yield* toSignerError(new Error(`the account deploys at ${address}, the signer is ${signer.address}`))
+        }
+        return draft
+      })
       const sign = Effect.fn("StarknetRelayer.sign")(
         function*({ calls, fees, nonce, signer }: Parameters<StarknetRelayer["Service"]["sign"]>[0]) {
-          return yield* finish(signer, {
-            ...unbounded,
-            type: "INVOKE",
-            chainId,
-            senderAddress: signer.address,
-            calldata: executeCalldata(calls),
-            nonce: nonce ?? (yield* rpc.getNonce({ address: signer.address, blockTag: "pre_confirmed" }))
-          }, fees)
+          return yield* finish(signer, yield* invokeDraft(signer.address, calls, nonce), fees)
         }
       )
       const signDeployAccount = Effect.fn("StarknetRelayer.signDeployAccount")(
-        function*(
-          { classHash, constructorCalldata, fees, salt, signer }: Parameters<
-            StarknetRelayer["Service"]["signDeployAccount"]
-          >[0]
-        ) {
-          const draft = {
-            ...unbounded,
-            type: "DEPLOY_ACCOUNT" as const,
-            chainId,
-            classHash,
-            contractAddressSalt: salt,
-            constructorCalldata,
-            nonce: BigInt(0)
-          }
-          const address = yield* Effect.try({ try: () => deployAddress(draft), catch: toSignerError })
-          if (address !== signer.address) {
-            return yield* toSignerError(new Error(`the account deploys at ${address}, the signer is ${signer.address}`))
-          }
-          return yield* finish(signer, draft, fees)
+        function*(options: Parameters<StarknetRelayer["Service"]["signDeployAccount"]>[0]) {
+          return yield* finish(options.signer, yield* deployAccountDraft(options), options.fees)
+        }
+      )
+      const estimateFees = Effect.fn("StarknetRelayer.estimateFees")(
+        function*(options: Parameters<StarknetRelayer["Service"]["estimateFees"]>[0]) {
+          const address = "signer" in options ? options.signer.address : options.address
+          return yield* estimate(yield* invokeDraft(address, options.calls, options.nonce))
+        }
+      )
+      const estimateDeployAccountFees = Effect.fn("StarknetRelayer.estimateDeployAccountFees")(
+        function*(options: Parameters<StarknetRelayer["Service"]["estimateDeployAccountFees"]>[0]) {
+          return yield* estimate(yield* deployAccountDraft(options))
         }
       )
       const broadcast = Effect.fn("StarknetRelayer.broadcast")(
@@ -499,6 +553,8 @@ export const layer = (options: {
       return StarknetRelayer.of({
         sign,
         signDeployAccount,
+        estimateFees,
+        estimateDeployAccountFees,
         broadcast,
         fetchTransactionStatus,
         awaitConfirmation: ({ hash, poll }) =>

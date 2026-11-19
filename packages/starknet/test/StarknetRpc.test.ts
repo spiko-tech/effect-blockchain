@@ -489,6 +489,22 @@ describe("StarknetRpc", () => {
     }))
   })
 
+  it.effect("getClassHashAt reads the class hash at a block tag, and an address without a contract is Rejected", () => {
+    let params: Schema.Json = null
+    const deployed = setup({ a: { starknet_getClassHashAt: (p) => (params = p, { result: "0x5b4b" }) } })
+    const empty = setup({
+      a: { starknet_getClassHashAt: () => ({ error: { code: 20, message: "Contract not found" } }) }
+    })
+    return Effect.gen(function*() {
+      expect(yield* deployed.run((rpc) => rpc.getClassHashAt({ address: TOKEN, blockTag: "latest" }))).toBe(
+        "0x" + "5b4b".padStart(64, "0")
+      )
+      expect(params).toStrictEqual({ block_id: "latest", contract_address: TOKEN })
+      expect(yield* Effect.flip(empty.run((rpc) => rpc.getClassHashAt({ address: OTHER, blockTag: "pre_confirmed" }))))
+        .toMatchObject({ reason: { _tag: "Rejected" }, code: 20, method: "starknet_getClassHashAt" })
+    })
+  })
+
   const resourceBounds = {
     l1Gas: { maxAmount: BigInt(1), maxPricePerUnit: BigInt(2) },
     l1DataGas: { maxAmount: BigInt(3), maxPricePerUnit: BigInt(4) },
