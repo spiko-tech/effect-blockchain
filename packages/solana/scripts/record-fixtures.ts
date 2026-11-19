@@ -32,6 +32,10 @@ const FUTURE_SLOT = 999_999_999_999
 // slots 400001264 to 400001267 were skipped: the public endpoint answers `-32009` for them, Alchemy `null`
 const SKIPPED_SLOT = 400_001_264
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+// a USDC token account of BINANCE
+const USDC_ACCOUNT = "2ocS3orPq3jyszjsJ4NozKWyhdotr3csDjAizmkj65aH"
+// a random address that holds no account
+const NO_ACCOUNT = "A975p78TG57v2wg61tn1kfzFcCU7nU1K8V39wWqmfeWd"
 
 const finalized = { commitment: "finalized" }
 const tokenAccounts = { ...finalized, encoding: "base64", dataSlice: { offset: 0, length: 0 } }
@@ -103,6 +107,22 @@ const cases: ReadonlyArray<Case> = [
     name: "getTokenAccountsByOwner-min-context-slot",
     method: "getTokenAccountsByOwner",
     params: [BINANCE, { mint: USDC }, { ...tokenAccounts, minContextSlot: FUTURE_SLOT }]
+  },
+  { name: "getAccountInfo-mint", method: "getAccountInfo", params: [USDC, { ...finalized, encoding: "base64" }] },
+  {
+    name: "getAccountInfo-mint-json-parsed",
+    method: "getAccountInfo",
+    params: [USDC, { ...finalized, encoding: "jsonParsed" }]
+  },
+  {
+    name: "getAccountInfo-token-account",
+    method: "getAccountInfo",
+    params: [USDC_ACCOUNT, { ...finalized, encoding: "jsonParsed" }]
+  },
+  {
+    name: "getAccountInfo-missing",
+    method: "getAccountInfo",
+    params: [NO_ACCOUNT, { ...finalized, encoding: "base64" }]
   }
 ]
 

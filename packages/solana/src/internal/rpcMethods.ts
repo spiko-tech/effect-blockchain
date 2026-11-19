@@ -259,6 +259,40 @@ export const getTokenAccountsByOwner = JsonRpc.method({
   })
 })
 
+// the account `data` codec by encoding, checked against `SolanaAccountData` where `SolanaRpc.ts` uses it
+const accountData = {
+  base64: Schema.Tuple([Schema.String, Schema.Literal("base64")]),
+  // the node answers the base64 tuple instead when it has no parser for the owner program
+  jsonParsed: JsonFromRpc
+}
+
+/** @internal */
+export const getAccountInfo = (encoding: keyof typeof accountData) =>
+  JsonRpc.method({
+    name: "getAccountInfo",
+    params: Schema.Tuple([
+      SolanaAddress,
+      Schema.Struct({
+        commitment: Commitment,
+        encoding: Schema.Literal(encoding),
+        minContextSlot: JsonRpc.optionalOmitted(JsonRpc.BigIntFromInt)
+      })
+    ]),
+    result: Schema.Struct({
+      context: Schema.Struct({ slot: Schema.BigInt }),
+      // `null` for an address that holds no account; `rentEpoch` and `space` kept raw
+      value: Schema.NullOr(Schema.StructWithRest(
+        Schema.Struct({
+          owner: SolanaAddress,
+          lamports: Schema.BigInt,
+          executable: Schema.Boolean,
+          data: accountData[encoding]
+        }),
+        [Rest]
+      ))
+    })
+  })
+
 /** @internal */
 export const getSignaturesForAddress = JsonRpc.method({
   name: "getSignaturesForAddress",

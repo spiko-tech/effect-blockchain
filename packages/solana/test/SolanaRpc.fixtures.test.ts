@@ -383,6 +383,60 @@ describe("SolanaRpc fixtures", () => {
       )
     ))
 
+  // the supply, the balances and the slot move on every recording
+  it.effect("fixture: alchemy getAccountInfo-mint", () =>
+    alchemy("getAccountInfo-mint").run((rpc) => rpc.getAccountInfo({ address: USDC, encoding: "base64", ...finalized }))
+      .pipe(
+        Effect.map(({ slot, value }) => {
+          expect(slot >= BigInt(471493779)).toBe(true)
+          expect(value).toMatchObject({ owner: TOKEN_PROGRAM, executable: false, rentEpoch: "18446744073709551615" })
+          expect(value?.data[1]).toBe("base64")
+          // a token mint is 82 bytes
+          expect(getBase64Encoder().encode(value?.data[0] ?? "").length).toBe(82)
+        })
+      ))
+
+  it.effect("fixture: alchemy getAccountInfo-mint-json-parsed", () =>
+    alchemy("getAccountInfo-mint-json-parsed").run((rpc) =>
+      rpc.getAccountInfo({ address: USDC, encoding: "jsonParsed", ...finalized })
+    ).pipe(
+      Effect.map(({ value }) => {
+        expect(value).toMatchObject({
+          owner: TOKEN_PROGRAM,
+          executable: false,
+          space: "82",
+          data: { program: "spl-token", space: "82", parsed: { type: "mint", info: { decimals: "6" } } }
+        })
+        expect(value?.lamports).toBeGreaterThan(BigInt(0))
+      })
+    ))
+
+  it.effect("fixture: alchemy getAccountInfo-token-account", () =>
+    alchemy("getAccountInfo-token-account").run((rpc) =>
+      rpc.getAccountInfo({
+        address: SolanaAddress.make("2ocS3orPq3jyszjsJ4NozKWyhdotr3csDjAizmkj65aH"),
+        encoding: "jsonParsed",
+        ...finalized
+      })
+    ).pipe(
+      Effect.map(({ value }) =>
+        expect(value).toMatchObject({
+          owner: TOKEN_PROGRAM,
+          lamports: BigInt(2500000),
+          data: { program: "spl-token", parsed: { type: "account", info: { mint: USDC, owner: BINANCE } } }
+        })
+      )
+    ))
+
+  it.effect("fixture: alchemy getAccountInfo-missing", () =>
+    alchemy("getAccountInfo-missing").run((rpc) =>
+      rpc.getAccountInfo({
+        address: SolanaAddress.make("A975p78TG57v2wg61tn1kfzFcCU7nU1K8V39wWqmfeWd"),
+        encoding: "base64",
+        ...finalized
+      })
+    ).pipe(Effect.map(({ value }) => expect(value).toBeNull())))
+
   it.effect("fixture: alchemy invalid-params", () =>
     alchemy("invalid-params").run((rpc) =>
       Effect.flip(rpc.getSignaturesForAddress({ address: EUTBL, limit: 0, ...finalized }))

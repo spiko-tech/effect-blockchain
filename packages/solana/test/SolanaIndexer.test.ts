@@ -397,6 +397,7 @@ const fakeRpc = (head: bigint, failAt: ReadonlyMap<number, JsonRpc.Reason> = new
       getBlockTime: () => Effect.die("unused"),
       getBlocksWithLimit: () => Effect.die("unused"),
       getTokenAccountsByOwner: () => Effect.die("unused"),
+      getAccountInfo: () => Effect.die("unused"),
       getSignatureStatuses: () => Effect.die("unused"),
       getBalance: () => Effect.die("unused"),
       getLatestBlockhash: () => Effect.die("unused"),

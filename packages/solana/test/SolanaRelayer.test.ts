@@ -60,6 +60,7 @@ const setup = (initial: Node, options?: Parameters<typeof SolanaRelayer.layer>[0
       getBlockTime: () => Effect.die("unused"),
       getBlocksWithLimit: () => Effect.die("unused"),
       getTokenAccountsByOwner: () => Effect.die("unused"),
+      getAccountInfo: () => Effect.die("unused"),
       getSignatureStatuses: ({ searchTransactionHistory, signatures }) =>
         call("getSignatureStatuses", () => {
           node.polls++

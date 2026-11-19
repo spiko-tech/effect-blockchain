@@ -1,0 +1,17 @@
+{
+  "provider": "alchemy",
+  "network": "Solana",
+  "recordedAt": "2026-11-19",
+  "request": {
+    "method": "getAccountInfo",
+    "params": [
+      "A975p78TG57v2wg61tn1kfzFcCU7nU1K8V39wWqmfeWd",
+      {
+        "commitment": "finalized",
+        "encoding": "base64"
+      }
+    ]
+  },
+  "status": 200,
+  "body": "{\"jsonrpc\":\"2.0\",\"result\":{\"context\":{\"apiVersion\":\"4.4.1\",\"slot\":471493781},\"value\":null},\"id\":1}\n"
+}
