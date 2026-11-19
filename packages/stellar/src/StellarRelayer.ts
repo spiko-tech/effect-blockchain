@@ -198,7 +198,8 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * come from the layer's fee strategy, and a missing `maxLedger` is the latest ledger plus the layer's `validity`.
    *
    * A single `invokeHostFunction` operation is simulated. The transaction gets its footprint and resources from the
-   * simulation, missing `fees` are estimated from the Soroban inclusion fees, and the resource fee is added on top. An
+   * simulation, missing `fees` are estimated from the Soroban inclusion fees, and the resource fee is added on top,
+   * multiplied by `resourceFeeMultiplier` (default the layer's) and rounded up. An
    * operation without authorization entries gets the ones the simulation returns. An entry of the address of `signer`
    * or of a cosigner is signed with its `signAuthEntry`, valid up to `maxLedger`, and the signed invocation is
    * simulated again for its resources; a cosigner signs the transaction only when it is the source of an operation.
@@ -213,8 +214,8 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    * `cosigners` sign after them, for the operations whose source account is another account. The network refuses
    * a transaction carrying a signature it does not need (`txBadAuthExtra`).
    *
-   * Fails with a `StellarSignerError` when an operation is not XDR, or when the account does not exist and no
-   * `sequence` is given.
+   * Fails with a `StellarSignerError` when an operation is not XDR, when the account does not exist and no
+   * `sequence` is given, or when `resourceFeeMultiplier` is below 1.
    */
   readonly sign: (options: {
     readonly signer: StellarSigner
@@ -224,6 +225,7 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
     readonly sequence?: bigint | undefined
     readonly fees?: StellarFees | undefined
     readonly maxLedger?: bigint | undefined
+    readonly resourceFeeMultiplier?: number | undefined
   }) => Effect.Effect<
     StellarSignedTransaction,
     StellarRpc.StellarRpcError | StellarSignerError | StellarSimulationError
@@ -343,7 +345,9 @@ const accountKey = (address: string) =>
  * network's default (0), as in `StellarIndexer.layer`: both agree on the last confirmed ledger. `fees` (default
  * {@link defaultFees}) prices the transactions signed without `fees` from the inclusion fees of `getFeeStats`,
  * classic or Soroban, and `validity` (default 60, about 5 minutes) is the number of ledgers after the latest one
- * that a transaction signed without `maxLedger` can enter.
+ * that a transaction signed without `maxLedger` can enter. `resourceFeeMultiplier` (default 1, at least 1, to the
+ * hundredth) scales the simulated resource fee of a Soroban invocation, as a margin against
+ * `invokeHostFunctionInsufficientRefundableFee`.
  *
  * @since 0.2.0
  * @category layers
@@ -352,6 +356,7 @@ export const layer = (options: {
   readonly confirmations?: number | undefined
   readonly fees?: ((estimate: StellarFeeEstimate) => StellarFees) | undefined
   readonly validity?: number | undefined
+  readonly resourceFeeMultiplier?: number | undefined
 } = {}): Layer.Layer<StellarRelayer, never, StellarRpc.StellarRpc> =>
   Layer.effect(
     StellarRelayer,
@@ -377,6 +382,13 @@ export const layer = (options: {
         function*(
           { channel, cosigners = [], operations, signer, ...given }: Parameters<StellarRelayer["Service"]["sign"]>[0]
         ) {
+          const multiplier = given.resourceFeeMultiplier ?? options.resourceFeeMultiplier ?? 1
+          if (!(Number.isFinite(multiplier) && multiplier >= 1)) {
+            return yield* new StellarSignerError({
+              cause: new Error(`resourceFeeMultiplier ${multiplier} is not a finite number of at least 1`)
+            })
+          }
+          const percent = BigInt(Math.round(multiplier * 100))
           const source = (channel ?? signer).address
           const parsed = yield* Effect.try({
             try: () =>
@@ -404,6 +416,17 @@ export const layer = (options: {
           const sequence = given.sequence ?? (account === undefined
             ? yield* new StellarSignerError({ cause: new Error(`account ${source} does not exist`) })
             : accountEntry(account.xdr).seqNum + BigInt(1))
+          // the part of `resourceFee` above the non-refundable fees of `resources` is the refundable budget (rent,
+          // events, return value), so the whole margin goes there: `SorobanTransactionData` in Stellar-transaction.x
+          // https://github.com/stellar/stellar-xdr/blob/curr/Stellar-transaction.x
+          const withMargin = (transactionData: string) => {
+            const data = xdr.SorobanTransactionData.fromXdr(transactionData, "base64")
+            return new xdr.SorobanTransactionData({
+              ext: data.ext,
+              resources: data.resources,
+              resourceFee: (data.resourceFee * percent + BigInt(99)) / BigInt(100)
+            })
+          }
           const build = (operations: ReadonlyArray<xdr.Operation>, fee: bigint, sorobanData?: string) =>
             Effect.try({
               try: () => {
@@ -414,7 +437,7 @@ export const layer = (options: {
                   networkPassphrase,
                   ledgerbounds: { minLedger: 0, maxLedger: Number(maxLedger) },
                   timebounds: { minTime: 0, maxTime: 0 },
-                  ...(sorobanData === undefined ? {} : { sorobanData })
+                  ...(sorobanData === undefined ? {} : { sorobanData: withMargin(sorobanData) })
                 })
                 operations.forEach((operation) => builder.addOperation(operation))
                 return builder.build().toEnvelope().toXdr("base64")
@@ -482,7 +505,7 @@ export const layer = (options: {
               // the first simulation ran on unsigned entries: the resources come from the entries that are sent, as
               // for entries the caller signed
               const resources = authorizers.size === 0 ? simulation : yield* simulate([authorized])
-              // the builder adds the resource fee `transactionData` holds, the simulation's `minResourceFee`
+              // the builder adds the resource fee of `sorobanData` to the transaction's fee (`TransactionBuilder.build`)
               return yield* build([authorized], fee, resources.transactionData)
             }
           )
