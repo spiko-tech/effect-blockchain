@@ -317,6 +317,7 @@ const fakeRpc = (
       getTransactionReceipt: () => Effect.die("unused"),
       getTransactionStatus: () => Effect.die("unused"),
       getNonce: () => Effect.die("unused"),
+      getClassHashAt: () => Effect.die("unused"),
       estimateFee: () => Effect.die("unused"),
       addInvokeTransaction: () => Effect.die("unused"),
       addDeployAccountTransaction: () => Effect.die("unused"),
