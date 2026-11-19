@@ -3,7 +3,17 @@ import * as StellarRelayer from "@effect-blockchain/stellar/StellarRelayer"
 import * as StellarRpc from "@effect-blockchain/stellar/StellarRpc"
 import * as StellarSigner from "@effect-blockchain/stellar/StellarSigner"
 import { describe, expect, it } from "@effect/vitest"
-import { Address, Asset, Keypair, nativeToScVal, Networks, Operation, StrKey, xdr } from "@stellar/stellar-sdk"
+import {
+  Address,
+  Asset,
+  Keypair,
+  nativeToScVal,
+  Networks,
+  Operation,
+  StrKey,
+  TransactionBuilder,
+  xdr
+} from "@stellar/stellar-sdk"
 import * as Effect from "effect/Effect"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as Layer from "effect/Layer"
@@ -146,6 +156,52 @@ describe.skipIf(url === "")("StellarRelayer on quickstart", { concurrent: false,
       expect(yield* Effect.flip(send(call("missing", signer.address)))).toMatchObject({
         _tag: "StellarSimulationError",
         reason: { _tag: "SimulationFailed" }
+      })
+    }).pipe(Effect.provide(layer)))
+
+  it.live("authorizes a transfer through a channel by the source account, or by a cosigner's address entry", () =>
+    Effect.gen(function*() {
+      const relayer = yield* StellarRelayer.StellarRelayer
+      const signer = yield* StellarSigner.fromPrivateKey({ key: Redacted.make(sender.secret()) })
+      const [channel, owner] = yield* Effect.forEach(
+        [Keypair.random(), Keypair.random()],
+        (key) => StellarSigner.fromPrivateKey({ key: Redacted.make(key.secret()) })
+      )
+      yield* Effect.all([fund(channel.address), fund(owner.address)], { concurrency: 2 })
+      const transfer = (from: string) =>
+        Operation.invokeContractFunction({
+          contract: Asset.native().contractId(Networks.STANDALONE),
+          function: "transfer",
+          args: [new Address(from).toScVal(), new Address(receiver).toScVal(), nativeToScVal(1, { type: "i128" })]
+        }).toXdr("base64")
+      const send = Effect.fnUntraced(function*(from: string, cosigners: ReadonlyArray<StellarSigner.StellarSigner>) {
+        const { hash, maxLedger, signed } = yield* relayer.sign({
+          signer,
+          channel,
+          cosigners,
+          operations: [transfer(from)]
+        })
+        const transaction = TransactionBuilder.fromXdr(signed, Networks.STANDALONE)
+        const operation = "operations" in transaction ? transaction.operations[0] : undefined
+        const auth = operation?.type === "invokeHostFunction" ? operation.auth ?? [] : []
+        yield* relayer.broadcast({ signed })
+        return {
+          credentials: auth.map((entry) => entry.credentials.type),
+          signatures: "signatures" in transaction ? transaction.signatures.length : 0,
+          status: yield* relayer.awaitConfirmation({ hash, maxLedger, poll })
+        }
+      })
+      // the operation's source is the signer, which the simulation authorizes with the transaction's signatures
+      expect(yield* send(signer.address, [])).toMatchObject({
+        credentials: ["sorobanCredentialsSourceAccount"],
+        signatures: 2,
+        status: { _tag: "Confirmed" }
+      })
+      // the owner is neither the transaction's source nor the operation's: it signs an address entry only
+      expect(yield* send(owner.address, [owner])).toMatchObject({
+        credentials: ["sorobanCredentialsAddress"],
+        signatures: 2,
+        status: { _tag: "Confirmed" }
       })
     }).pipe(Effect.provide(layer)))
 

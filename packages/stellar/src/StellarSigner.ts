@@ -47,15 +47,28 @@ export interface StellarUnsignedTransaction {
 export interface StellarSigner {
   readonly address: StellarAccountAddress
   readonly signTransaction: (transaction: StellarUnsignedTransaction) => Effect.Effect<string, StellarSignerError>
+  /**
+   * Signs a Soroban authorization entry of `address`: `hash` is the SHA-256 of the entry's `HashIdPreimage`
+   * (CAP-46-11), and the result the 64-byte ed25519 signature. Without it, `StellarRelayer.sign` cannot authorize an
+   * entry for `address`.
+   *
+   * @since 0.6.0
+   */
+  readonly signAuthEntry?:
+    | ((entry: { readonly network: StellarNetwork; readonly hash: Uint8Array }) => Effect.Effect<
+      Uint8Array,
+      StellarSignerError
+    >)
+    | undefined
 }
 
 const toError = (cause: unknown) => new StellarSignerError({ cause })
 
 /**
  * A signer for a key held elsewhere (a custody API, an HSM) that only signs a 32-byte hash. `signHash` receives the
- * transaction hash (the SHA-256 of the network id and the tagged transaction) and returns the 64-byte ed25519
- * signature. A failure of `signHash`, an envelope that is not XDR or a signature that `address` did not make fails
- * with a {@link StellarSignerError}.
+ * transaction hash (the SHA-256 of the network id and the tagged transaction), or the hash of an authorization entry,
+ * and returns the 64-byte ed25519 signature. A failure of `signHash`, an envelope that is not XDR or a signature that
+ * `address` did not make fails with a {@link StellarSignerError}.
  *
  * @since 0.2.0
  * @category constructors
@@ -80,7 +93,12 @@ export const fromHashSigner = <E>(options: {
       },
       catch: toError
     })
-  })
+  }),
+  signAuthEntry: ({ hash }) =>
+    Effect.mapError(
+      options.signHash(StellarTransactionHash.make(`0x${Buffer.from(hash).toString("hex")}`)),
+      toError
+    )
 })
 
 /**

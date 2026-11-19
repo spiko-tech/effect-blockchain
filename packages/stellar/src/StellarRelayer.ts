@@ -59,8 +59,14 @@
 import * as Confirmations from "@effect-blockchain/core/Confirmations"
 import {
   Account,
+  Address,
+  authorizeEntry,
+  buildAuthorizationEntryPreimage,
   decodeAddressToMuxedAccount,
+  encodeMuxedAccountToAddress,
+  extractBaseAddress,
   FeeBumpTransaction,
+  hash as sha256,
   Keypair,
   Operation,
   TransactionBuilder,
@@ -193,8 +199,10 @@ export class StellarRelayer extends Context.Service<StellarRelayer, {
    *
    * A single `invokeHostFunction` operation is simulated. The transaction gets its footprint and resources from the
    * simulation, missing `fees` are estimated from the Soroban inclusion fees, and the resource fee is added on top. An
-   * operation without authorization entries gets the ones the simulation returns, and fails with `UnsupportedAuth`
-   * when another address must sign one of them: pass that operation with its signed entries, which are kept. Fails
+   * operation without authorization entries gets the ones the simulation returns. An entry of the address of `signer`
+   * or of a cosigner is signed with its `signAuthEntry`, valid up to `maxLedger`, and the signed invocation is
+   * simulated again for its resources; a cosigner signs the transaction only when it is the source of an operation.
+   * Another entry fails with `UnsupportedAuth`: pass that operation with its signed entries, which are kept. Fails
    * with a {@link StellarSimulationError} when the simulation fails, or when it asks to restore an archived entry
    * first.
    *
@@ -413,38 +421,81 @@ export const layer = (options: {
               },
               catch: toSignerError
             })
+          const simulate = Effect.fnUntraced(function*(operations: ReadonlyArray<xdr.Operation>) {
+            const simulation = yield* rpc.simulateTransaction({ transaction: yield* build(operations, fee) })
+            if ("error" in simulation) {
+              return yield* new StellarSimulationError({ reason: new SimulationFailed({ error: simulation.error }) })
+            }
+            // signed as is, the invocation would fail in a ledger on its archived entries and still pay its fee
+            if (simulation.restorePreamble !== undefined) {
+              return yield* new StellarSimulationError({ reason: new RestoreRequired(simulation.restorePreamble) })
+            }
+            return simulation
+          })
+          // the signers of address entries, which sign the transaction only as the source of an operation
+          const authorizers = new Set<StellarSigner>()
+          // the preimage of CAP-46-11 (https://github.com/stellar/stellar-protocol/blob/master/core/cap-0046-11.md),
+          // signed as the `authorizeEntry` of `@stellar/stellar-sdk` signs for an account, valid up to `maxLedger`
+          const authorize = Effect.fnUntraced(function*(entry: xdr.SorobanAuthorizationEntry) {
+            if (entry.credentials.type === "sorobanCredentialsSourceAccount") return entry
+            const address = entry.credentials.type === "sorobanCredentialsAddress"
+              ? Address.fromScAddress(entry.credentials.address.address).toString()
+              : undefined
+            const authorizer = [signer, ...cosigners].find((each) => each.address === address)
+            if (authorizer?.signAuthEntry === undefined) {
+              return yield* new StellarSimulationError({ reason: new UnsupportedAuth() })
+            }
+            const validity = Number(maxLedger)
+            const preimage = buildAuthorizationEntryPreimage(entry, validity, networkPassphrase)
+            const signature = yield* authorizer.signAuthEntry({
+              network: rpc.network,
+              hash: sha256(preimage.toXdr())
+            })
+            authorizers.add(authorizer)
+            return yield* Effect.tryPromise({
+              // verifies the signature against the preimage and the address
+              try: () =>
+                authorizeEntry(
+                  entry,
+                  async () => ({ signature, publicKey: authorizer.address }),
+                  validity,
+                  networkPassphrase
+                ),
+              catch: toSignerError
+            })
+          })
           const prepare = Effect.fnUntraced(
             function*({ op, operation }: { operation: xdr.Operation; op: xdr.InvokeHostFunctionOp }) {
-              const simulation = yield* rpc.simulateTransaction({ transaction: yield* build(parsed, fee) })
-              if ("error" in simulation) {
-                return yield* new StellarSimulationError({ reason: new SimulationFailed({ error: simulation.error }) })
-              }
-              // signed as is, the invocation would fail in a ledger on its archived entries and still pay its fee
-              if (simulation.restorePreamble !== undefined) {
-                return yield* new StellarSimulationError({ reason: new RestoreRequired(simulation.restorePreamble) })
-              }
+              const simulation = yield* simulate(parsed)
               // entries the caller built and signed are kept
               if (op.auth.length > 0) return yield* build(parsed, fee, simulation.transactionData)
-              const auth = (simulation.results?.[0]?.auth ?? []).map((entry) =>
-                xdr.SorobanAuthorizationEntry.fromXdr(entry, "base64")
+              const auth = yield* Effect.forEach(
+                simulation.results?.[0]?.auth ?? [],
+                (entry) => authorize(xdr.SorobanAuthorizationEntry.fromXdr(entry, "base64"))
               )
-              // any other credentials carry a signature of their own, which the transaction's does not replace
-              if (auth.some((entry) => entry.credentials.type !== "sorobanCredentialsSourceAccount")) {
-                return yield* new StellarSimulationError({ reason: new UnsupportedAuth() })
-              }
               const authorized = new xdr.Operation({
                 sourceAccount: operation.sourceAccount,
                 body: xdr.OperationBody.invokeHostFunction(
                   new xdr.InvokeHostFunctionOp({ hostFunction: op.hostFunction, auth })
                 )
               })
+              // the first simulation ran on unsigned entries: the resources come from the entries that are sent, as
+              // for entries the caller signed
+              const resources = authorizers.size === 0 ? simulation : yield* simulate([authorized])
               // the builder adds the resource fee `transactionData` holds, the simulation's `minResourceFee`
-              return yield* build([authorized], fee, simulation.transactionData)
+              return yield* build([authorized], fee, resources.transactionData)
             }
           )
           const envelope = yield* (invocation === undefined ? build(parsed, fee) : prepare(invocation))
+          const sources = new Set(
+            parsed.flatMap(({ sourceAccount }) =>
+              sourceAccount === null ? [] : [extractBaseAddress(encodeMuxedAccountToAddress(sourceAccount))]
+            )
+          )
           let signed = envelope
           for (const each of [...(channel === undefined ? [] : [channel]), signer, ...cosigners]) {
+            // a signature the transaction does not need makes the network refuse it (`txBadAuthExtra`)
+            if (authorizers.has(each) && each.address !== source && !sources.has(each.address)) continue
             signed = yield* each.signTransaction({ network: rpc.network, envelope: signed })
           }
           return { hash: yield* hashOf(signed), signed, sequence, maxLedger }
@@ -737,8 +788,9 @@ export class SimulationFailed extends Schema.TaggedError<SimulationFailed>()("Si
 }) {}
 
 /**
- * The invocation needs an authorization entry signed by an address, which the signature of the transaction does not
- * give: pass the operation with its signed entries.
+ * The invocation needs an authorization entry that no signer covers: its address is a contract, or an account that is
+ * neither the signer nor a cosigner with `signAuthEntry`, or its credentials are not `sorobanCredentialsAddress`.
+ * Pass the operation with its signed entries.
  *
  * @since 0.2.0
  * @category reasons
