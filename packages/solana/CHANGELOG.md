@@ -1,5 +1,14 @@
 # @effect-blockchain/solana
 
+## 0.5.0
+
+### Minor Changes
+
+- [#113](https://github.com/spiko-tech/effect-blockchain/pull/113) [`622200b`](https://github.com/spiko-tech/effect-blockchain/commit/622200ba6da2e58392d0f29a21111a0962605554) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Add `SolanaRpc.getAccountInfo`
+  
+  - `getAccountInfo({ address, commitment, encoding, minContextSlot })` returns the account at the context `slot`, `null` for an address that holds none. A `minContextSlot` the endpoint has not reached fails `Lagging` and falls back to the next endpoint.
+  - New models `SolanaAccountEncoding` (`"base64" | "jsonParsed"`), `SolanaAccountData`, `SolanaAccount` and `SolanaAccountInfo`: the account types `owner`, `lamports`, `executable` and `data` by encoding, and keeps every other field as raw JSON.
+
 ## 0.4.0
 
 ### Minor Changes
