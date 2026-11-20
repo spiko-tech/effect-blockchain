@@ -1,5 +1,15 @@
 # @effect-blockchain/starknet
 
+## 0.5.0
+
+### Minor Changes
+
+- [#110](https://github.com/spiko-tech/effect-blockchain/pull/110) [`cb36590`](https://github.com/spiko-tech/effect-blockchain/commit/cb36590e773853038d7a8b42f648e640a89daa10) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Estimate fees and read class hashes
+  
+  - `StarknetRpc.getClassHashAt` reads `starknet_getClassHashAt` at a block tag. An address without a contract is `Rejected` with the code 20 (`CONTRACT_NOT_FOUND`), as in `getNonce`.
+  - `StarknetRelayer.estimateFees` returns the `StarknetFees` that `sign` would use for the same calls, from a `signer` or an `address`, with the node's `overallFee`.
+  - `StarknetRelayer.estimateDeployAccountFees` does the same for the deployment `signDeployAccount` would sign. Both share the estimate of `sign`, so the layer's `fees` strategy and `feeMultiplier` apply.
+
 ## 0.4.0
 
 ### Minor Changes

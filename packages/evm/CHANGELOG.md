@@ -1,5 +1,14 @@
 # @effect-blockchain/evm
 
+## 0.5.0
+
+### Minor Changes
+
+- [#112](https://github.com/spiko-tech/effect-blockchain/pull/112) [`4450fe8`](https://github.com/spiko-tech/effect-blockchain/commit/4450fe8f88f605c5db7563caad4dfa04a227a463) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Add `EvmRpc.call` in `@effect-blockchain/evm` 0.5.0
+  
+  - `EvmRpc.call({ to, data, from, blockTag })` sends `eth_call` and returns the call's return data as `EvmHexData`, with the same endpoint fallback, retries and error reasons as the other methods.
+  - A call that reverts fails with `Rejected` and the node's code (3 on geth and its forks) and message.
+
 ## 0.4.0
 
 ### Minor Changes

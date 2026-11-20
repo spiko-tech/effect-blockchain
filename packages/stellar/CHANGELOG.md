@@ -1,5 +1,21 @@
 # @effect-blockchain/stellar
 
+## 0.6.0
+
+### Minor Changes
+
+- [#114](https://github.com/spiko-tech/effect-blockchain/pull/114) [`3b21f9c`](https://github.com/spiko-tech/effect-blockchain/commit/3b21f9c528528e5cf0692284dbac69e8a7a4c1fd) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Sign address authorization entries in `@effect-blockchain/stellar` 0.6.0
+  
+  - `StellarSigner` gains an optional `signAuthEntry({ network, hash })`, which signs the SHA-256 of a Soroban authorization entry's preimage (CAP-46-11) and returns the 64-byte ed25519 signature. `fromHashSigner` and `fromPrivateKey` provide it through `signHash` and the secret seed.
+  - `StellarRelayer.sign` signs the `sorobanCredentialsAddress` entries of the simulation whose address is the signer's or a cosigner's, in the format of the SDK's `authorizeEntry`, valid up to the transaction's `maxLedger`, then simulates the signed invocation again for its resources. It used to fail with `UnsupportedAuth`.
+  - A cosigner that only signs an authorization entry, and is the source of no operation, does not sign the transaction, which the network would refuse with `txBadAuthExtra`.
+  - `UnsupportedAuth` remains for a contract address, an account no signer with `signAuthEntry` covers, and other credentials.
+
+- [#111](https://github.com/spiko-tech/effect-blockchain/pull/111) [`86885ee`](https://github.com/spiko-tech/effect-blockchain/commit/86885ee7b14a423a8333f7713d1577ae1b54913c) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Margin on the simulated resource fee
+  
+  - `StellarRelayer.layer` and `StellarRelayer.layerConfig` take `resourceFeeMultiplier` (default 1, so nothing changes without it), and `StellarRelayer.sign` takes the same option per call, which wins over the layer's. The simulation's `minResourceFee` of a Soroban invocation is multiplied, to the hundredth and rounded up, in the transaction's `sorobanData.resourceFee` and in its total fee. The margin lands in the refundable part of the resource fee, which guards against `invokeHostFunctionInsufficientRefundableFee`, and the node refunds what the transaction does not use.
+  - A `resourceFeeMultiplier` below 1, or not finite, fails `sign` with a `StellarSignerError` before any request.
+
 ## 0.5.0
 
 ### Minor Changes
