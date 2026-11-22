@@ -63,6 +63,16 @@ const balanceOf = (change: xdr.LedgerEntryChange, missing: xdr.LedgerEntryChange
     ? BigInt(0)
     : change.value.data.account.balance
 
+// the changes of `address` in a ledger, in the order stellar-core applies them
+const accountChanges = (metadataXdr: string, address: StellarAccountAddress): ReadonlyArray<xdr.LedgerEntryChange> => {
+  const bytes = Buffer.from(metadataXdr, "base64")
+  const accountId = StrKey.decodeEd25519PublicKey(address)
+  // every change of the account carries its id verbatim: most ledgers are skipped without decoding (1 to 3 MB)
+  if (!bytes.includes(accountId)) return []
+  const key = new xdr.Uint256Bytes(accountId)
+  return ledgerChanges(xdr.LedgerCloseMeta.fromXdr(bytes)).filter((change) => accountIdOf(change)?.equals(key) === true)
+}
+
 /**
  * The native balance of `address` around its changes in a ledger, from the base64 XDR `LedgerCloseMeta` of
  * `getLedgers` (versions 0 to 2, fee processing, operations and Soroban fee refunds, fee-bump fee sources included).
@@ -71,17 +81,39 @@ const balanceOf = (change: xdr.LedgerEntryChange, missing: xdr.LedgerEntryChange
  * @internal
  */
 export const accountChange = (metadataXdr: string, address: StellarAccountAddress): Option.Option<AccountChange> => {
-  const bytes = Buffer.from(metadataXdr, "base64")
-  const accountId = StrKey.decodeEd25519PublicKey(address)
-  // every change of the account carries its id verbatim: most ledgers are skipped without decoding (1 to 3 MB)
-  if (!bytes.includes(accountId)) return Option.none()
-  const key = new xdr.Uint256Bytes(accountId)
-  const changes = ledgerChanges(xdr.LedgerCloseMeta.fromXdr(bytes)).filter((change) =>
-    accountIdOf(change)?.equals(key) === true
-  )
+  const changes = accountChanges(metadataXdr, address)
   const first = changes[0]
   const last = changes[changes.length - 1]
   return first === undefined || last === undefined
     ? Option.none()
     : Option.some({ before: balanceOf(first, "ledgerEntryCreated"), after: balanceOf(last, "ledgerEntryRemoved") })
+}
+
+/**
+ * The account of `address` before its first change in a ledger: `created` when the ledger creates it, else its
+ * balance in stroops and the ledger that last changed it. `None` when the ledger does not change the account. Throws
+ * on a malformed meta, or a first change other than `STATE` or `CREATED`.
+ *
+ * @internal
+ */
+export const accountBefore = (
+  metadataXdr: string,
+  address: StellarAccountAddress
+): Option.Option<
+  { readonly created: true } | {
+    readonly created: false
+    readonly balance: bigint
+    readonly lastModifiedLedger: bigint
+  }
+> => {
+  const first = accountChanges(metadataXdr, address)[0]
+  if (first === undefined) return Option.none()
+  if (first.type === "ledgerEntryCreated") return Option.some({ created: true })
+  // stellar-core records an entry's `STATE` before its first update or removal in a ledger
+  if (first.type !== "ledgerEntryState") throw new Error(`expected the account's state first, got ${first.type}`)
+  return Option.some({
+    created: false,
+    balance: balanceOf(first, "ledgerEntryCreated"),
+    lastModifiedLedger: BigInt(first.value.lastModifiedLedgerSeq)
+  })
 }

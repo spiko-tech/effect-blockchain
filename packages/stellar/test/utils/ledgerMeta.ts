@@ -17,9 +17,9 @@ const header =
 
 const accountId = (address: string) => Keypair.fromPublicKey(address).xdrAccountId()
 
-export const account = (address: string, balance: number, sequence = 1) =>
+export const account = (address: string, balance: number, sequence = 1, lastModifiedLedger = 1) =>
   new xdr.LedgerEntry({
-    lastModifiedLedgerSeq: 1,
+    lastModifiedLedgerSeq: lastModifiedLedger,
     data: xdr.LedgerEntryData.account(
       new xdr.AccountEntry({
         accountId: accountId(address),
@@ -58,9 +58,14 @@ export const dataKey = (address: string) =>
 export const accountKey = (address: string) =>
   xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: accountId(address) }))
 
-/** The `STATE` then `UPDATED` changes of a balance going from `from` to `to`. */
-export const update = (address: string, from: number, to: number): Array<xdr.LedgerEntryChange> => [
-  xdr.LedgerEntryChange.ledgerEntryState(account(address, from)),
+/** The `STATE` (last modified in `lastModifiedLedger`) then `UPDATED` changes of a balance going from `from` to `to`. */
+export const update = (
+  address: string,
+  from: number,
+  to: number,
+  lastModifiedLedger = 1
+): Array<xdr.LedgerEntryChange> => [
+  xdr.LedgerEntryChange.ledgerEntryState(account(address, from, 1, lastModifiedLedger)),
   xdr.LedgerEntryChange.ledgerEntryUpdated(account(address, to))
 ]
 

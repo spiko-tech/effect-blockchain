@@ -669,6 +669,25 @@ describe("StellarIndexer.streamEvents", () => {
   })
 })
 
+describe("StellarIndexer.fetchEvents", () => {
+  it.effect("retries a request failing with a transient reason, with retry", () =>
+    Effect.gen(function*() {
+      const filter = { ...streamOptions.filter, fromBlock: S_FROM, toBlock: S_TO }
+      const fetch = (retry?: Schedule.Schedule<unknown, StellarRpc.StellarRpcError>) =>
+        Effect.gen(function*() {
+          return yield* (yield* StellarIndexer.StellarIndexer).fetchEvents(filter, { retry })
+        })
+      const retried = fakeRpc(S_TO, new Map([[1, new JsonRpc.Unavailable()]]))
+      const events = yield* provide(fetch(Schedule.recurs(1)), retried.layer, { confirmations: 0 })
+      assert.deepStrictEqual(events, streamEvents.filter((event) => event.inSuccessfulContractCall))
+      assert.deepStrictEqual(retried.state.ranges, [[S_FROM, S_TO], [S_FROM, S_TO]])
+      const failed = yield* Effect.flip(
+        provide(fetch(), fakeRpc(S_TO, new Map([[1, new JsonRpc.Unavailable()]])).layer, { confirmations: 0 })
+      )
+      assert.strictEqual(failed.reason._tag, "Unavailable")
+    }))
+})
+
 describe("layerConfig", () => {
   const lastConfirmed = (env: Record<string, string>) =>
     Effect.gen(function*() {
