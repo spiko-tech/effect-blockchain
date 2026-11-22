@@ -174,6 +174,21 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
     }
   ) => Effect.Effect<bigint, StarknetRpcError>
   /**
+   * The STRK balances of `address` in fri at the end of each of `blocks`, in the order of `blocks`. Costs one
+   * `starknet_call` per distinct block, none for an empty `blocks`. `concurrency` is the number of blocks read at once,
+   * 1 by default, and `retry` works as in {@link fetchNativeBalance}.
+   *
+   * @since 0.7.0
+   */
+  readonly fetchNativeBalances: (
+    options: {
+      readonly address: StarknetAddress
+      readonly blocks: ReadonlyArray<bigint>
+      readonly concurrency?: number | undefined
+      readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+    }
+  ) => Effect.Effect<ReadonlyArray<bigint>, StarknetRpcError>
+  /**
    * The STRK balance of `address` at `fromBlock`, `fromBlock + step`, `fromBlock + 2 * step`... one sample per step
    * even when unchanged, following the confirmed head.
    */
@@ -272,37 +287,56 @@ export const layer = (options: {
         next <= head
           ? Effect.succeed(head)
           : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }))
+      const balanceAt = (
+        address: StarknetAddress,
+        block: bigint,
+        retry: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+      ) =>
+        retrying(
+          rpc.call({
+            contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
+            entryPointSelector: BALANCE_OF,
+            calldata: [address],
+            blockNumber: block
+          }),
+          retry
+        ).pipe(Effect.flatMap((felts) =>
+          felts.length === 2
+            ? Effect.succeed(BigInt(felts[0]) + (BigInt(felts[1]) << BigInt(128)))
+            : Effect.fail(
+              new StarknetRpcError({
+                reason: new JsonRpc.InvalidResponse(),
+                method: "starknet_call",
+                endpoint: "StarknetIndexer",
+                cause: new Error(`balanceOf returned ${felts.length} felts, expected a u256 (low, high)`)
+              })
+            )
+        ))
+      const fetchNativeBalances = Effect.fn("StarknetIndexer.fetchNativeBalances")(
+        ({ address, blocks, concurrency = 1, retry }: {
+          readonly address: StarknetAddress
+          readonly blocks: ReadonlyArray<bigint>
+          readonly concurrency?: number | undefined
+          readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+        }) => {
+          const distinct = Array.from(new Set(blocks))
+          return Effect.forEach(distinct, (block) => balanceAt(address, block, retry), { concurrency }).pipe(
+            Effect.map((balances) => blocks.map((block) => balances[distinct.indexOf(block)]))
+          )
+        }
+      )
       const fetchNativeBalance = Effect.fn("StarknetIndexer.fetchNativeBalance")(
         ({ address, block, retry }: {
           readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
           readonly address: StarknetAddress
           readonly block: bigint
-        }) =>
-          retrying(
-            rpc.call({
-              contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
-              entryPointSelector: BALANCE_OF,
-              calldata: [address],
-              blockNumber: block
-            }),
-            retry
-          ).pipe(Effect.flatMap((felts) =>
-            felts.length === 2
-              ? Effect.succeed(BigInt(felts[0]) + (BigInt(felts[1]) << BigInt(128)))
-              : Effect.fail(
-                new StarknetRpcError({
-                  reason: new JsonRpc.InvalidResponse(),
-                  method: "starknet_call",
-                  endpoint: "StarknetIndexer",
-                  cause: new Error(`balanceOf returned ${felts.length} felts, expected a u256 (low, high)`)
-                })
-              )
-          ))
+        }) => Effect.map(fetchNativeBalances({ address, blocks: [block], retry }), (balances) => balances[0])
       )
       return StarknetIndexer.of({
         lastConfirmedBlock,
         fetchEvents,
         fetchNativeBalance,
+        fetchNativeBalances,
         streamNativeBalance: (
           { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
         ) => {
