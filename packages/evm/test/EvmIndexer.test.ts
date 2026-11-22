@@ -561,6 +561,54 @@ describe("EvmIndexer.fetchNativeBalance", () => {
   })
 })
 
+describe("EvmIndexer.fetchNativeBalances", () => {
+  const fetch = (blocks: ReadonlyArray<bigint>, concurrency?: number) =>
+    Effect.gen(function*() {
+      return yield* (yield* EvmIndexer.EvmIndexer).fetchNativeBalances({ address: FOUNDATION, blocks, concurrency })
+    })
+
+  it.effect("reads each distinct block once and answers in the order of blocks", () => {
+    const { layer, state } = fakeRpc(TO)
+    const blocks = [TO, FROM, TO, FROM + BigInt(1)]
+    return provide(fetch(blocks), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual(blocks.map(balanceAt))
+      expect(state.samples).toStrictEqual([TO, FROM, FROM + BigInt(1)])
+    }))
+  })
+
+  it.effect("sends no request for an empty blocks", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provide(fetch([]), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual([])
+      expect(state.samples).toStrictEqual([])
+    }))
+  })
+
+  it.effect("reads one block at a time by default, and up to concurrency blocks at once", () =>
+    Effect.gen(function*() {
+      const blocks = [FROM, FROM + BigInt(1), FROM + BigInt(2)]
+      for (const [concurrency, expected] of [[undefined, 1], [2, 2]] as const) {
+        const fake = fakeRpc(TO)
+        const flight = { now: 0, max: 0 }
+        const counted = Layer.effect(
+          EvmRpc.EvmRpc,
+          Effect.map(Effect.service(EvmRpc.EvmRpc), (rpc) =>
+            EvmRpc.EvmRpc.of({
+              ...rpc,
+              getBalance: (options) =>
+                Effect.sync(() => flight.max = Math.max(flight.max, ++flight.now)).pipe(
+                  Effect.andThen(Effect.yieldNow),
+                  Effect.andThen(rpc.getBalance(options)),
+                  Effect.ensuring(Effect.sync(() => flight.now--))
+                )
+            }))
+        ).pipe(Layer.provide(fake.layer))
+        expect(yield* provide(fetch(blocks, concurrency), counted)).toStrictEqual(blocks.map(balanceAt))
+        expect(flight.max).toBe(expected)
+      }
+    }))
+})
+
 describe("EvmIndexer.streamNativeBalance", () => {
   const options = { address: FOUNDATION, fromBlock: FROM, toBlock: TO, step: 4 }
 

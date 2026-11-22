@@ -639,6 +639,59 @@ const collectBalances = (options: StarknetIndexer.StarknetIndexerNativeBalanceOp
 
 const sampled = (blocks: ReadonlyArray<bigint>) => blocks.map((block) => ({ block, balance: block * BigInt(7) }))
 
+describe("StarknetIndexer.fetchNativeBalances", () => {
+  const fetch = (blocks: ReadonlyArray<bigint>, concurrency?: number) =>
+    Effect.gen(function*() {
+      return yield* (yield* StarknetIndexer.StarknetIndexer).fetchNativeBalances({
+        address: TOKEN,
+        blocks,
+        concurrency
+      })
+    })
+  const balances = (blocks: ReadonlyArray<bigint>) => sampled(blocks).map(({ balance }) => balance)
+
+  it.effect("reads each distinct block once and answers in the order of blocks", () => {
+    const { layer, state } = fakeRpc(TO)
+    const blocks = [TO, FROM, TO, FROM + BigInt(1)]
+    return provideFake(fetch(blocks), layer).pipe(Effect.map((result) => {
+      expect(result).toStrictEqual(balances(blocks))
+      expect(state.samples).toStrictEqual([TO, FROM, FROM + BigInt(1)])
+    }))
+  })
+
+  it.effect("sends no request for an empty blocks", () => {
+    const { layer, state } = fakeRpc(TO)
+    return provideFake(fetch([]), layer).pipe(Effect.map((result) => {
+      expect(result).toStrictEqual([])
+      expect(state.samples).toStrictEqual([])
+    }))
+  })
+
+  it.effect("reads one block at a time by default, and up to concurrency blocks at once", () =>
+    Effect.gen(function*() {
+      const blocks = [FROM, FROM + BigInt(1), FROM + BigInt(2)]
+      for (const [concurrency, expected] of [[undefined, 1], [2, 2]] as const) {
+        const fake = fakeRpc(TO)
+        const flight = { now: 0, max: 0 }
+        const counted = Layer.effect(
+          StarknetRpc.StarknetRpc,
+          Effect.map(Effect.service(StarknetRpc.StarknetRpc), (rpc) =>
+            StarknetRpc.StarknetRpc.of({
+              ...rpc,
+              call: (options) =>
+                Effect.sync(() => flight.max = Math.max(flight.max, ++flight.now)).pipe(
+                  Effect.andThen(Effect.yieldNow),
+                  Effect.andThen(rpc.call(options)),
+                  Effect.ensuring(Effect.sync(() => flight.now--))
+                )
+            }))
+        ).pipe(Layer.provide(fake.layer))
+        expect(yield* provideFake(fetch(blocks, concurrency), counted)).toStrictEqual(balances(blocks))
+        expect(flight.max).toBe(expected)
+      }
+    }))
+})
+
 describe("StarknetIndexer native balance", () => {
   it.effect("fetchNativeBalance reads the balance at the block", () => {
     const { layer, state } = fakeRpc(TO)

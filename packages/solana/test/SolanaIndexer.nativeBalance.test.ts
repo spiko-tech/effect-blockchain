@@ -229,6 +229,54 @@ describe("SolanaIndexer.fetchNativeBalance", () => {
   }
 })
 
+describe("SolanaIndexer.fetchNativeBalances", () => {
+  const fetchAll = (blocks: ReadonlyArray<number>) =>
+    Effect.gen(function*() {
+      return yield* (yield* SolanaIndexer.SolanaIndexer).fetchNativeBalances({
+        address: ADDRESS,
+        blocks: blocks.map(BigInt)
+      })
+    })
+
+  it.effect("lists once and reads each transaction once, in the order of blocks", () => {
+    // balances 100 after slot 10, 300 after slot 20
+    const { layer, state } = fakeRpc({ head: 100, txs: [{ slot: 10, post: 100 }, { slot: 20, post: 300 }] })
+    return provide(fetchAll([25, 5, 15, 25, 12, 20]), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual([300, 0, 100, 300, 100, 300].map(BigInt))
+      expect(state.calls).toStrictEqual([
+        "getSlot",
+        "getSignaturesForAddress",
+        "getTransaction 1 json",
+        "getTransaction 0 json"
+      ])
+    }))
+  })
+
+  it.effect("reads getBalance for a block at the confirmed head and the transactions for the others", () => {
+    const { layer, state } = fakeRpc({ head: 100, txs, balance: 7 })
+    return provide(fetchAll([15, 100]), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual([100, 7].map(BigInt))
+      expect(state.calls).toStrictEqual(["getSlot", "getBalance", "getSignaturesForAddress", "getTransaction 0 json"])
+    }))
+  })
+
+  it.effect("reads 0 for an address without transactions", () => {
+    const { layer, state } = fakeRpc({ head: 100, txs: [] })
+    return provide(fetchAll([5, 50]), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual([0, 0].map(BigInt))
+      expect(state.calls).toStrictEqual(["getSlot", "getSignaturesForAddress"])
+    }))
+  })
+
+  it.effect("sends no request for an empty blocks", () => {
+    const { layer, state } = fakeRpc({ head: 100, txs })
+    return provide(fetchAll([]), layer).pipe(Effect.map((balances) => {
+      expect(balances).toStrictEqual([])
+      expect(state.calls).toStrictEqual([])
+    }))
+  })
+})
+
 describe("SolanaIndexer.fetchNativeBalance retry", () => {
   // confirmed head 28: every request kind, getSlot, getBalance, getSignaturesForAddress and getTransaction, once
   const reads = ["getSlot", "getBalance", "getSignaturesForAddress", "getTransaction 2 json"]

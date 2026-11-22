@@ -163,6 +163,21 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
     }
   ) => Effect.Effect<bigint, EvmRpc.EvmRpcError>
   /**
+   * The native balances of `address` in wei at the end of each of `blocks`, in the order of `blocks`. Costs one
+   * `eth_getBalance` per distinct block, none for an empty `blocks`. `concurrency` is the number of blocks read at
+   * once, 1 by default, and `retry` works as in {@link fetchNativeBalance}.
+   *
+   * @since 0.7.0
+   */
+  readonly fetchNativeBalances: (
+    options: {
+      readonly address: EvmAddress
+      readonly blocks: ReadonlyArray<bigint>
+      readonly concurrency?: number | undefined
+      readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+    }
+  ) => Effect.Effect<ReadonlyArray<bigint>, EvmRpc.EvmRpcError>
+  /**
    * The native balance of `address` at `fromBlock`, `fromBlock + step`, ... (a sample at every step, changed or not),
    * each read once its block is confirmed, following the confirmed head.
    *
@@ -268,6 +283,23 @@ export const layer = (options: {
           ).pipe(Effect.map(Arr.flatten))
         }
       )
+      const fetchNativeBalances = Effect.fn("EvmIndexer.fetchNativeBalances")(
+        (
+          { address, blocks, concurrency = 1, retry }: {
+            readonly address: EvmAddress
+            readonly blocks: ReadonlyArray<bigint>
+            readonly concurrency?: number | undefined
+            readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+          }
+        ) => {
+          const distinct = Array.from(new Set(blocks))
+          return Effect.forEach(
+            distinct,
+            (block) => retrying(rpc.getBalance({ address, blockNumber: block }), retry),
+            { concurrency }
+          ).pipe(Effect.map((balances) => blocks.map((block) => balances[distinct.indexOf(block)])))
+        }
+      )
       const fetchNativeBalance = Effect.fn("EvmIndexer.fetchNativeBalance")(
         (
           { address, block, retry }: {
@@ -275,7 +307,7 @@ export const layer = (options: {
             readonly block: bigint
             readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
           }
-        ) => retrying(rpc.getBalance({ address, blockNumber: block }), retry)
+        ) => Effect.map(fetchNativeBalances({ address, blocks: [block], retry }), (balances) => balances[0])
       )
       return EvmIndexer.of({
         lastConfirmedBlock,
@@ -299,6 +331,7 @@ export const layer = (options: {
             })))
         },
         fetchNativeBalance,
+        fetchNativeBalances,
         streamNativeBalance: (
           { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
         ) => {

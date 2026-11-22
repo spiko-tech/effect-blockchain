@@ -68,6 +68,9 @@ Delivery is at-least-once: save `batch.toBlock` once the batch is handled and re
 A history read costs requests in proportion to the changes of its subject or to its results, and never to the number of
 blocks between the requested block and the head. Each history method states its request cost.
 
+Every indexer reads the native balance of an address at many blocks with `fetchNativeBalances`, in the order of the
+blocks, and `fetchNativeBalance` reads one block through it.
+
 Every indexer read (`fetch*` and `stream*`) takes `retry`, which retries each request that failed with a transient
 reason. A retry sends that request again and keeps the pages already read. It is off by default.
 

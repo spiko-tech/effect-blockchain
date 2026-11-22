@@ -54,6 +54,7 @@ import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
+import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import type * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
@@ -258,6 +259,21 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
       readonly block: bigint
     }
   ) => Effect.Effect<bigint, SolanaRpcError>
+  /**
+   * The lamports of `address` at the end of each of `blocks`, in the order of `blocks`, each read as by
+   * {@link fetchNativeBalance}. Costs one `getSignaturesForAddress` per 1000 signatures of `address` since the lowest
+   * block, plus one `getTransaction` per distinct transaction read, at most one `getBalance` and the head read, and
+   * nothing for an empty `blocks`. `retry` works as in {@link fetchNativeBalance}.
+   *
+   * @since 0.7.0
+   */
+  readonly fetchNativeBalances: (
+    options: {
+      readonly address: SolanaAddress
+      readonly blocks: ReadonlyArray<bigint>
+      readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
+    }
+  ) => Effect.Effect<ReadonlyArray<bigint>, SolanaRpcError>
   /**
    * The lamports of `address` at every `step` slots from `fromBlock`, following the confirmed head. A sample only
    * reads the meta of the newest transaction since the previous one, so epoch rewards, which change a balance without
@@ -583,16 +599,11 @@ export const layer = (options: {
         )
       }
 
-      const balanceOf = (
-        address: SolanaAddress,
-        signature: SolanaTransactionHash,
-        side: "pre" | "post",
-        retry: Retry
-      ) =>
+      const balanceChangeOf = (address: SolanaAddress, signature: SolanaTransactionHash, retry: Retry) =>
         retrying(rpc.getTransaction({ signature, commitment: COMMITMENT, encoding: "json" }), retry).pipe(
           Effect.flatMap((tx) =>
             Option.match(balanceChange(tx, address), {
-              onSome: (change) => Effect.succeed(change[side]),
+              onSome: Effect.succeed,
               onNone: () =>
                 Effect.fail(
                   new SolanaRpcError({
@@ -605,54 +616,82 @@ export const layer = (options: {
             })
           )
         )
-      // the balance at the end of `block`, at or below `confirmed`, given the sample before it when there is one
-      const balanceAt = Effect.fnUntraced(function*(
+      // the balances at the end of the non-empty `blocks`, given the sample before them when there is one
+      const balancesAt = Effect.fnUntraced(function*(
         address: SolanaAddress,
-        block: bigint,
+        blocks: Arr.NonEmptyReadonlyArray<bigint>,
         confirmed: bigint,
         previous: Option.Option<SolanaNativeBalance>,
         retry: Retry
-      ): Effect.fn.Return<bigint, SolanaRpcError> {
+      ): Effect.fn.Return<Array<bigint>, SolanaRpcError> {
+        const highest = Arr.max(blocks, BigInt_.Order)
         // read before the signatures, so that a transaction landing in between is listed
-        const current = Option.isNone(previous) && block >= confirmed
+        const current = Option.isNone(previous) && highest >= confirmed
           ? Option.some(yield* retrying(rpc.getBalance({ address }), retry))
           : Option.none()
-        // the newest signature, and the newest at or before `block` or else the oldest
-        const { last, newest } = yield* signatures(address, BigInt_.min(block, confirmed), retry).pipe(
-          Stream.takeUntil(({ slot }) => slot <= block),
+        // newest first, so the newest signature at or before each block is the first one at or before it
+        const descending = Arr.sort(new Set(blocks), Order.flip(BigInt_.Order))
+        const lowest = descending[descending.length - 1]
+        const atOrBefore = new Map<bigint, SolanaSignatureInfo>()
+        const { newest, oldest } = yield* signatures(address, BigInt_.min(highest, confirmed), retry).pipe(
+          Stream.takeUntil(({ slot }) => slot <= lowest),
           Stream.runFold(
-            () => ({ newest: Option.none<SolanaSignatureInfo>(), last: Option.none<SolanaSignatureInfo>() }),
-            (acc, info) => ({ newest: Option.orElseSome(acc.newest, () => info), last: Option.some(info) })
+            () => ({ newest: Option.none<SolanaSignatureInfo>(), oldest: Option.none<SolanaSignatureInfo>() }),
+            (acc, info) => {
+              while (atOrBefore.size < descending.length && info.slot <= descending[atOrBefore.size]) {
+                atOrBefore.set(descending[atOrBefore.size], info)
+              }
+              return { newest: Option.orElseSome(acc.newest, () => info), oldest: Option.some(info) }
+            }
           )
         )
-        if (
-          Option.isSome(current) &&
-          Option.match(newest, {
-            onNone: () => true,
-            onSome: ({ slot }) => slot <= BigInt_.min(block, current.value.slot)
-          })
-        ) {
-          return current.value.value
-        }
-        if (Option.isSome(last) && last.value.slot <= block) {
-          return Option.isSome(previous) && last.value.slot <= previous.value.block
-            ? previous.value.balance
-            : yield* balanceOf(address, last.value.signature, "post", retry)
-        }
-        if (Option.isSome(previous)) return previous.value.balance
-        return Option.isSome(last) ? yield* balanceOf(address, last.value.signature, "pre", retry) : BigInt(0)
+        // each block's balance when known without a transaction, else the transaction and side to read
+        const plans = blocks.map(
+          (block): bigint | { readonly signature: SolanaTransactionHash; readonly side: "pre" | "post" } => {
+            if (
+              Option.isSome(current) && block >= confirmed &&
+              Option.match(newest, {
+                onNone: () => true,
+                onSome: ({ slot }) => slot <= BigInt_.min(block, current.value.slot)
+              })
+            ) {
+              return current.value.value
+            }
+            const at = atOrBefore.get(block)
+            if (at !== undefined) {
+              return Option.isSome(previous) && at.slot <= previous.value.block
+                ? previous.value.balance
+                : { signature: at.signature, side: "post" }
+            }
+            if (Option.isSome(previous)) return previous.value.balance
+            // no signature at or before `block`: the listing reached the oldest one
+            return Option.match(oldest, {
+              onNone: () => BigInt(0),
+              onSome: ({ signature }) => ({ signature, side: "pre" as const })
+            })
+          }
+        )
+        const reads = Array.from(new Set(plans.flatMap((plan) => typeof plan === "bigint" ? [] : [plan.signature])))
+        const changes = yield* Effect.forEach(reads, (signature) => balanceChangeOf(address, signature, retry))
+        return plans.map((plan) => typeof plan === "bigint" ? plan : changes[reads.indexOf(plan.signature)][plan.side])
       })
 
-      const fetchNativeBalance = Effect.fn("SolanaIndexer.fetchNativeBalance")(
-        function*(
-          { address, block, retry }: {
-            readonly retry?: Retry
-            readonly address: SolanaAddress
-            readonly block: bigint
-          }
-        ) {
-          return yield* balanceAt(address, block, yield* retrying(lastConfirmedBlock, retry), Option.none(), retry)
+      const fetchNativeBalances = Effect.fn("SolanaIndexer.fetchNativeBalances")(
+        function*({ address, blocks, retry }: {
+          readonly address: SolanaAddress
+          readonly blocks: ReadonlyArray<bigint>
+          readonly retry?: Retry
+        }) {
+          if (!Arr.isReadonlyArrayNonEmpty(blocks)) return []
+          return yield* balancesAt(address, blocks, yield* retrying(lastConfirmedBlock, retry), Option.none(), retry)
         }
+      )
+      const fetchNativeBalance = Effect.fn("SolanaIndexer.fetchNativeBalance")(
+        ({ address, block, retry }: {
+          readonly retry?: Retry
+          readonly address: SolanaAddress
+          readonly block: bigint
+        }) => Effect.map(fetchNativeBalances({ address, blocks: [block], retry }), (balances) => balances[0])
       )
 
       const streamNativeBalance = (
@@ -674,7 +713,7 @@ export const layer = (options: {
             Effect.flatMap((confirmed) =>
               confirmed < block
                 ? Effect.succeed<Sample>([[], Option.none()])
-                : balanceAt(address, block, confirmed, previous, undefined).pipe(Effect.map((balance): Sample => {
+                : balancesAt(address, [block], confirmed, previous, undefined).pipe(Effect.map(([balance]): Sample => {
                   const current = { block, balance }
                   return [
                     [current],
@@ -696,6 +735,7 @@ export const layer = (options: {
         fetchTransactionBatch,
         streamTransactions,
         fetchNativeBalance,
+        fetchNativeBalances,
         streamNativeBalance
       })
     })
