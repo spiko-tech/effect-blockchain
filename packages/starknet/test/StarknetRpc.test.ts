@@ -178,7 +178,7 @@ describe("StarknetRpc", () => {
         executionStatus: "SUCCEEDED"
       })
       expect(yield* unknown.run(status)).toBeNull()
-      expect(yield* Effect.flip(failing.run(status))).toMatchObject({ reason: { _tag: "Rejected" }, code: -32601 })
+      expect(yield* Effect.flip(failing.run(status))).toMatchObject({ reason: { _tag: "Lagging" }, code: 29 })
       expect(yield* Effect.flip(refusedFirst.run(status))).toMatchObject({ reason: { _tag: "Lagging" }, code: 29 })
       expect(yield* downLast.run(status)).toBeNull()
       expect(yield* Effect.flip(allDown.run(status))).toMatchObject({ reason: { _tag: "Unavailable" }, code: 63 })

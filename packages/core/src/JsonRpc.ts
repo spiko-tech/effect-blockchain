@@ -23,7 +23,7 @@
  *
  * @since 0.1.0
  */
-import type * as Arr from "effect/Array"
+import * as Arr from "effect/Array"
 import * as BigInt_ from "effect/BigInt"
 import * as Clock from "effect/Clock"
 import * as Data from "effect/Data"
@@ -322,7 +322,8 @@ export interface JsonRpc<Info, E, J = Schema.Json> {
   ) => Effect.Effect<A, E>
   /**
    * Runs `f` on each endpoint in order until one succeeds or fails with a reason that does not fall back. When
-   * several endpoints were tried, the error is the last one with an `AggregateError` of every error as its `cause`.
+   * several endpoints were tried, the error is the last transient one, else the last one, with an `AggregateError` of
+   * every error as its `cause`.
    * `only` restricts the call to some of `endpoints`, tried in the order given.
    */
   readonly withFallback: <A>(
@@ -608,15 +609,16 @@ export const make = Effect.fnUntraced(function*<Info, E extends ErrorShape, J = 
             Effect.andThen(from(index + 1, tried))
           )
         }
-        return Effect.fail(
-          tried.length === 1 ? last : makeError({
-            reason: last.reason,
-            method: last.method,
-            endpoint: last.endpoint,
-            code: last.code,
-            cause: new AggregateError(tried, `${tried.length} endpoints failed`)
-          })
-        )
+        if (tried.length === 1) return Effect.fail(last)
+        // a final reason from a later endpoint must not hide a transient one: a retry of the call can still succeed
+        const reported = Option.getOrElse(Arr.findLast(tried, (error) => isTransient(error.reason)), () => last)
+        return Effect.fail(makeError({
+          reason: reported.reason,
+          method: reported.method,
+          endpoint: reported.endpoint,
+          code: reported.code,
+          cause: new AggregateError(tried, `${tried.length} endpoints failed`)
+        }))
       })
     return from(0, [])
   }

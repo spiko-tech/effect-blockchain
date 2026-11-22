@@ -27,8 +27,9 @@ Every failure is a `<Chain>RpcError` with a `reason`, matched with `Effect.catch
 | `Rejected`        | any other JSON-RPC error, or params that do not encode                    | no                           |
 | `WrongNetwork`    | the endpoint does not serve the configured network                        | no                           |
 
-After the last endpoint, the error is the last endpoint's error and its `cause` is an `AggregateError` holding the
-error of each endpoint in order. `code` is the JSON-RPC error code or the HTTP status. The `name` of an endpoint
+After the last endpoint, the error takes its `reason`, `method`, `endpoint` and `code` from the last error with a
+transient reason, else from the last error, so that a call retried while its reason is transient still runs when a
+later endpoint failed for good. Its `cause` is an `AggregateError` holding the error of each endpoint in order. `code` is the JSON-RPC error code or the HTTP status. The `name` of an endpoint
 appears in errors, spans and metrics. Its `url` is `Redacted` and never does.
 
 `JsonRpc.isTransient(reason)` is `true` for `Unavailable`, `InvalidResponse` and `Lagging`: a later attempt can

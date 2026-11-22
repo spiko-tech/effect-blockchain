@@ -25,8 +25,8 @@ const b = (n: number) => BigInt(n)
 // creating it. `getLatestLedger` and `getLedgerEntries` answer at `state.head`, `getLedgers` builds the ledgers' metas,
 // unless `metas` sets one. The n-th regular (`failAt`) or archive (`archiveFailAt`) `getLedgers` call (1-based) fails
 // with the reason set for it. `entry` overrides the account entry at the head. A regular page starting below `oldest`
-// fails `Pruned`; an `archive` page goes to `archivePages`, and fails `Rejected` as `StellarRpc` does when no endpoint
-// is flagged `archive`.
+// fails `Pruned`, reported as the fallback does behind an earlier transient failure with `prunedAfterTransient`; an
+// `archive` page goes to `archivePages`, and fails `Rejected` as `StellarRpc` does when no endpoint is flagged `archive`.
 const fakeRpc = (
   head: bigint,
   changes: ReadonlyMap<bigint, number>,
@@ -37,6 +37,7 @@ const fakeRpc = (
     readonly entry?: StellarRpc.StellarLedgerEntry
     readonly oldest?: bigint
     readonly archive?: boolean
+    readonly prunedAfterTransient?: boolean
   } = {}
 ) => {
   const state = {
@@ -89,7 +90,18 @@ const fakeRpc = (
           const reason = options.failAt?.get(state.pages.length)
           if (reason !== undefined) return fail(reason, "getLedgers")
           if (options.oldest !== undefined && startLedger < options.oldest) {
-            return fail(new JsonRpc.Pruned(), "getLedgers")
+            if (options.prunedAfterTransient !== true) return fail(new JsonRpc.Pruned(), "getLedgers")
+            const errors = [new JsonRpc.Unavailable(), new JsonRpc.Pruned()].map((reason) =>
+              new StellarRpc.StellarRpcError({ reason, method: "getLedgers", endpoint: "fake", cause: new Error() })
+            )
+            return Effect.fail(
+              new StellarRpc.StellarRpcError({
+                reason: new JsonRpc.Unavailable(),
+                method: "getLedgers",
+                endpoint: "fake",
+                cause: new AggregateError(errors)
+              })
+            )
           }
         }
         const end = BigInt_.min(startLedger + b(limit ?? 5) - b(1), state.head)
@@ -244,6 +256,14 @@ describe("StellarIndexer.fetchNativeBalance", () => {
     return provide(fetchAt(106), layer).pipe(Effect.map((balance) => {
       assert.strictEqual(balance, b(50))
       assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1]])
+      assert.deepStrictEqual(state.archivePages, [[b(112), 1]])
+    }))
+  })
+
+  it.effect("reads from the archive endpoints when a regular endpoint fails Pruned after a transient failure", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(115), archive: true, prunedAfterTransient: true })
+    return provide(fetchAt(106), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(50))
       assert.deepStrictEqual(state.archivePages, [[b(112), 1]])
     }))
   })
