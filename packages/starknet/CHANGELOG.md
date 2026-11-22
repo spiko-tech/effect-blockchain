@@ -1,5 +1,19 @@
 # @effect-blockchain/starknet
 
+## 0.6.0
+
+### Minor Changes
+
+- [#116](https://github.com/spiko-tech/effect-blockchain/pull/116) [`82ac02a`](https://github.com/spiko-tech/effect-blockchain/commit/82ac02afa9cc363abf48a6cf530574e2d292c6b9) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Retry transient failures in every `StarknetIndexer` fetch
+  
+  - `StarknetIndexer.fetchEvents` takes an optional second argument `{ retry }`, and `StarknetIndexer.fetchNativeBalance` takes `retry` in its options. `retry` retries each `starknet_getEvents` page or `starknet_call` failing with a transient reason (`JsonRpc.isTransient`), so a retry keeps the pages already read. A cursor page still failing after its retries restarts its range once, as before. It is off by default.
+  - The JSDoc of both methods states their request cost.
+
+### Patch Changes
+
+- Updated dependencies [[`95dbf54`](https://github.com/spiko-tech/effect-blockchain/commit/95dbf54e9731e86edb85a675429c586320b8a747)]:
+  - @effect-blockchain/core@0.3.0
+
 ## 0.5.0
 
 ### Minor Changes

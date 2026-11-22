@@ -1,5 +1,24 @@
 # @effect-blockchain/stellar
 
+## 0.7.0
+
+### Minor Changes
+
+- [#119](https://github.com/spiko-tech/effect-blockchain/pull/119) [`95dbf54`](https://github.com/spiko-tech/effect-blockchain/commit/95dbf54e9731e86edb85a675429c586320b8a747) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Hop to the archive endpoints when any regular endpoint failed `Pruned`
+  
+  - `StellarIndexer` reads a ledger from the endpoints flagged `archive` when one of the regular endpoints failed `Pruned`, even when an earlier one failed with a transient reason and the call reports that reason (`@effect-blockchain/core` fallback rule).
+
+- [#117](https://github.com/spiko-tech/effect-blockchain/pull/117) [`ab46dbe`](https://github.com/spiko-tech/effect-blockchain/commit/ab46dbee14cd0c4e8231dedad8bed52feef888ae) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read past native balances by hopping back through the ledgers that changed the account
+  
+  - `StellarIndexer.fetchNativeBalance` reads the account entry at the head, then the `getLedgers` meta of each ledger that changed the account after `block`, one ledger per request, instead of every ledger since `block`. The first sample of `streamNativeBalance` reads the same way.
+  - `fetchNativeBalance` fails `InvalidResponse` when a ledger does not change the account its entry names, or names a later previous change.
+  - `fetchNativeBalance` and `fetchEvents` take `retry`, which retries each request that failed with a transient reason. It is off by default.
+
+### Patch Changes
+
+- Updated dependencies [[`95dbf54`](https://github.com/spiko-tech/effect-blockchain/commit/95dbf54e9731e86edb85a675429c586320b8a747)]:
+  - @effect-blockchain/core@0.3.0
+
 ## 0.6.0
 
 ### Minor Changes
