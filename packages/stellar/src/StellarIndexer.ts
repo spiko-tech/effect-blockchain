@@ -341,12 +341,14 @@ export const layer = (options: {
       })
 
       // one `getLedgers` page: from the archive endpoints only with `archive`, else from the regular ones and, once
-      // they fail `Pruned`, from the archive ones; with no archive endpoint, the `Pruned` error stands
+      // one of them fails `Pruned`, from the archive ones; with no archive endpoint, the regular error stands. The
+      // fallback reports a transient reason over `Pruned`, so `Pruned` is looked for in every endpoint's error.
       const ledgersPage = (startLedger: bigint, limit: number, archive: boolean) =>
         archive
           ? rpc.getLedgers({ startLedger, limit, archive })
           : rpc.getLedgers({ startLedger, limit }).pipe(Effect.catchIf(
-            (error) => error.reason._tag === "Pruned",
+            (error) =>
+              JsonRpc.errorsOf(error).some((each) => each instanceof StellarRpcError && each.reason._tag === "Pruned"),
             (pruned) =>
               rpc.getLedgers({ startLedger, limit, archive: true }).pipe(Effect.catchIf(
                 (error) => error.reason._tag === "Rejected" && error.endpoint === "archive",

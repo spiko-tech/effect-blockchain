@@ -460,7 +460,7 @@ describe("JsonRpc", () => {
       b: { blockNumber: () => ({ error: { code: -32602, message: "invalid params" } }) }
     }, { parseBody })
     return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: { _tag: "Rejected" }, code: -32602, endpoint: "b" })
+      expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, code: -32005, endpoint: "a" })
       assert.instanceOf(error.cause, AggregateError)
       expect(error.cause.errors).toMatchObject([{ reason: { _tag: "Unavailable" }, code: -32005 }, { code: -32602 }])
       expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId", "b:blockNumber"])
@@ -609,6 +609,43 @@ describe("JsonRpc reasons", () => {
       expect(error.cause).not.toBeInstanceOf(AggregateError)
     })))
 
+  describe("withFallback reports the last transient reason", () => {
+    const pruned = () => ({ error: { code: -32001, message: "pruned" } })
+    const rejected = () => ({ error: { code: -32602, message: "invalid params" } })
+    const reported = (nodes: Record<string, Node>) =>
+      setup(nodes).run((rpc) => Effect.flip(rpc.blockNumber)).pipe(
+        Effect.map((error) => {
+          assert.instanceOf(error.cause, AggregateError)
+          expect(error.cause.errors).toMatchObject(Object.keys(nodes).map((endpoint) => ({ endpoint })))
+          return error
+        })
+      )
+
+    it.effect("over a later final reason", () =>
+      Effect.map(reported({ a: { blockNumber: down }, b: { blockNumber: pruned } }), (error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, endpoint: "a", code: 503 })
+      }))
+
+    it.effect("over an earlier final reason", () =>
+      Effect.map(reported({ a: { blockNumber: pruned }, b: { blockNumber: down } }), (error) => {
+        expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, endpoint: "b", code: 503 })
+      }))
+
+    it.effect("and the last final reason when none is transient", () =>
+      Effect.gen(function*() {
+        expect(yield* reported({ a: { blockNumber: pruned }, b: { blockNumber: pruned } })).toMatchObject({
+          reason: { _tag: "Pruned" },
+          endpoint: "b",
+          code: -32001
+        })
+        expect(yield* reported({ a: { blockNumber: rejected }, b: { blockNumber: rejected } })).toMatchObject({
+          reason: { _tag: "Rejected" },
+          endpoint: "b",
+          code: -32602
+        })
+      }))
+  })
+
   it.effect("withFallback only tries the endpoints it is given", () => {
     const { calls, run } = setup({ a: { blockNumber: head(1) }, b: { blockNumber: down }, c: { blockNumber: head(3) } })
     return run(({ engine }) => {
@@ -636,7 +673,7 @@ describe("JsonRpc reasons", () => {
       c: { blockNumber: head(1) }
     })
     return run((rpc) => Effect.flip(rpc.blockNumber)).pipe(Effect.map((error) => {
-      expect(error).toMatchObject({ reason: { _tag: "WrongNetwork" }, endpoint: "b" })
+      expect(error).toMatchObject({ reason: { _tag: "Unavailable" }, endpoint: "a" })
       assert.instanceOf(error.cause, AggregateError)
       expect(error.cause.errors).toMatchObject([{ endpoint: "a" }, { endpoint: "b" }])
       expect(calls).toStrictEqual(["a:chainId", "a:blockNumber", "b:chainId"])
