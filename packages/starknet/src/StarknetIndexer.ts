@@ -5,7 +5,7 @@
  *
  * An event range is split into ranges of at most `maxBlockRange` blocks, each paged with `starknet_getEvents`. A page
  * after a cursor is only served by the endpoint that issued the cursor, so when it fails the range restarts once from
- * its first page. Any other failure fails the whole call, and the caller retries the same range.
+ * its first page. Any other failure left after `retry` fails the whole call, and the caller retries the same range.
  *
  * @example
  * ```ts
@@ -145,10 +145,15 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
   /** The latest block with at least `confirmations` blocks on top of it, never below 0. */
   readonly lastConfirmedBlock: Effect.Effect<bigint, StarknetRpcError>
   /**
-   * Every event matching `filter` in `[fromBlock, toBlock]`, in chain order. `fromBlock > toBlock` returns no events.
-   * A `toBlock` above `lastConfirmedBlock` is accepted.
+   * Every event matching `filter` in `[fromBlock, toBlock]`, in chain order. `fromBlock > toBlock` returns no events. A
+   * `toBlock` above `lastConfirmedBlock` is accepted. Costs one `starknet_getEvents` per page of `chunkSize` events,
+   * and at least one per `maxBlockRange` blocks of the range. `retry` retries a request failing with a transient reason
+   * ({@link JsonRpc.isTransient}), and is off by default.
    */
-  readonly fetchEvents: (filter: StarknetIndexerFilter) => Effect.Effect<ReadonlyArray<StarknetEvent>, StarknetRpcError>
+  readonly fetchEvents: (
+    filter: StarknetIndexerFilter,
+    options?: { readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined }
+  ) => Effect.Effect<ReadonlyArray<StarknetEvent>, StarknetRpcError>
   /**
    * The events matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed blocks, following
    * the confirmed head.
@@ -156,9 +161,17 @@ export class StarknetIndexer extends Context.Service<StarknetIndexer, {
   readonly streamEvents: (
     options: StarknetIndexerStreamOptions
   ) => Stream.Stream<StarknetIndexerBatch, StarknetRpcError>
-  /** The STRK balance of `address` in fri at the end of `block`. A `block` above `lastConfirmedBlock` is accepted. */
+  /**
+   * The STRK balance of `address` in fri at the end of `block`. A `block` above `lastConfirmedBlock` is accepted. Costs
+   * one `starknet_call` at `block`. `retry` retries a request failing with a transient reason
+   * ({@link JsonRpc.isTransient}), and is off by default.
+   */
   readonly fetchNativeBalance: (
-    options: { readonly address: StarknetAddress; readonly block: bigint }
+    options: {
+      readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+      readonly address: StarknetAddress
+      readonly block: bigint
+    }
   ) => Effect.Effect<bigint, StarknetRpcError>
   /**
    * The STRK balance of `address` at `fromBlock`, `fromBlock + step`, `fromBlock + 2 * step`... one sample per step
@@ -179,6 +192,14 @@ export const DEFAULT_POLL_INTERVAL: Duration.Duration = Confirmations.DEFAULT_PO
 
 // sn_keccak("balanceOf"), the ERC-20 entry point selector
 const BALANCE_OF = "0x02e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e"
+
+const retrying = <A>(
+  effect: Effect.Effect<A, StarknetRpcError>,
+  retry: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+) =>
+  retry === undefined
+    ? effect
+    : Effect.retry(effect, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
 
 // the confirmed blocks [next, head] not indexed yet, empty once the stream reaches the head it last read
 interface StreamPosition {
@@ -215,7 +236,10 @@ export const layer = (options: {
         Effect.map((head) => Confirmations.lastConfirmedBlock(head, confirmations)),
         Effect.withSpan("StarknetIndexer.lastConfirmedBlock")
       )
-      const fetchEvents = Effect.fn("StarknetIndexer.fetchEvents")((filter: StarknetIndexerFilter) =>
+      const fetchEvents = Effect.fn("StarknetIndexer.fetchEvents")((
+        filter: StarknetIndexerFilter,
+        { retry }: { readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined } = {}
+      ) =>
         Effect.forEach(
           filter.fromBlock > filter.toBlock ? [] : Arr.makeBy(
             Number((filter.toBlock - filter.fromBlock) / size) + 1,
@@ -228,11 +252,13 @@ export const layer = (options: {
             return Stream.paginate(
               Option.none<StarknetEventsCursor>(),
               (cursor) =>
-                rpc.getEvents({ ...range, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
-                  onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
-                  onSuccess: (page) =>
-                    [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
-                }))
+                retrying(rpc.getEvents({ ...range, cursor: Option.getOrUndefined(cursor) }), retry).pipe(
+                  Effect.mapBoth({
+                    onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
+                    onSuccess: (page) =>
+                      [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
+                  })
+                )
             ).pipe(
               Stream.runCollect,
               Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
@@ -246,22 +272,21 @@ export const layer = (options: {
         next <= head
           ? Effect.succeed(head)
           : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= next }))
-      const retrying = <A, S>(
-        step: (state: S) => Effect.Effect<A, StarknetRpcError>,
-        retry: Schedule.Schedule<unknown, StarknetRpcError> | undefined
-      ) =>
-        retry === undefined
-          ? step
-          : (state: S) =>
-            Effect.retry(step(state), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
       const fetchNativeBalance = Effect.fn("StarknetIndexer.fetchNativeBalance")(
-        ({ address, block }: { readonly address: StarknetAddress; readonly block: bigint }) =>
-          rpc.call({
-            contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
-            entryPointSelector: BALANCE_OF,
-            calldata: [address],
-            blockNumber: block
-          }).pipe(Effect.flatMap((felts) =>
+        ({ address, block, retry }: {
+          readonly retry?: Schedule.Schedule<unknown, StarknetRpcError> | undefined
+          readonly address: StarknetAddress
+          readonly block: bigint
+        }) =>
+          retrying(
+            rpc.call({
+              contractAddress: StarknetNetwork.STRK_TOKEN_ADDRESS,
+              entryPointSelector: BALANCE_OF,
+              calldata: [address],
+              blockNumber: block
+            }),
+            retry
+          ).pipe(Effect.flatMap((felts) =>
             felts.length === 2
               ? Effect.succeed(BigInt(felts[0]) + (BigInt(felts[1]) << BigInt(128)))
               : Effect.fail(
@@ -301,10 +326,13 @@ export const layer = (options: {
                   : Option.some({ next: next + size, head: confirmed })
               ]))
             }))
-          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, retrying(sample, retry))
+          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, (position) =>
+            retrying(sample(position), retry))
         },
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
-          if (toBlock !== undefined && fromBlock > toBlock) return Stream.empty
+          if (toBlock !== undefined && fromBlock > toBlock) {
+            return Stream.empty
+          }
           const step = (
             { head, next }: StreamPosition
           ): Effect.Effect<
@@ -313,7 +341,9 @@ export const layer = (options: {
           > =>
             confirmedFor(next, head, poll).pipe(Effect.flatMap((confirmed) => {
               const cap = toBlock === undefined ? confirmed : BigInt_.min(confirmed, toBlock)
-              if (next > cap) return Effect.succeed([[], Option.none()])
+              if (next > cap) {
+                return Effect.succeed([[], Option.none()])
+              }
               const end = BigInt_.min(next + size - BigInt(1), cap)
               return fetchEvents({ ...filter, fromBlock: next, toBlock: end }).pipe(Effect.map((events) => [
                 [{ fromBlock: next, toBlock: end, events }],
@@ -321,7 +351,8 @@ export const layer = (options: {
               ]))
             }))
           // a head below `fromBlock`: the first step reads it
-          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, retrying(step, retry))
+          return Stream.paginate({ next: fromBlock, head: fromBlock - BigInt(1) }, (position) =>
+            retrying(step(position), retry))
         }
       })
     })

@@ -100,6 +100,8 @@ const lastConfirmedBlock = Effect.gen(function*() {
   return yield* (yield* EvmIndexer.EvmIndexer).lastConfirmedBlock
 })
 
+type FetchOptions = { readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined }
+
 describe("EvmIndexer", () => {
   for (const provider of ["alchemy", "infura"]) {
     // the recorded request covers the whole pinned range: the default maxBlockRange sends it as one chunk
@@ -659,6 +661,66 @@ describe("EvmIndexer.streamNativeBalance", () => {
         expect(state.samples).toHaveLength(2)
       })
     )
+  })
+})
+
+describe("EvmIndexer fetch retry", () => {
+  const fetchLogs = (options?: FetchOptions) =>
+    Effect.gen(function*() {
+      return yield* (yield* EvmIndexer.EvmIndexer).fetchLogs(filter, options)
+    }).pipe(Effect.exit)
+  const fetchBalance = (options?: FetchOptions) =>
+    Effect.gen(function*() {
+      return yield* (yield* EvmIndexer.EvmIndexer).fetchNativeBalance({ address: EUTBL, block: FROM, ...options })
+    }).pipe(Effect.exit)
+  const ranges = pinnedBatches.map(([from, to]) => [from, to])
+
+  it.effect("fetchLogs retries a range failing with a transient reason, without reading the others again", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provide(fetchLogs({ retry: Schedule.recurs(1) }), layer, { maxBlockRange: 3 }).pipe(Effect.map((exit) => {
+      expect(exit).toStrictEqual(Exit.succeed(pinnedLogs))
+      expect(state.ranges).toStrictEqual([ranges[0], ranges[1], ...ranges.slice(1)])
+    }))
+  })
+
+  it.effect("fetchLogs fails at once on a reason that is not transient", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Pruned()]]))
+    return provide(fetchLogs({ retry: Schedule.recurs(5) }), layer, { maxBlockRange: 3 }).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Pruned" } } })
+      expect(state.ranges).toHaveLength(2)
+    }))
+  })
+
+  it.effect("fetchLogs does not retry by default", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provide(fetchLogs(), layer, { maxBlockRange: 3 }).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(state.ranges).toHaveLength(2)
+    }))
+  })
+
+  it.effect("fetchNativeBalance retries a transient reason", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Lagging()]]))
+    return provide(fetchBalance({ retry: Schedule.recurs(1) }), layer).pipe(Effect.map((exit) => {
+      expect(exit).toStrictEqual(Exit.succeed(balanceAt(FROM)))
+      expect(state.samples).toStrictEqual([FROM, FROM])
+    }))
+  })
+
+  it.effect("fetchNativeBalance fails at once on a reason that is not transient", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Pruned()]]))
+    return provide(fetchBalance({ retry: Schedule.recurs(5) }), layer).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Pruned" } } })
+      expect(state.samples).toStrictEqual([FROM])
+    }))
+  })
+
+  it.effect("fetchNativeBalance does not retry by default", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Unavailable()]]))
+    return provide(fetchBalance(), layer).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(state.samples).toStrictEqual([FROM])
+    }))
   })
 })
 

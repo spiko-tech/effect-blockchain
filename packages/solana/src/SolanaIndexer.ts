@@ -6,8 +6,8 @@
  *
  * `getSignaturesForAddress` takes no slot range, so a range is paged from the head backwards until it passes
  * `fromBlock`: the cost grows with the history of the address since `fromBlock`, then each transaction costs one
- * `getTransaction`. A failure fails the whole call, and the caller retries the same range. Over consecutive ranges,
- * `fetchTransactionBatch` returns a cursor from which the next range is paged instead of the head.
+ * `getTransaction`. A failure left after `retry` fails the whole call, and the caller retries the same range. Over
+ * consecutive ranges, `fetchTransactionBatch` returns a cursor from which the next range is paged instead of the head.
  *
  * @example
  * ```ts
@@ -190,34 +190,45 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
   readonly lastConfirmedBlock: Effect.Effect<bigint, SolanaRpcError>
   /**
    * The transactions touching `address` in slots `fromBlock..toBlock` (both inclusive), in chain order. Empty when
-   * `fromBlock > toBlock`. `encoding` defaults to `base64`.
+   * `fromBlock > toBlock`. `encoding` defaults to `base64`. Costs one `getSignaturesForAddress` per 1000 signatures of
+   * `address` since `fromBlock`, then one `getTransaction` per transaction of the range. `retry` retries a request
+   * failing with a transient reason ({@link JsonRpc.isTransient}), and is off by default.
    */
   readonly fetchTransactions: {
     (
       filter: SolanaIndexerFilter,
-      options?: { readonly encoding?: "base64" | undefined }
+      options?: {
+        readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
+        readonly encoding?: "base64" | undefined
+      }
     ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction>, SolanaRpcError>
     <Encoding extends SolanaTransactionEncoding>(
       filter: SolanaIndexerFilter,
-      options: { readonly encoding: Encoding }
+      options: { readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined; readonly encoding: Encoding }
     ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<Encoding>>, SolanaRpcError>
   }
   /**
    * The transactions of `fetchTransactions`, with a cursor for the next range. Over consecutive ascending ranges,
    * passing each returned `cursor` to the next call lists every signature page about once instead of paging from the
-   * head each time.
+   * head each time. Costs as `fetchTransactions`, the signatures counted from the cursor instead of the head.
+   * `retry` retries a request failing with a transient reason ({@link JsonRpc.isTransient}), and is off by default.
    */
   readonly fetchTransactionBatch: {
     (
       filter: SolanaIndexerFilter,
       options?: {
+        readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
         readonly encoding?: "base64" | undefined
         readonly cursor?: SolanaSignatureCursor | undefined
       }
     ): Effect.Effect<SolanaIndexerCursorBatch, SolanaRpcError>
     <Encoding extends SolanaTransactionEncoding>(
       filter: SolanaIndexerFilter,
-      options: { readonly encoding: Encoding; readonly cursor?: SolanaSignatureCursor | undefined }
+      options: {
+        readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
+        readonly encoding: Encoding
+        readonly cursor?: SolanaSignatureCursor | undefined
+      }
     ): Effect.Effect<SolanaIndexerCursorBatch<Encoding>, SolanaRpcError>
   }
   /**
@@ -235,12 +246,18 @@ export class SolanaIndexer extends Context.Service<SolanaIndexer, {
   /**
    * The lamports of `address` at the end of slot `block`: the `postBalances` of its newest transaction at or before
    * `block`, else the `preBalances` of its first one after. At or above the confirmed head with no newer transaction,
-   * its `getBalance`: an address without any transaction reads its current balance there and 0 below.
+   * its `getBalance`: an address without any transaction reads its current balance there and 0 below. Costs one
+   * `getSignaturesForAddress` per 1000 signatures of `address` since `block`, plus at most one `getTransaction`, one
+   * `getBalance` and the head read. `retry` retries a request failing with a transient reason
+   * ({@link JsonRpc.isTransient}), and is off by default.
    */
-  readonly fetchNativeBalance: (options: {
-    readonly address: SolanaAddress
-    readonly block: bigint
-  }) => Effect.Effect<bigint, SolanaRpcError>
+  readonly fetchNativeBalance: (
+    options: {
+      readonly retry?: Schedule.Schedule<unknown, SolanaRpcError> | undefined
+      readonly address: SolanaAddress
+      readonly block: bigint
+    }
+  ) => Effect.Effect<bigint, SolanaRpcError>
   /**
    * The lamports of `address` at every `step` slots from `fromBlock`, following the confirmed head. A sample only
    * reads the meta of the newest transaction since the previous one, so epoch rewards, which change a balance without
@@ -315,15 +332,12 @@ const balanceChange = (
   return pre === undefined || post === undefined ? Option.none() : Option.some({ pre, post })
 }
 
-// retries a stream step failing with a transient reason at the same position
-const withRetry = <S, A>(
-  retry: Schedule.Schedule<unknown, SolanaRpcError> | undefined,
-  step: (position: S) => Effect.Effect<A, SolanaRpcError>
-) =>
+type Retry = Schedule.Schedule<unknown, SolanaRpcError> | undefined
+
+const retrying = <A>(effect: Effect.Effect<A, SolanaRpcError>, retry: Retry) =>
   retry === undefined
-    ? step
-    : (position: S) =>
-      Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+    ? effect
+    : Effect.retry(effect, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
 
 /**
  * Builds a {@link SolanaIndexer} on the provided {@link SolanaRpc}.
@@ -356,17 +370,25 @@ export const layer = (options: {
       )
       // the signature pages of `address` older than `before` (from the head when none), newest first, a page read only
       // when the previous one is consumed
-      const pages = (address: SolanaAddress, minContextSlot: bigint, before: Option.Option<SolanaTransactionHash>) =>
+      const pages = (
+        address: SolanaAddress,
+        minContextSlot: bigint,
+        before: Option.Option<SolanaTransactionHash>,
+        retry: Retry
+      ) =>
         Stream.paginate(
           before,
           (before) =>
-            rpc.getSignaturesForAddress({
-              address,
-              before: Option.getOrUndefined(before),
-              limit: PAGE_SIZE,
-              commitment: COMMITMENT,
-              minContextSlot
-            }).pipe(Effect.map((page) => {
+            retrying(
+              rpc.getSignaturesForAddress({
+                address,
+                before: Option.getOrUndefined(before),
+                limit: PAGE_SIZE,
+                commitment: COMMITMENT,
+                minContextSlot
+              }),
+              retry
+            ).pipe(Effect.map((page) => {
               const last = page.at(-1)
               return [
                 [page],
@@ -374,11 +396,11 @@ export const layer = (options: {
               ] as const
             }))
         )
-      const signatures = (address: SolanaAddress, minContextSlot: bigint) =>
-        pages(address, minContextSlot, Option.none()).pipe(Stream.flattenIterable)
+      const signatures = (address: SolanaAddress, minContextSlot: bigint, retry: Retry) =>
+        pages(address, minContextSlot, Option.none(), retry).pipe(Stream.flattenIterable)
       // the pages down to the first short page or the first page reaching below `fromBlock`
-      const listPages = (filter: SolanaIndexerFilter, before: Option.Option<SolanaTransactionHash>) =>
-        pages(filter.address, filter.toBlock, before).pipe(
+      const listPages = (filter: SolanaIndexerFilter, before: Option.Option<SolanaTransactionHash>, retry: Retry) =>
+        pages(filter.address, filter.toBlock, before, retry).pipe(
           Stream.takeUntil((page) => {
             const last = page.at(-1)
             return last === undefined || last.slot < filter.fromBlock
@@ -389,16 +411,17 @@ export const layer = (options: {
       // entry above `toBlock` reads the same signatures of the range as a listing from the head
       const fetchSignatures = Effect.fnUntraced(function*(
         filter: SolanaIndexerFilter,
-        cursor: SolanaSignatureCursor["signatures"]
+        cursor: SolanaSignatureCursor["signatures"],
+        retry: Retry
       ) {
         const above = Arr.filter(cursor, ({ slot }) => slot > filter.toBlock)
         const resumed = Arr.isReadonlyArrayNonEmpty(above)
-          ? yield* listPages(filter, Option.some(above[0].signature))
+          ? yield* listPages(filter, Option.some(above[0].signature), retry)
           : []
         // Agave answers an unknown `before` with an empty page (`get_confirmed_signatures_for_address2` in
         // `ledger/src/blockstore.rs`), so an empty first page lists from the head again
         const known = (resumed[0]?.length ?? 0) > 0
-        const read = known ? resumed : yield* listPages(filter, Option.none())
+        const read = known ? resumed : yield* listPages(filter, Option.none(), retry)
         // each page but the last was followed by the page older than its last signature
         const ends = read.slice(0, -1).flatMap((page) => {
           const last = page.at(-1)
@@ -415,67 +438,90 @@ export const layer = (options: {
           cursor: [...Arr.reverse(ends), ...(known ? above : [])]
         }
       })
-      const fetchEach = (signatures: ReadonlyArray<SolanaSignatureInfo>, encoding: SolanaTransactionEncoding) =>
+      const fetchEach = (
+        signatures: ReadonlyArray<SolanaSignatureInfo>,
+        encoding: SolanaTransactionEncoding,
+        retry: Retry
+      ) =>
         Effect.forEach(signatures, ({ err, signature }) =>
-          rpc.getTransaction({ signature, commitment: COMMITMENT, encoding }).pipe(
+          retrying(rpc.getTransaction({ signature, commitment: COMMITMENT, encoding }), retry).pipe(
             Effect.map((tx) => ({ signature, err, ...tx }))
           ))
       const fetchRange = Effect.fn("SolanaIndexer.fetchTransactions")(
-        function*(filter: SolanaIndexerFilter, encoding: SolanaTransactionEncoding) {
+        function*(filter: SolanaIndexerFilter, encoding: SolanaTransactionEncoding, retry: Retry) {
           if (filter.fromBlock > filter.toBlock) {
             return []
           }
-          return yield* fetchEach((yield* fetchSignatures(filter, [])).signatures, encoding)
+          return yield* fetchEach((yield* fetchSignatures(filter, [], retry)).signatures, encoding, retry)
         }
       )
       const fetchBatch = Effect.fn("SolanaIndexer.fetchTransactionBatch")(
         function*(
           filter: SolanaIndexerFilter,
           encoding: SolanaTransactionEncoding,
-          cursor: SolanaSignatureCursor | undefined
+          cursor: SolanaSignatureCursor | undefined,
+          retry: Retry
         ) {
           const { fromBlock, toBlock } = filter
           const entries = cursor?.address === filter.address ? cursor.signatures : []
           if (fromBlock > toBlock) {
             return { fromBlock, toBlock, transactions: [], cursor: { address: filter.address, signatures: entries } }
           }
-          const listed = yield* fetchSignatures(filter, entries)
-          const transactions = yield* fetchEach(listed.signatures, encoding)
+          const listed = yield* fetchSignatures(filter, entries, retry)
+          const transactions = yield* fetchEach(listed.signatures, encoding, retry)
           return { fromBlock, toBlock, transactions, cursor: { address: filter.address, signatures: listed.cursor } }
         }
       )
 
       function fetchTransactions(
         filter: SolanaIndexerFilter,
-        options?: { readonly encoding?: "base64" | undefined }
+        options?: {
+          readonly retry?: Retry
+          readonly encoding?: "base64" | undefined
+        }
       ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction>, SolanaRpcError>
       function fetchTransactions<Encoding extends SolanaTransactionEncoding>(
         filter: SolanaIndexerFilter,
-        options: { readonly encoding: Encoding }
+        options: {
+          readonly retry?: Retry
+          readonly encoding: Encoding
+        }
       ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<Encoding>>, SolanaRpcError>
       function fetchTransactions(
         filter: SolanaIndexerFilter,
-        { encoding = "base64" }: { readonly encoding?: SolanaTransactionEncoding | undefined } = {}
+        { encoding = "base64", retry }: {
+          readonly retry?: Retry
+          readonly encoding?: SolanaTransactionEncoding | undefined
+        } = {}
       ): Effect.Effect<ReadonlyArray<SolanaIndexedTransaction<SolanaTransactionEncoding>>, SolanaRpcError> {
-        return fetchRange(filter, encoding)
+        return fetchRange(filter, encoding, retry)
       }
 
       function fetchTransactionBatch(
         filter: SolanaIndexerFilter,
-        options?: { readonly encoding?: "base64" | undefined; readonly cursor?: SolanaSignatureCursor | undefined }
+        options?: {
+          readonly retry?: Retry
+          readonly encoding?: "base64" | undefined
+          readonly cursor?: SolanaSignatureCursor | undefined
+        }
       ): Effect.Effect<SolanaIndexerCursorBatch, SolanaRpcError>
       function fetchTransactionBatch<Encoding extends SolanaTransactionEncoding>(
         filter: SolanaIndexerFilter,
-        options: { readonly encoding: Encoding; readonly cursor?: SolanaSignatureCursor | undefined }
+        options: {
+          readonly retry?: Retry
+          readonly encoding: Encoding
+          readonly cursor?: SolanaSignatureCursor | undefined
+        }
       ): Effect.Effect<SolanaIndexerCursorBatch<Encoding>, SolanaRpcError>
       function fetchTransactionBatch(
         filter: SolanaIndexerFilter,
-        { cursor, encoding = "base64" }: {
+        { cursor, encoding = "base64", retry }: {
+          readonly retry?: Retry
           readonly encoding?: SolanaTransactionEncoding | undefined
           readonly cursor?: SolanaSignatureCursor | undefined
         } = {}
       ): Effect.Effect<SolanaIndexerCursorBatch<SolanaTransactionEncoding>, SolanaRpcError> {
-        return fetchBatch(filter, encoding, cursor)
+        return fetchBatch(filter, encoding, cursor, retry)
       }
 
       function streamTransactions(
@@ -500,7 +546,7 @@ export const layer = (options: {
           if (Arr.isReadonlyArrayNonEmpty(groups)) {
             const [group, ...rest] = groups
             const end = rest.length === 0 ? cap : Arr.lastNonEmpty(group).slot
-            return fetchEach(group, encoding).pipe(
+            return fetchEach(group, encoding, undefined).pipe(
               Effect.map((transactions): Step => [
                 [{ fromBlock: next, toBlock: end, transactions }],
                 after(end, cap, rest)
@@ -519,7 +565,7 @@ export const layer = (options: {
               if (next > end) {
                 return Effect.succeed([[], Option.none()] as const)
               }
-              return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }, []).pipe(
+              return fetchSignatures({ address: filter.address, fromBlock: next, toBlock: end }, [], undefined).pipe(
                 Effect.map(({ signatures }): Step =>
                   Arr.isReadonlyArrayNonEmpty(signatures)
                     ? [[], Option.some({ next, cap: end, groups: groupBySlot(signatures, maxBatchSize) })]
@@ -531,17 +577,22 @@ export const layer = (options: {
           )
         }
         return Stream.paginate(
-          { next: fromBlock, cap: fromBlock, groups: [] } satisfies StreamPosition,
-          withRetry(retry, step)
+          { next: fromBlock, cap: fromBlock, groups: [] } satisfies StreamPosition as StreamPosition,
+          (position) =>
+            retrying(step(position), retry)
         )
       }
 
-      const balanceOf = (address: SolanaAddress, signature: SolanaTransactionHash, side: "pre" | "post") =>
-        rpc.getTransaction({ signature, commitment: COMMITMENT, encoding: "json" }).pipe(
+      const balanceOf = (
+        address: SolanaAddress,
+        signature: SolanaTransactionHash,
+        side: "pre" | "post",
+        retry: Retry
+      ) =>
+        retrying(rpc.getTransaction({ signature, commitment: COMMITMENT, encoding: "json" }), retry).pipe(
           Effect.flatMap((tx) =>
             Option.match(balanceChange(tx, address), {
-              onSome: (change) =>
-                Effect.succeed(change[side]),
+              onSome: (change) => Effect.succeed(change[side]),
               onNone: () =>
                 Effect.fail(
                   new SolanaRpcError({
@@ -559,14 +610,15 @@ export const layer = (options: {
         address: SolanaAddress,
         block: bigint,
         confirmed: bigint,
-        previous: Option.Option<SolanaNativeBalance>
+        previous: Option.Option<SolanaNativeBalance>,
+        retry: Retry
       ): Effect.fn.Return<bigint, SolanaRpcError> {
         // read before the signatures, so that a transaction landing in between is listed
         const current = Option.isNone(previous) && block >= confirmed
-          ? Option.some(yield* rpc.getBalance({ address }))
+          ? Option.some(yield* retrying(rpc.getBalance({ address }), retry))
           : Option.none()
         // the newest signature, and the newest at or before `block` or else the oldest
-        const { last, newest } = yield* signatures(address, BigInt_.min(block, confirmed)).pipe(
+        const { last, newest } = yield* signatures(address, BigInt_.min(block, confirmed), retry).pipe(
           Stream.takeUntil(({ slot }) => slot <= block),
           Stream.runFold(
             () => ({ newest: Option.none<SolanaSignatureInfo>(), last: Option.none<SolanaSignatureInfo>() }),
@@ -585,15 +637,21 @@ export const layer = (options: {
         if (Option.isSome(last) && last.value.slot <= block) {
           return Option.isSome(previous) && last.value.slot <= previous.value.block
             ? previous.value.balance
-            : yield* balanceOf(address, last.value.signature, "post")
+            : yield* balanceOf(address, last.value.signature, "post", retry)
         }
         if (Option.isSome(previous)) return previous.value.balance
-        return Option.isSome(last) ? yield* balanceOf(address, last.value.signature, "pre") : BigInt(0)
+        return Option.isSome(last) ? yield* balanceOf(address, last.value.signature, "pre", retry) : BigInt(0)
       })
 
       const fetchNativeBalance = Effect.fn("SolanaIndexer.fetchNativeBalance")(
-        function*({ address, block }: { readonly address: SolanaAddress; readonly block: bigint }) {
-          return yield* balanceAt(address, block, yield* lastConfirmedBlock, Option.none())
+        function*(
+          { address, block, retry }: {
+            readonly retry?: Retry
+            readonly address: SolanaAddress
+            readonly block: bigint
+          }
+        ) {
+          return yield* balanceAt(address, block, yield* retrying(lastConfirmedBlock, retry), Option.none(), retry)
         }
       )
 
@@ -616,7 +674,7 @@ export const layer = (options: {
             Effect.flatMap((confirmed) =>
               confirmed < block
                 ? Effect.succeed<Sample>([[], Option.none()])
-                : balanceAt(address, block, confirmed, previous).pipe(Effect.map((balance): Sample => {
+                : balanceAt(address, block, confirmed, previous, undefined).pipe(Effect.map((balance): Sample => {
                   const current = { block, balance }
                   return [
                     [current],
@@ -629,7 +687,7 @@ export const layer = (options: {
             Effect.withSpan("SolanaIndexer.streamNativeBalance.sample")
           )
         }
-        return Stream.paginate(Option.none<SolanaNativeBalance>(), withRetry(retry, sample))
+        return Stream.paginate(Option.none<SolanaNativeBalance>(), (position) => retrying(sample(position), retry))
       }
 
       return SolanaIndexer.of({

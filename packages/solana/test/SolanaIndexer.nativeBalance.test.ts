@@ -150,6 +150,8 @@ const txs: ReadonlyArray<Tx> = [{ slot: 10, post: 100 }, { slot: 20, post: 200 }
   post: 50
 }]
 
+type FetchOptions = { readonly retry?: Schedule.Schedule<unknown, SolanaRpc.SolanaRpcError> | undefined }
+
 describe("SolanaIndexer.fetchNativeBalance", () => {
   it.effect("reads the postBalances of the newest transaction at or before the block, in json", () => {
     const { layer, state } = fakeRpc({ head: 100, txs })
@@ -225,6 +227,51 @@ describe("SolanaIndexer.fetchNativeBalance", () => {
       }))
     })
   }
+})
+
+describe("SolanaIndexer.fetchNativeBalance retry", () => {
+  // confirmed head 28: every request kind, getSlot, getBalance, getSignaturesForAddress and getTransaction, once
+  const reads = ["getSlot", "getBalance", "getSignaturesForAddress", "getTransaction 2 json"]
+  const fetchAt28 = (
+    failAt: ReadonlyMap<number, JsonRpc.Reason>,
+    options?: FetchOptions
+  ) => {
+    const { layer, state } = fakeRpc({ head: 30, txs, balance: 7, failAt })
+    const effect = Effect.gen(function*() {
+      return yield* (yield* SolanaIndexer.SolanaIndexer).fetchNativeBalance({
+        address: ADDRESS,
+        block: BigInt(28),
+        ...options
+      })
+    })
+    return provide(Effect.exit(effect), layer, 2).pipe(Effect.map((exit) => ({ exit, calls: state.calls })))
+  }
+
+  reads.forEach((read, i) => {
+    it.effect(`retries ${read} failing with a transient reason, without repeating the requests before it`, () =>
+      fetchAt28(new Map([[i + 1, new JsonRpc.Unavailable()]]), { retry: Schedule.recurs(1) }).pipe(
+        Effect.map(({ calls, exit }) => {
+          expect(exit).toStrictEqual(Exit.succeed(BigInt(250)))
+          expect(calls).toStrictEqual([...reads.slice(0, i + 1), ...reads.slice(i)])
+        })
+      ))
+  })
+
+  it.effect("fails at once on a reason that is not transient", () =>
+    fetchAt28(new Map([[3, new JsonRpc.Pruned()]]), { retry: Schedule.recurs(5) }).pipe(
+      Effect.map(({ calls, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Pruned" } } })
+        expect(calls).toStrictEqual(reads.slice(0, 3))
+      })
+    ))
+
+  it.effect("does not retry by default", () =>
+    fetchAt28(new Map([[3, new JsonRpc.Unavailable()]])).pipe(
+      Effect.map(({ calls, exit }) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+        expect(calls).toStrictEqual(reads.slice(0, 3))
+      })
+    ))
 })
 
 const stream = (options: Omit<SolanaIndexer.SolanaIndexerNativeBalanceOptions, "address">) =>
