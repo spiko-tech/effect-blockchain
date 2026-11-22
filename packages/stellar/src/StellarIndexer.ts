@@ -231,6 +231,19 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
     }
   ) => Effect.Effect<bigint, StellarRpcError>
   /**
+   * The native balances of `address` at the end of each of `blocks`, in stroops and in the order of `blocks`, read in
+   * one walk like `fetchNativeBalance` at the lowest block. Costs the requests of that single read, whatever the number
+   * of blocks, and none for an empty `blocks`. `archive` and `retry` work as in `fetchNativeBalance`.
+   */
+  readonly fetchNativeBalances: (
+    options: {
+      readonly address: StellarAccountAddress
+      readonly blocks: ReadonlyArray<bigint>
+      readonly archive?: boolean | undefined
+      readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
+    }
+  ) => Effect.Effect<ReadonlyArray<bigint>, StellarRpcError>
+  /**
    * The native balance of `address` at every `step` ledgers from `fromBlock` on, following the confirmed head. The
    * first sample is read like `fetchNativeBalance`. A later sample reads the account entry at the head, unless an
    * earlier read already covers it, and when the account changed since the sample, every ledger since the previous
@@ -257,6 +270,11 @@ const byId = Order.mapInput(Order.String, (event: StellarContractEvent) => event
 interface KnownBalance {
   readonly balance: bigint
   readonly until: bigint
+}
+
+// a balance that holds from the ledger `since` until `until`
+interface KnownSince extends KnownBalance {
+  readonly since: bigint
 }
 
 // the next sample, the confirmed head last read, and the balance read at the previous sample
@@ -406,17 +424,26 @@ export const layer = (options: {
         })
       }
 
-      // the balance at `block`, from the account entry at the head and back through each ledger that changed the account
-      // after `block`: the account's first change in such a ledger is its state before it, which names the ledger of the
-      // previous change, or its creation
-      const balanceAt = (
+      // the balance at each of `blocks`, and the one known at the lowest, from the account entry at the head and back
+      // through each ledger that changed the account after the lowest block: the account's first change in such a
+      // ledger is its state before it, which names the ledger of the previous change, or its creation
+      const balancesAt = (
         address: StellarAccountAddress,
-        block: bigint,
+        blocks: Arr.NonEmptyReadonlyArray<bigint>,
         retry: Schedule.Schedule<unknown, StellarRpcError> | undefined,
         archive: boolean
-      ): Effect.Effect<KnownBalance, StellarRpcError> => {
-        const hop = (known: KnownBalance, ledger: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
-          ledger <= block ? Effect.succeed(known) : Effect.flatMap(
+      ): Effect.Effect<
+        { readonly balances: Arr.NonEmptyArray<bigint>; readonly known: KnownBalance },
+        StellarRpcError
+      > => {
+        const lowest = Arr.min(blocks, BigInt_.Order)
+        // `later` holds the balances read so far, latest first, and `known` holds from `ledger` on
+        const hop = (
+          later: ReadonlyArray<KnownSince>,
+          known: KnownBalance,
+          ledger: bigint
+        ): Effect.Effect<Arr.NonEmptyReadonlyArray<KnownSince>, StellarRpcError> =>
+          ledger <= lowest ? Effect.succeed(Arr.append(later, { ...known, since: ledger })) : Effect.flatMap(
             retrying(ledgersPage(ledger, 1, archive), retry),
             ({ cursor, ledgers }) => {
               const invalid = (message: string) =>
@@ -434,22 +461,31 @@ export const layer = (options: {
                 return invalid(`ledger ${ledger} does not change ${address}`)
               }
               const until = ledger - BigInt(1)
+              const steps = Arr.append(later, { ...known, since: ledger })
               if (before.value.created) {
-                return Effect.succeed({ balance: BigInt(0), until })
+                return Effect.succeed(Arr.append(steps, { balance: BigInt(0), until, since: lowest }))
               }
               if (before.value.lastModifiedLedger >= ledger) {
                 return invalid(`ledger ${ledger} names ${before.value.lastModifiedLedger} as the previous change`)
               }
-              return hop({ balance: before.value.balance, until }, before.value.lastModifiedLedger)
+              return hop(steps, { balance: before.value.balance, until }, before.value.lastModifiedLedger)
             }
           )
         return Effect.flatMap(
-          retrying(account(address, block), retry),
+          retrying(account(address, lowest), retry),
           ({ account, latestLedger }) =>
             account === undefined
-              ? Effect.succeed({ balance: BigInt(0), until: latestLedger })
-              : hop({ balance: account.balance, until: latestLedger }, account.lastModifiedLedger)
-        )
+              ? Effect.succeed(Arr.of({ balance: BigInt(0), until: latestLedger, since: lowest }))
+              : hop([], { balance: account.balance, until: latestLedger }, account.lastModifiedLedger)
+        ).pipe(Effect.map((steps) => {
+          const known = Arr.lastNonEmpty(steps)
+          // the last step starts at or below `lowest`, so it covers every block the later ones do not
+          const balances = Arr.map(blocks, (block) =>
+            (steps.find((step) =>
+              step.since <= block
+            ) ?? known).balance)
+          return { balances, known }
+        }))
       }
 
       // the balance at `block` from the one known at an earlier sample
@@ -465,10 +501,8 @@ export const layer = (options: {
               ? Effect.succeed({ balance: account.balance, until: latestLedger })
               : Stream.runLast(changes(address, known.until + BigInt(1), block)).pipe(Effect.map((last) => ({
                 balance: Option.match(last, {
-                  onNone: () =>
-                    known.balance,
-                  onSome: (change) =>
-                    change.after
+                  onNone: () => known.balance,
+                  onSome: (change) => change.after
                 }),
                 until: block
               })))
@@ -496,7 +530,14 @@ export const layer = (options: {
         ),
         fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")((
           { address, archive = false, block, retry }
-        ) => Effect.map(balanceAt(address, block, retry, archive), (known) => known.balance)),
+        ) => Effect.map(balancesAt(address, [block], retry, archive), ({ balances }) => balances[0])),
+        fetchNativeBalances: Effect.fn("StellarIndexer.fetchNativeBalances")((
+          { address, archive = false, blocks, retry }
+        ): Effect.Effect<ReadonlyArray<bigint>, StellarRpcError> =>
+          Arr.isReadonlyArrayNonEmpty(blocks)
+            ? Effect.map(balancesAt(address, blocks, retry, archive), ({ balances }) => balances)
+            : Effect.succeed([])
+        ),
         streamNativeBalance: (
           { address, archive = false, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
         ) => {
@@ -517,7 +558,7 @@ export const layer = (options: {
               .pipe(Effect.flatMap((confirmed) =>
                 Option.match(known, {
                   // the whole sample is retried below
-                  onNone: () => balanceAt(address, block, undefined, archive),
+                  onNone: () => Effect.map(balancesAt(address, [block], undefined, archive), ({ known }) => known),
                   onSome: (known) => advance(address, block, known)
                 }).pipe(Effect.map((next) => [
                   [{ block, balance: next.balance }],
