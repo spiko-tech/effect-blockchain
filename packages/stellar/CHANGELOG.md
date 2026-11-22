@@ -1,5 +1,14 @@
 # @effect-blockchain/stellar
 
+## 0.8.0
+
+### Minor Changes
+
+- [#120](https://github.com/spiko-tech/effect-blockchain/pull/120) [`fa97507`](https://github.com/spiko-tech/effect-blockchain/commit/fa975077bf446fbecb461a43716b159b496450cb) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read the ledgers of a past native balance from the archive endpoints directly
+  
+  - `StellarIndexer.fetchNativeBalance` takes `archive`: each ledger that changed the account is read from the endpoints flagged `archive` only, and the read fails `Rejected` when no endpoint is flagged `archive`. The account entry stays on the regular endpoints. Off by default.
+  - `StellarIndexerNativeBalanceOptions` takes the same `archive`, for the first sample of `StellarIndexer.streamNativeBalance`.
+
 ## 0.7.0
 
 ### Minor Changes
