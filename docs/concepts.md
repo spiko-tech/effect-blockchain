@@ -68,7 +68,7 @@ A history read costs requests in proportion to the changes of its subject or to 
 blocks between the requested block and the head. Each history method states its request cost.
 
 Every indexer read (`fetch*` and `stream*`) takes `retry`, which retries each request that failed with a transient
-reason. It is off by default.
+reason. A retry sends that request again and keeps the pages already read. It is off by default.
 
 ## Stateless relayer
 

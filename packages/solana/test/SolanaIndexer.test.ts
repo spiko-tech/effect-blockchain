@@ -149,6 +149,8 @@ const history = [
 ]
 const range = { address: EUTBL, fromBlock: BigInt(TX_2_SLOT), toBlock: BigInt(TX_1_SLOT) }
 
+type FetchOptions = { readonly retry?: Schedule.Schedule<unknown, SolanaRpc.SolanaRpcError> | undefined }
+
 describe("SolanaIndexer", () => {
   it.effect("fetches a range over two pages in chain order, filtering both ends, keeping a failed transaction", () => {
     const { pages, run, served } = setup({
@@ -532,6 +534,49 @@ describe("SolanaIndexer.fetchTransactionBatch", () => {
       })
     )
   })
+})
+
+describe("SolanaIndexer fetch retry", () => {
+  const filter = { address: EUTBL, fromBlock: FROM, toBlock: TO }
+  const reads = ["getSignaturesForAddress", ...chain.map((_, i) => `getTransaction ${i}`)]
+  const methods = {
+    fetchTransactions: (options?: FetchOptions) =>
+      Effect.gen(function*() {
+        return (yield* (yield* SolanaIndexer.SolanaIndexer).fetchTransactions(filter, options)).length
+      }),
+    fetchTransactionBatch: (options?: FetchOptions) =>
+      Effect.gen(function*() {
+        return (yield* (yield* SolanaIndexer.SolanaIndexer).fetchTransactionBatch(filter, options)).transactions.length
+      })
+  }
+
+  for (const [name, fetch] of Object.entries(methods)) {
+    for (const at of [1, 3]) {
+      it.effect(`${name} retries ${reads[at - 1]} failing with a transient reason, without repeating earlier reads`, () => {
+        const { layer, state } = fakeRpc(TO, new Map([[at, new JsonRpc.Unavailable()]]))
+        return provide(Effect.exit(fetch({ retry: Schedule.recurs(1) })), layer).pipe(Effect.map((exit) => {
+          expect(exit).toStrictEqual(Exit.succeed(chain.length))
+          expect(state.calls).toStrictEqual([...reads.slice(0, at), ...reads.slice(at - 1)])
+        }))
+      })
+    }
+
+    it.effect(`${name} fails at once on a reason that is not transient`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[3, new JsonRpc.Rejected()]]))
+      return provide(Effect.exit(fetch({ retry: Schedule.recurs(5) })), layer).pipe(Effect.map((exit) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Rejected" } } })
+        expect(state.calls).toStrictEqual(reads.slice(0, 3))
+      }))
+    })
+
+    it.effect(`${name} does not retry by default`, () => {
+      const { layer, state } = fakeRpc(TO, new Map([[3, new JsonRpc.Unavailable()]]))
+      return provide(Effect.exit(fetch()), layer).pipe(Effect.map((exit) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+        expect(state.calls).toStrictEqual(reads.slice(0, 3))
+      }))
+    })
+  }
 })
 
 describe("SolanaIndexer.streamTransactions", () => {

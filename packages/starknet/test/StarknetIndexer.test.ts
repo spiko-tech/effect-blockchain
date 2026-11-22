@@ -48,6 +48,8 @@ const STAKING = StarknetAddress.make("0x00ca1702e64c81d9a07b86bd2c540188d92a2c73
 // the staking contract's STRK in fri at block 1380308, the u256 low felt (high is 0)
 const STAKING_BALANCE = BigInt("0xe22138cc9bba4363cc54cf")
 
+type FetchOptions = { readonly retry?: Schedule.Schedule<unknown, StarknetRpc.StarknetRpcError> | undefined }
+
 describe("StarknetIndexer fixtures", () => {
   for (const provider of ["alchemy", "infura"] as const) {
     it.effect(`fixture: ${provider} fetchEvents pages across the cursor`, () => {
@@ -761,6 +763,91 @@ describe("StarknetIndexer native balance", () => {
         expect(samples).toHaveLength(1)
       })
     )
+  })
+})
+
+describe("StarknetIndexer fetch retry", () => {
+  const fetchEvents = (options?: FetchOptions) =>
+    Effect.gen(function*() {
+      return yield* (yield* StarknetIndexer.StarknetIndexer).fetchEvents(
+        { address: TOKEN, fromBlock: FROM, toBlock: TO },
+        options
+      )
+    }).pipe(Effect.exit)
+  const fetchBalance = (options?: FetchOptions) =>
+    Effect.gen(function*() {
+      return yield* (yield* StarknetIndexer.StarknetIndexer).fetchNativeBalance({
+        address: TOKEN,
+        block: FROM,
+        ...options
+      })
+    }).pipe(Effect.exit)
+
+  it.effect("fetchEvents retries a cursor page failing with a transient reason, without reading the first page again", () => {
+    let cursorPages = 0
+    const { calls, run } = setup({
+      a: (filter) =>
+        filter.continuation_token === undefined ? page([10], "a-1") : ++cursorPages === 1 ? UNAVAILABLE : page([12])
+    })
+    return run((i) =>
+      i.fetchEvents({ address: TOKEN, fromBlock: BigInt(10), toBlock: BigInt(20) }, { retry: Schedule.recurs(1) })
+    ).pipe(Effect.map((events) => {
+      expect(blocks(events)).toStrictEqual([10, 12])
+      expect(calls).toStrictEqual(["a:first", "a:a-1", "a:a-1"])
+    }))
+  })
+
+  it.effect("fetchEvents retries a range failing with a transient reason, without reading the others again", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Lagging()]]))
+    return provideFake(fetchEvents({ retry: Schedule.recurs(1) }), layer, { maxBlockRange: 3 }).pipe(
+      Effect.map((exit) => {
+        expect(exit).toStrictEqual(Exit.succeed(pinnedEvents))
+        const ranges = pinnedBatches.map(([from, to]) => [from, to])
+        expect(state.ranges).toStrictEqual([ranges[0], ranges[1], ...ranges.slice(1)])
+      })
+    )
+  })
+
+  it.effect("fetchEvents fails at once on a reason that is not transient", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Pruned()]]))
+    return provideFake(fetchEvents({ retry: Schedule.recurs(5) }), layer, { maxBlockRange: 3 }).pipe(
+      Effect.map((exit) => {
+        expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Pruned" } } })
+        expect(state.ranges).toHaveLength(2)
+      })
+    )
+  })
+
+  it.effect("fetchEvents does not retry by default", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[2, new JsonRpc.Unavailable()]]))
+    return provideFake(fetchEvents(), layer, { maxBlockRange: 3 }).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(state.ranges).toHaveLength(2)
+    }))
+  })
+
+  it.effect("fetchNativeBalance retries a transient reason", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Unavailable()]]))
+    return provideFake(fetchBalance({ retry: Schedule.recurs(1) }), layer).pipe(Effect.map((exit) => {
+      expect(exit).toStrictEqual(Exit.succeed(FROM * BigInt(7)))
+      expect(state.samples).toStrictEqual([FROM, FROM])
+    }))
+  })
+
+  it.effect("fetchNativeBalance fails at once on a reason that is not transient", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Rejected()]]))
+    return provideFake(fetchBalance({ retry: Schedule.recurs(5) }), layer).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Rejected" } } })
+      expect(state.samples).toStrictEqual([FROM])
+    }))
+  })
+
+  it.effect("fetchNativeBalance does not retry by default", () => {
+    const { layer, state } = fakeRpc(TO, new Map([[1, new JsonRpc.Unavailable()]]))
+    return provideFake(fetchBalance(), layer).pipe(Effect.map((exit) => {
+      expect(Exit.findErrorOption(exit)).toMatchObject({ value: { reason: { _tag: "Unavailable" } } })
+      expect(state.samples).toStrictEqual([FROM])
+    }))
   })
 })
 

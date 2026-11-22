@@ -3,8 +3,8 @@
  * {@link EvmRpc.EvmRpc}, once or as a stream following the confirmed head. The stream options are described in
  * [Concepts](https://github.com/spiko-tech/effect-blockchain/blob/main/docs/concepts.md#indexer-streams).
  *
- * A log range is split into ranges of at most `maxBlockRange` blocks, with one `eth_getLogs` each. A failing range
- * fails the whole call, and the caller retries the same range.
+ * A log range is split into ranges of at most `maxBlockRange` blocks, with one `eth_getLogs` each. A range failing
+ * after its `retry` fails the whole call, and the caller retries the same range.
  *
  * @example
  * ```ts
@@ -134,10 +134,15 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
   /** The head block number minus the confirmations, never below 0. */
   readonly lastConfirmedBlock: Effect.Effect<bigint, EvmRpc.EvmRpcError>
   /**
-   * The logs matching `filter` between `fromBlock` and `toBlock` (both inclusive), in chain order: sorted by block
-   * then log index. `fromBlock > toBlock` returns `[]`. A `toBlock` above {@link lastConfirmedBlock} is accepted.
+   * The logs matching `filter` between `fromBlock` and `toBlock` (both inclusive), in chain order: sorted by block then
+   * log index. `fromBlock > toBlock` returns `[]`. A `toBlock` above {@link lastConfirmedBlock} is accepted. Costs one
+   * `eth_getLogs` per `maxBlockRange` blocks of the range. `retry` retries a request failing with a transient reason
+   * ({@link JsonRpc.isTransient}), and is off by default.
    */
-  readonly fetchLogs: (filter: EvmIndexerFilter) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpc.EvmRpcError>
+  readonly fetchLogs: (
+    filter: EvmIndexerFilter,
+    options?: { readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined }
+  ) => Effect.Effect<ReadonlyArray<EvmLog>, EvmRpc.EvmRpcError>
   /**
    * The logs matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed blocks, following
    * the confirmed head.
@@ -145,13 +150,18 @@ export class EvmIndexer extends Context.Service<EvmIndexer, {
   readonly streamLogs: (options: EvmIndexerStreamOptions) => Stream.Stream<EvmIndexerBatch, EvmRpc.EvmRpcError>
   /**
    * The native balance of `address` in wei at the end of `block`, which needs an archive endpoint for an old block.
+   * Costs one `eth_getBalance` at `block`. `retry` retries a request failing with a transient reason
+   * ({@link JsonRpc.isTransient}), and is off by default.
    *
    * @since 0.3.0
    */
-  readonly fetchNativeBalance: (options: {
-    readonly address: EvmAddress
-    readonly block: bigint
-  }) => Effect.Effect<bigint, EvmRpc.EvmRpcError>
+  readonly fetchNativeBalance: (
+    options: {
+      readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+      readonly address: EvmAddress
+      readonly block: bigint
+    }
+  ) => Effect.Effect<bigint, EvmRpc.EvmRpcError>
   /**
    * The native balance of `address` at `fromBlock`, `fromBlock + step`, ... (a sample at every step, changed or not),
    * each read once its block is confirmed, following the confirmed head.
@@ -186,6 +196,14 @@ interface StreamPosition {
 }
 
 type Page<A> = readonly [ReadonlyArray<A>, Option.Option<StreamPosition>]
+
+const retrying = <A>(
+  effect: Effect.Effect<A, EvmRpc.EvmRpcError>,
+  retry: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+) =>
+  retry === undefined
+    ? effect
+    : Effect.retry(effect, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
 
 /**
  * Builds an {@link EvmIndexer} reading through the provided {@link EvmRpc.EvmRpc}.
@@ -227,23 +245,37 @@ export const layer = (options: {
         Stream.paginate(
           // a head below `start`: the first step reads it
           { next: start, head: start - BigInt(1) },
-          retry === undefined
-            ? step
-            : (position) =>
-              Effect.retry(step(position), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+          (position) => retrying(step(position), retry)
         )
-      const fetchLogs = Effect.fn("EvmIndexer.fetchLogs")((filter: EvmIndexerFilter) => {
-        if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
-        const count = Number((filter.toBlock - filter.fromBlock) / size) + 1
-        return Effect.forEach(
-          Arr.makeBy(count, (i) => filter.fromBlock + BigInt(i) * size),
-          (fromBlock) =>
-            rpc.getLogs({ ...filter, fromBlock, toBlock: BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock) })
-        ).pipe(Effect.map(Arr.flatten))
-      })
+      const fetchLogs = Effect.fn("EvmIndexer.fetchLogs")(
+        (
+          filter: EvmIndexerFilter,
+          options?: { readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined }
+        ) => {
+          if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
+          const count = Number((filter.toBlock - filter.fromBlock) / size) + 1
+          return Effect.forEach(
+            Arr.makeBy(count, (i) => filter.fromBlock + BigInt(i) * size),
+            (fromBlock) =>
+              retrying(
+                rpc.getLogs({
+                  ...filter,
+                  fromBlock,
+                  toBlock: BigInt_.min(fromBlock + size - BigInt(1), filter.toBlock)
+                }),
+                options?.retry
+              )
+          ).pipe(Effect.map(Arr.flatten))
+        }
+      )
       const fetchNativeBalance = Effect.fn("EvmIndexer.fetchNativeBalance")(
-        ({ address, block }: { readonly address: EvmAddress; readonly block: bigint }) =>
-          rpc.getBalance({ address, blockNumber: block })
+        (
+          { address, block, retry }: {
+            readonly address: EvmAddress
+            readonly block: bigint
+            readonly retry?: Schedule.Schedule<unknown, EvmRpc.EvmRpcError> | undefined
+          }
+        ) => retrying(rpc.getBalance({ address, blockNumber: block }), retry)
       )
       return EvmIndexer.of({
         lastConfirmedBlock,
