@@ -173,6 +173,8 @@ export interface StellarIndexerNativeBalanceOptions {
   readonly toBlock?: bigint | undefined
   /** Ledgers between two samples, a positive safe integer. */
   readonly step: number
+  /** The `archive` option of {@link StellarIndexer.Service.fetchNativeBalance}, for the first sample only. */
+  readonly archive?: boolean | undefined
   readonly poll?: Schedule.Schedule<unknown> | undefined
   readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
 }
@@ -219,6 +221,12 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
     options: {
       readonly address: StellarAccountAddress
       readonly block: bigint
+      /**
+       * Reads each ledger that changed the account from the endpoints flagged `archive` only, with one archive request
+       * per change after `block` and none to the regular endpoints, and fails `Rejected` when no endpoint is flagged
+       * `archive`. Off by default: a ledger goes to the archive endpoints once a regular endpoint fails `Pruned`.
+       */
+      readonly archive?: boolean | undefined
       readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
     }
   ) => Effect.Effect<bigint, StellarRpcError>
@@ -404,11 +412,12 @@ export const layer = (options: {
       const balanceAt = (
         address: StellarAccountAddress,
         block: bigint,
-        retry: Schedule.Schedule<unknown, StellarRpcError> | undefined
+        retry: Schedule.Schedule<unknown, StellarRpcError> | undefined,
+        archive: boolean
       ): Effect.Effect<KnownBalance, StellarRpcError> => {
         const hop = (known: KnownBalance, ledger: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
           ledger <= block ? Effect.succeed(known) : Effect.flatMap(
-            retrying(ledgersPage(ledger, 1, false), retry),
+            retrying(ledgersPage(ledger, 1, archive), retry),
             ({ cursor, ledgers }) => {
               const invalid = (message: string) =>
                 Effect.fail(
@@ -485,11 +494,11 @@ export const layer = (options: {
             ).pipe(Effect.map((pages) => ({ fromBlock, toBlock, events: Arr.flatten(pages) })))
           }
         ),
-        fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")(({ address, block, retry }) =>
-          Effect.map(balanceAt(address, block, retry), (known) => known.balance)
-        ),
+        fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")((
+          { address, archive = false, block, retry }
+        ) => Effect.map(balanceAt(address, block, retry, archive), (known) => known.balance)),
         streamNativeBalance: (
-          { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
+          { address, archive = false, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
         ) => {
           if (!Number.isSafeInteger(step) || step < 1) {
             return Stream.die(new RangeError(`step must be a positive integer, got ${step}`))
@@ -508,7 +517,7 @@ export const layer = (options: {
               .pipe(Effect.flatMap((confirmed) =>
                 Option.match(known, {
                   // the whole sample is retried below
-                  onNone: () => balanceAt(address, block, undefined),
+                  onNone: () => balanceAt(address, block, undefined, archive),
                   onSome: (known) => advance(address, block, known)
                 }).pipe(Effect.map((next) => [
                   [{ block, balance: next.balance }],

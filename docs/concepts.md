@@ -48,7 +48,8 @@ with `Pruned`.
 
 A past native balance is read from the account entry at the head, then back through the ledger of each change since.
 An account missing at the head reads `0` at every past ledger, so a merged account reads `0` before its merge, and a
-merged then recreated account reads `0` before its re-creation.
+merged then recreated account reads `0` before its re-creation. With `archive: true`, `fetchNativeBalance` reads those
+ledgers from the archive endpoints only, which saves a request per regular endpoint for each ledger past their retention.
 
 ## Indexer streams
 

@@ -147,9 +147,14 @@ const collect = (options: StellarIndexer.StellarIndexerNativeBalanceOptions) =>
     return { samples, exit }
   })
 
-const fetchAt = (block: number, retry?: Schedule.Schedule<unknown, StellarRpc.StellarRpcError>) =>
+const fetchAt = (block: number, retry?: Schedule.Schedule<unknown, StellarRpc.StellarRpcError>, archive?: boolean) =>
   Effect.gen(function*() {
-    return yield* (yield* StellarIndexer.StellarIndexer).fetchNativeBalance({ address: A, block: b(block), retry })
+    return yield* (yield* StellarIndexer.StellarIndexer).fetchNativeBalance({
+      address: A,
+      block: b(block),
+      retry,
+      archive
+    })
   })
 
 // created at 105 with 50, then 70 at 112 and 60 at 118
@@ -287,6 +292,35 @@ describe("StellarIndexer.fetchNativeBalance", () => {
       assert.strictEqual(error.reason._tag, "Unavailable")
     }))
 
+  it.effect("with archive, reads every ledger from the archive endpoints and the account entry from the regular ones", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(115), archive: true })
+    return provide(fetchAt(106, undefined, true), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(50))
+      assert.deepStrictEqual(state.pages, [])
+      assert.deepStrictEqual(state.archivePages, [[b(118), 1], [b(112), 1]])
+      assert.strictEqual(state.accounts, 1)
+    }))
+  })
+
+  it.effect("with archive, retries an archive read failing with a transient reason, with retry", () => {
+    const options = { archive: true, archiveFailAt: new Map([[1, new JsonRpc.Unavailable()]]) }
+    const { layer, state } = fakeRpc(b(200), history, options)
+    return provide(fetchAt(106, Schedule.recurs(1), true), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(50))
+      assert.deepStrictEqual(state.pages, [])
+      assert.deepStrictEqual(state.archivePages, [[b(118), 1], [b(118), 1], [b(112), 1]])
+    }))
+  })
+
+  it.effect("with archive, fails Rejected when no endpoint is flagged archive", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(Effect.flip(fetchAt(106, undefined, true)), layer).pipe(Effect.map((error) => {
+      assert.strictEqual(error.reason._tag, "Rejected")
+      assert.strictEqual(error.endpoint, "archive")
+      assert.deepStrictEqual(state.pages, [])
+    }))
+  })
+
   it.effect("fails Lagging above the head", () =>
     provide(Effect.flip(fetchAt(201)), fakeRpc(b(200), history).layer).pipe(
       Effect.map((error) => expect(error.reason).toMatchObject({ _tag: "Lagging", head: b(200), toBlock: b(201) }))
@@ -329,6 +363,19 @@ describe("StellarIndexer.streamNativeBalance", () => {
           5
         ]])
         assert.deepStrictEqual(state.archivePages, [[b(105), 1], [b(105), 1], [b(106), 5]])
+      })
+    )
+  })
+
+  it.effect("reads the first sample's ledgers from the archive endpoints only, with archive", () => {
+    const { layer, state } = fakeRpc(b(200), history, { archive: true })
+    return provide(collect({ address: A, fromBlock: b(110), toBlock: b(115), step: 5, archive: true }), layer).pipe(
+      Effect.map(({ exit, samples }) => {
+        assert.isTrue(Exit.isSuccess(exit))
+        assert.deepStrictEqual(samples, [[b(110), b(50)], [b(115), b(70)]])
+        assert.deepStrictEqual(state.archivePages, [[b(118), 1], [b(112), 1]])
+        // the later sample reads the ledgers since the previous one from the regular endpoints
+        assert.deepStrictEqual(state.pages, [[b(112), 4]])
       })
     )
   })
