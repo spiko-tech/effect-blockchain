@@ -45,6 +45,10 @@ A Stellar RPC node retains about 7 days of ledgers by default, and less on some 
 takes a `getLedgers` call asking for `archive`. Without an archive endpoint, a read below the retention window fails
 with `Pruned`.
 
+A past native balance is read from the account entry at the head, then back through the ledger of each change since.
+An account missing at the head reads `0` at every past ledger, so a merged account reads `0` before its merge, and a
+merged then recreated account reads `0` before its re-creation.
+
 ## Indexer streams
 
 A stream reads confirmed blocks from `fromBlock` on and follows the confirmed head.
@@ -56,6 +60,14 @@ A stream reads confirmed blocks from `fromBlock` on and follows the confirmed he
 - `retry` retries a step that failed with a transient reason at the same position. It is off by default.
 
 Delivery is at-least-once: save `batch.toBlock` once the batch is handled and resume from `toBlock + 1`.
+
+## History reads
+
+A history read costs requests in proportion to the changes of its subject or to its results, and never to the number of
+blocks between the requested block and the head. Each history method states its request cost.
+
+Every indexer read (`fetch*` and `stream*`) takes `retry`, which retries each request that failed with a transient
+reason. It is off by default.
 
 ## Stateless relayer
 

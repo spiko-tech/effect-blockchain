@@ -22,15 +22,18 @@ const A = StellarAccountAddress.make(StrKey.encodeEd25519PublicKey(Buffer.alloc(
 const b = (n: number) => BigInt(n)
 
 // A fake `StellarRpc` over the history of `A`: `changes` maps a ledger to the balance `A` ends it with, the first one
-// creating it. `getLatestLedger` and `getLedgerEntries` answer at `state.head`, `getLedgers` builds the ledgers' metas. The
-// n-th `getLedgers` call (1-based) fails with `failAt.get(n)` when set. `entry` overrides the account entry at the head.
-// A regular page starting below `oldest` fails `Pruned`; an `archive` page goes to `archivePages`, and fails `Rejected`
-// as `StellarRpc` does when no endpoint is flagged `archive`.
+// creating it. `getLatestLedger` and `getLedgerEntries` answer at `state.head`, `getLedgers` builds the ledgers' metas,
+// unless `metas` sets one. The n-th regular (`failAt`) or archive (`archiveFailAt`) `getLedgers` call (1-based) fails
+// with the reason set for it. `entry` overrides the account entry at the head. A regular page starting below `oldest`
+// fails `Pruned`; an `archive` page goes to `archivePages`, and fails `Rejected` as `StellarRpc` does when no endpoint
+// is flagged `archive`.
 const fakeRpc = (
   head: bigint,
   changes: ReadonlyMap<bigint, number>,
   options: {
     readonly failAt?: ReadonlyMap<number, JsonRpc.Reason>
+    readonly archiveFailAt?: ReadonlyMap<number, JsonRpc.Reason>
+    readonly metas?: ReadonlyMap<bigint, string>
     readonly entry?: StellarRpc.StellarLedgerEntry
     readonly oldest?: bigint
     readonly archive?: boolean
@@ -47,14 +50,15 @@ const fakeRpc = (
   const lastChange = (ledger: bigint) =>
     Arr.last(Arr.sort(Arr.filter([...changes.keys()], (at) => at <= ledger), BigInt_.Order))
   const meta = (ledger: bigint) => {
+    const set = options.metas?.get(ledger)
+    if (set !== undefined) return set
     const to = changes.get(ledger)
     if (to === undefined) return ledgerMeta([])
-    const from = Option.flatMapNullishOr(lastChange(ledger - b(1)), (at) => changes.get(at))
     return ledgerMeta([
       operation(
-        Option.match(from, {
+        Option.match(lastChange(ledger - b(1)), {
           onNone: () => [xdr.LedgerEntryChange.ledgerEntryCreated(account(A, to))],
-          onSome: (from) => update(A, from, to)
+          onSome: (at) => update(A, changes.get(at) ?? 0, to, Number(at))
         })
       )
     ])
@@ -78,6 +82,8 @@ const fakeRpc = (
             )
           }
           state.archivePages.push([startLedger, limit])
+          const reason = options.archiveFailAt?.get(state.archivePages.length)
+          if (reason !== undefined) return fail(reason, "getLedgers")
         } else {
           state.pages.push([startLedger, limit])
           const reason = options.failAt?.get(state.pages.length)
@@ -129,9 +135,9 @@ const collect = (options: StellarIndexer.StellarIndexerNativeBalanceOptions) =>
     return { samples, exit }
   })
 
-const fetchAt = (block: number) =>
+const fetchAt = (block: number, retry?: Schedule.Schedule<unknown, StellarRpc.StellarRpcError>) =>
   Effect.gen(function*() {
-    return yield* (yield* StellarIndexer.StellarIndexer).fetchNativeBalance({ address: A, block: b(block) })
+    return yield* (yield* StellarIndexer.StellarIndexer).fetchNativeBalance({ address: A, block: b(block), retry })
   })
 
 // created at 105 with 50, then 70 at 112 and 60 at 118
@@ -166,29 +172,61 @@ describe("StellarIndexer.fetchNativeBalance", () => {
       ])
     }))
 
-  it.effect("reads the balance before the first change after the block, 0 before the account existed", () => {
+  it.effect("hops back through the ledger of each change after the block, with one ledger per getLedgers call", () => {
     const { layer, state } = fakeRpc(b(200), history, { archive: true })
-    return provide(Effect.all([fetchAt(100), fetchAt(106), fetchAt(118)]), layer).pipe(Effect.map((balances) => {
-      assert.deepStrictEqual(balances, [b(0), b(50), b(60)])
-      assert.deepStrictEqual(state.pages, [[b(101), 10], [b(107), 10]])
-      // pages the regular endpoints hold never reach the archive ones
+    return provide(fetchAt(106), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(50))
+      // 118 names 112 as the previous change, and 112 names 105 <= 106
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1]])
+      // ledgers the regular endpoints hold never reach the archive ones
       assert.deepStrictEqual(state.archivePages, [])
     }))
   })
 
-  it.effect("reads 0 for an account missing at the head", () =>
-    provide(fetchAt(100), fakeRpc(b(200), new Map()).layer).pipe(
-      Effect.map((balance) => assert.strictEqual(balance, b(0)))
-    ))
-
-  it.effect("falls back to the account entry when no ledger up to its last change changed it", () => {
-    const entry = { xdr: account(A, 5).data.toXdr("base64"), lastModifiedLedger: b(103) }
-    const { layer, state } = fakeRpc(b(200), new Map(), { entry })
+  it.effect("reads 0 before the ledger that created the account", () => {
+    const { layer, state } = fakeRpc(b(200), history)
     return provide(fetchAt(100), layer).pipe(Effect.map((balance) => {
-      assert.strictEqual(balance, b(5))
-      assert.deepStrictEqual(state.pages, [[b(101), 3]])
+      assert.strictEqual(balance, b(0))
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1], [b(105), 1]])
     }))
   })
+
+  it.effect("reads the account entry at the head, without getLedgers, when it has not changed since the block", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(Effect.all([fetchAt(118), fetchAt(150)]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(60), b(60)])
+      assert.deepStrictEqual(state.pages, [])
+    }))
+  })
+
+  it.effect("reads 0 for an account missing at the head, without getLedgers", () => {
+    const { layer, state } = fakeRpc(b(200), new Map())
+    return provide(fetchAt(100), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(0))
+      assert.deepStrictEqual(state.pages, [])
+    }))
+  })
+
+  it.effect("reads the balance before the first of several changes in a ledger", () => {
+    // a fee charge of 1, then a payment of 9
+    const metas = new Map([[b(118), ledgerMeta([operation(update(A, 69, 60, 118), update(A, 70, 69, 112))])]])
+    const { layer, state } = fakeRpc(b(200), history, { metas })
+    return provide(fetchAt(115), layer).pipe(Effect.map((balance) => {
+      assert.strictEqual(balance, b(70))
+      assert.deepStrictEqual(state.pages, [[b(118), 1]])
+    }))
+  })
+
+  it.effect("fails InvalidResponse on a ledger without a change of the account, or naming a later previous change", () =>
+    Effect.gen(function*() {
+      const entry = { xdr: account(A, 5).data.toXdr("base64"), lastModifiedLedger: b(103) }
+      const loop = new Map([[b(118), ledgerMeta([operation(update(A, 70, 60, 118))])]])
+      for (const options of [{ entry }, { metas: loop }]) {
+        const error = yield* Effect.flip(provide(fetchAt(100), fakeRpc(b(200), history, options).layer))
+        assert.strictEqual(error.reason._tag, "InvalidResponse")
+        assert.strictEqual(error.endpoint, "fake")
+      }
+    }))
 
   it.effect("dies on a malformed account entry, another entry type or another account's", () =>
     Effect.gen(function*() {
@@ -201,16 +239,16 @@ describe("StellarIndexer.fetchNativeBalance", () => {
       }
     }))
 
-  it.effect("reads a pruned page again from the archive endpoints", () => {
-    const { layer, state } = fakeRpc(b(200), history, { oldest: b(150), archive: true })
+  it.effect("reads a ledger older than the regular endpoints' retention from the archive endpoints", () => {
+    const { layer, state } = fakeRpc(b(200), history, { oldest: b(115), archive: true })
     return provide(fetchAt(106), layer).pipe(Effect.map((balance) => {
       assert.strictEqual(balance, b(50))
-      assert.deepStrictEqual(state.pages, [[b(107), 10]])
-      assert.deepStrictEqual(state.archivePages, [[b(107), 10]])
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1]])
+      assert.deepStrictEqual(state.archivePages, [[b(112), 1]])
     }))
   })
 
-  it.effect("fails Pruned on a pruned page when no endpoint is flagged archive", () => {
+  it.effect("fails Pruned on a pruned ledger when no endpoint is flagged archive", () => {
     const { layer, state } = fakeRpc(b(200), history, { oldest: b(150) })
     return provide(Effect.flip(fetchAt(106)), layer).pipe(Effect.map((error) => {
       assert.strictEqual(error.reason._tag, "Pruned")
@@ -218,6 +256,16 @@ describe("StellarIndexer.fetchNativeBalance", () => {
       assert.deepStrictEqual(state.archivePages, [])
     }))
   })
+
+  it.effect("retries a ledger read failing with a transient reason, with retry", () =>
+    Effect.gen(function*() {
+      const options = { oldest: b(150), archive: true, archiveFailAt: new Map([[1, new JsonRpc.Unavailable()]]) }
+      const retried = fakeRpc(b(200), history, options)
+      assert.strictEqual(yield* provide(fetchAt(106, Schedule.recurs(1)), retried.layer), b(50))
+      assert.deepStrictEqual(retried.state.archivePages, [[b(118), 1], [b(118), 1], [b(112), 1]])
+      const error = yield* Effect.flip(provide(fetchAt(106), fakeRpc(b(200), history, options).layer))
+      assert.strictEqual(error.reason._tag, "Unavailable")
+    }))
 
   it.effect("fails Lagging above the head", () =>
     provide(Effect.flip(fetchAt(201)), fakeRpc(b(200), history).layer).pipe(
@@ -235,9 +283,12 @@ describe("StellarIndexer.streamNativeBalance", () => {
           b(120),
           b(60)
         ]])
-        // up to the first change for the first sample, then every ledger since the previous sample until the
-        // account entry covers the sample (lastModifiedLedger 118 <= 120)
-        assert.deepStrictEqual(state.pages, [[b(101), 10], [b(105), 1], [b(106), 5], [b(111), 5]])
+        // back through each change for the first sample, then every ledger since the previous sample until the account
+        // entry covers the sample (lastModifiedLedger 118 <= 120)
+        assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1], [b(105), 1], [b(105), 1], [b(106), 5], [
+          b(111),
+          5
+        ]])
         assert.strictEqual(state.accounts, 5)
       })
     )
@@ -253,8 +304,11 @@ describe("StellarIndexer.streamNativeBalance", () => {
           b(60)
         ]])
         // the pages starting below 108 are read on both, the later ones on the regular endpoints only
-        assert.deepStrictEqual(state.pages, [[b(101), 10], [b(105), 1], [b(106), 5], [b(111), 5]])
-        assert.deepStrictEqual(state.archivePages, [[b(101), 10], [b(105), 1], [b(106), 5]])
+        assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1], [b(105), 1], [b(105), 1], [b(106), 5], [
+          b(111),
+          5
+        ]])
+        assert.deepStrictEqual(state.archivePages, [[b(105), 1], [b(105), 1], [b(106), 5]])
       })
     )
   })

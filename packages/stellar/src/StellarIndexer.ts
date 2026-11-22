@@ -8,8 +8,8 @@
  * `contractIds` into groups of 5, the RPC limit per filter (`MaxContractIDsLimit` in
  * https://github.com/stellar/go-stellar-sdk/blob/main/protocols/rpc/get_events.go). A page after a cursor is only
  * served by the endpoint that issued the cursor, so when it fails the group restarts once from its first page. Stellar
- * RPC keeps no past balances: a balance is read from the account entry at the head and the ledger metas of
- * `getLedgers`.
+ * RPC keeps no past balances: a balance is read from the account entry at the head, then back through the `getLedgers`
+ * meta of each ledger that changed the account since.
  *
  * @example
  * ```ts
@@ -60,13 +60,13 @@ import * as Option from "effect/Option"
 import * as Order from "effect/Order"
 import * as Schedule from "effect/Schedule"
 import * as Stream from "effect/Stream"
-import { accountChange, accountEntry } from "./internal/accountChange.ts"
+import { accountBefore, accountChange, accountEntry } from "./internal/accountChange.ts"
 import { ledgerEvents, matchesTopics } from "./internal/ledgerEvents.ts"
 import type { StellarAccountAddress } from "./StellarAddress.ts"
 import type { StellarContractEvent } from "./StellarContractEvent.ts"
 import * as StellarNetwork from "./StellarNetwork.ts"
-import type { StellarEventsCursor, StellarEventsFilter, StellarLedger, StellarRpcError } from "./StellarRpc.ts"
-import { StellarRpc } from "./StellarRpc.ts"
+import type { StellarEventsCursor, StellarEventsFilter, StellarLedger } from "./StellarRpc.ts"
+import { StellarRpc, StellarRpcError } from "./StellarRpc.ts"
 
 /**
  * The default `maxBlockRange`: 10000 ledgers, the most a Stellar RPC scans per request (`LedgerScanLimit` in
@@ -186,10 +186,13 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
   readonly lastConfirmedBlock: Effect.Effect<bigint, StellarRpcError>
   /**
    * Every contract event matching `filter`, in chain order (event id order). Events of failed contract calls
-   * (`inSuccessfulContractCall: false`) are dropped. `fromBlock > toBlock` returns no events.
+   * (`inSuccessfulContractCall: false`) are dropped. `fromBlock > toBlock` returns no events. Costs one `getEvents`
+   * request per page of results, and at least one per `maxBlockRange` ledgers and group of 5 contracts. `retry`
+   * retries a request failing with a transient reason ({@link JsonRpc.isTransient}), and is off by default.
    */
   readonly fetchEvents: (
-    filter: StellarIndexerFilter
+    filter: StellarIndexerFilter,
+    options?: { readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined }
   ) => Effect.Effect<ReadonlyArray<StellarContractEvent>, StellarRpcError>
   /**
    * The events matching `filter` from `fromBlock` on, in batches of at most `maxBlockRange` confirmed ledgers,
@@ -205,22 +208,25 @@ export class StellarIndexer extends Context.Service<StellarIndexer, {
     options: StellarIndexerArchivedEventsOptions
   ) => Effect.Effect<StellarIndexerBatch, StellarRpcError>
   /**
-   * The native balance of `address` at the end of `block`, in stroops: the account entry at the head when it has not
-   * changed since `block`, else the balance before its first change after `block`, read ledger by ledger with
-   * `getLedgers`. An account missing at the head reads `0`, even if it was merged after `block`. A `block` older than
-   * the regular endpoints retain needs an endpoint flagged `archive`, and costs one `getLedgers` page (10 ledgers, 1 to
-   * 3 MB each on mainnet) per 10 ledgers until the account's next change.
+   * The native balance of `address` at the end of `block`, in stroops, read from the account entry at the head, then
+   * back through the `getLedgers` meta of each ledger that changed the account after `block`. An account missing at
+   * the head reads `0`, even if it was merged after `block`. Costs one `getLedgerEntries` request, plus one `getLedgers`
+   * request for a single ledger (1 to 3 MB on mainnet) per ledger that changed the account after `block`, from an
+   * endpoint flagged `archive` for a ledger the regular endpoints no longer retain. `retry` retries a request failing
+   * with a transient reason ({@link JsonRpc.isTransient}), and is off by default.
    */
   readonly fetchNativeBalance: (
-    options: { readonly address: StellarAccountAddress; readonly block: bigint }
+    options: {
+      readonly address: StellarAccountAddress
+      readonly block: bigint
+      readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined
+    }
   ) => Effect.Effect<bigint, StellarRpcError>
   /**
-   * The native balance of `address` at every `step` ledgers from `fromBlock` on, following the confirmed head. Each
-   * sample reads the account entry at the head, unless an earlier read already covers it. When the account changed
-   * since the sample, every ledger since the previous sample is read with `getLedgers` (1 to 3 MB each on mainnet):
-   * `step` does not reduce these history reads. A sample older than the regular endpoints retain needs an endpoint
-   * flagged `archive`, and costs one `getLedgers` page (10 ledgers, 1 to 3 MB each on mainnet) per 10 ledgers until the
-   * account's next change.
+   * The native balance of `address` at every `step` ledgers from `fromBlock` on, following the confirmed head. The
+   * first sample is read like `fetchNativeBalance`. A later sample reads the account entry at the head, unless an
+   * earlier read already covers it, and when the account changed since the sample, every ledger since the previous
+   * sample with `getLedgers` (1 to 3 MB each on mainnet): `step` does not reduce these history reads.
    */
   readonly streamNativeBalance: (
     options: StellarIndexerNativeBalanceOptions
@@ -291,7 +297,19 @@ export const layer = (options: {
         Effect.map((ledger) => Confirmations.lastConfirmedBlock(ledger.sequence, confirmations)),
         Effect.withSpan("StellarIndexer.lastConfirmedBlock")
       )
-      const fetchEvents = Effect.fn("StellarIndexer.fetchEvents")((filter: StellarIndexerFilter) => {
+      // `effect` retried with `retry` while it fails with a transient reason
+      const retrying = <A>(
+        effect: Effect.Effect<A, StellarRpcError>,
+        retry: Schedule.Schedule<unknown, StellarRpcError> | undefined
+      ) =>
+        retry === undefined
+          ? effect
+          : Effect.retry(effect, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+
+      const fetchEvents = Effect.fn("StellarIndexer.fetchEvents")((
+        filter: StellarIndexerFilter,
+        options?: { readonly retry?: Schedule.Schedule<unknown, StellarRpcError> | undefined }
+      ) => {
         if (filter.fromBlock > filter.toBlock) return Effect.succeed([])
         const groups = Arr.chunksOf(filter.contractIds, MAX_CONTRACT_IDS)
         const starts = Arr.makeBy(
@@ -306,11 +324,13 @@ export const layer = (options: {
             return Stream.paginate(
               Option.none<StellarEventsCursor>(),
               (cursor) =>
-                rpc.getEvents({ ...group, cursor: Option.getOrUndefined(cursor) }).pipe(Effect.mapBoth({
-                  onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
-                  onSuccess: (page) =>
-                    [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
-                }))
+                retrying(rpc.getEvents({ ...group, cursor: Option.getOrUndefined(cursor) }), options?.retry).pipe(
+                  Effect.mapBoth({
+                    onFailure: (error) => Option.isNone(cursor) ? error : { cursorPage: error },
+                    onSuccess: (page) =>
+                      [page.events, Option.map(Option.fromUndefinedOr(page.cursor), Option.some)] as const
+                  })
+                )
             ).pipe(
               Stream.runCollect,
               Effect.retry({ times: 1, while: (error) => "cursorPage" in error }),
@@ -376,21 +396,50 @@ export const layer = (options: {
         })
       }
 
-      const balanceAt = (address: StellarAccountAddress, block: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
-        Effect.flatMap(account(address, block), ({ account, latestLedger }) => {
-          if (account === undefined) {
-            return Effect.succeed({ balance: BigInt(0), until: latestLedger })
-          }
-          if (account.lastModifiedLedger <= block) {
-            return Effect.succeed({ balance: account.balance, until: latestLedger })
-          }
-          return Stream.runHead(changes(address, block + BigInt(1), account.lastModifiedLedger)).pipe(
-            Effect.map(Option.match({
-              onNone: () => ({ balance: account.balance, until: latestLedger }),
-              onSome: (first) => ({ balance: first.before, until: first.ledger - BigInt(1) })
-            }))
+      // the balance at `block`, from the account entry at the head and back through each ledger that changed the account
+      // after `block`: the account's first change in such a ledger is its state before it, which names the ledger of the
+      // previous change, or its creation
+      const balanceAt = (
+        address: StellarAccountAddress,
+        block: bigint,
+        retry: Schedule.Schedule<unknown, StellarRpcError> | undefined
+      ): Effect.Effect<KnownBalance, StellarRpcError> => {
+        const hop = (known: KnownBalance, ledger: bigint): Effect.Effect<KnownBalance, StellarRpcError> =>
+          ledger <= block ? Effect.succeed(known) : Effect.flatMap(
+            retrying(ledgersPage(ledger, 1, false), retry),
+            ({ cursor, ledgers }) => {
+              const invalid = (message: string) =>
+                Effect.fail(
+                  new StellarRpcError({
+                    reason: new JsonRpc.InvalidResponse(),
+                    method: "getLedgers",
+                    endpoint: cursor.endpoint,
+                    cause: new Error(message)
+                  })
+                )
+              const read = ledgers[0]
+              const before = read?.sequence === ledger ? accountBefore(read.metadataXdr, address) : Option.none()
+              if (Option.isNone(before)) {
+                return invalid(`ledger ${ledger} does not change ${address}`)
+              }
+              const until = ledger - BigInt(1)
+              if (before.value.created) {
+                return Effect.succeed({ balance: BigInt(0), until })
+              }
+              if (before.value.lastModifiedLedger >= ledger) {
+                return invalid(`ledger ${ledger} names ${before.value.lastModifiedLedger} as the previous change`)
+              }
+              return hop({ balance: before.value.balance, until }, before.value.lastModifiedLedger)
+            }
           )
-        })
+        return Effect.flatMap(
+          retrying(account(address, block), retry),
+          ({ account, latestLedger }) =>
+            account === undefined
+              ? Effect.succeed({ balance: BigInt(0), until: latestLedger })
+              : hop({ balance: account.balance, until: latestLedger }, account.lastModifiedLedger)
+        )
+      }
 
       // the balance at `block` from the one known at an earlier sample
       const advance = (
@@ -423,18 +472,19 @@ export const layer = (options: {
             const pages = Number((toBlock - fromBlock) / pageSize) + 1
             const read = (ledger: StellarLedger) =>
               ledgerEvents(ledger, filter.contractIds).filter((event) => matchesTopics(filter.topics, event.topics))
-            return Effect.forEach(Arr.makeBy(pages, (i) => fromBlock + BigInt(i) * pageSize), (start) => {
-              const page = Stream.runCollect(
-                readLedgers(start, BigInt_.min(start + pageSize - BigInt(1), toBlock), read, true)
-              )
-              return retry === undefined
-                ? page
-                : Effect.retry(page, { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
-            }, { concurrency }).pipe(Effect.map((pages) => ({ fromBlock, toBlock, events: Arr.flatten(pages) })))
+            return Effect.forEach(
+              Arr.makeBy(pages, (i) => fromBlock + BigInt(i) * pageSize),
+              (start) =>
+                retrying(
+                  Stream.runCollect(readLedgers(start, BigInt_.min(start + pageSize - BigInt(1), toBlock), read, true)),
+                  retry
+                ),
+              { concurrency }
+            ).pipe(Effect.map((pages) => ({ fromBlock, toBlock, events: Arr.flatten(pages) })))
           }
         ),
-        fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")(({ address, block }) =>
-          Effect.map(balanceAt(address, block), (known) => known.balance)
+        fetchNativeBalance: Effect.fn("StellarIndexer.fetchNativeBalance")(({ address, block, retry }) =>
+          Effect.map(balanceAt(address, block, retry), (known) => known.balance)
         ),
         streamNativeBalance: (
           { address, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, step, toBlock }
@@ -455,7 +505,8 @@ export const layer = (options: {
               : lastConfirmedBlock.pipe(Effect.repeat({ schedule: poll, until: (confirmed) => confirmed >= block })))
               .pipe(Effect.flatMap((confirmed) =>
                 Option.match(known, {
-                  onNone: () => balanceAt(address, block),
+                  // the whole sample is retried below
+                  onNone: () => balanceAt(address, block, undefined),
                   onSome: (known) => advance(address, block, known)
                 }).pipe(Effect.map((next) => [
                   [{ block, balance: next.balance }],
@@ -467,13 +518,7 @@ export const layer = (options: {
           return Stream.paginate(
             // a head below `fromBlock`: the first sample reads it
             { block: fromBlock, head: fromBlock - BigInt(1), known: Option.none() },
-            retry === undefined
-              ? sample
-              : (position) =>
-                Effect.retry(sample(position), {
-                  schedule: retry,
-                  while: (error) => JsonRpc.isTransient(error.reason)
-                })
+            (position: BalancePosition) => retrying(sample(position), retry)
           )
         },
         streamEvents: ({ filter, fromBlock, poll = Schedule.spaced(DEFAULT_POLL_INTERVAL), retry, toBlock }) => {
@@ -500,10 +545,7 @@ export const layer = (options: {
           return Stream.paginate(
             // a head below `fromBlock`: the first step reads it
             { next: fromBlock, head: fromBlock - BigInt(1) },
-            retry === undefined
-              ? step
-              : (remaining) =>
-                Effect.retry(step(remaining), { schedule: retry, while: (error) => JsonRpc.isTransient(error.reason) })
+            (remaining) => retrying(step(remaining), retry)
           )
         }
       })

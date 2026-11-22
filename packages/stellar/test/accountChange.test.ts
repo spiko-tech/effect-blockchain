@@ -2,7 +2,7 @@ import { StellarAccountAddress } from "@effect-blockchain/stellar/StellarAddress
 import { assert, describe, it } from "@effect/vitest"
 import { StrKey, xdr } from "@stellar/stellar-sdk"
 import * as Option from "effect/Option"
-import { accountChange } from "../src/internal/accountChange.ts"
+import { accountBefore, accountChange } from "../src/internal/accountChange.ts"
 import {
   account,
   accountKey,
@@ -105,5 +105,45 @@ describe("accountChange on synthetic ledgers", () => {
 
   it("throws on a malformed meta that mentions the account", () => {
     assert.throws(() => accountChange(Buffer.from(StrKey.decodeEd25519PublicKey(A)).toString("base64"), A))
+  })
+})
+
+describe("accountBefore", () => {
+  const before = (balance: number, lastModifiedLedger: number) =>
+    Option.some({ created: false, balance: BigInt(balance), lastModifiedLedger: BigInt(lastModifiedLedger) })
+
+  it("reads the state before the first change, the fee charge before the payment", () => {
+    const meta = ledgerMeta([operation(update(A, 90, 50, 8), update(A, 100, 90, 7))])
+    assert.deepStrictEqual(accountBefore(meta, A), before(100, 7))
+  })
+
+  it("reads a created account as created, and an account the ledger does not change as None", () => {
+    const meta = ledgerMeta([operation([xdr.LedgerEntryChange.ledgerEntryCreated(account(A, 50))])])
+    assert.deepStrictEqual(accountBefore(meta, A), Option.some({ created: true }))
+    assert.deepStrictEqual(accountBefore(meta, B), Option.none())
+  })
+
+  it("finds an account whose only change is a Soroban fee refund", () => {
+    // the recorded v2 ledger without its fee charges and transaction changes: only the refunds remain
+    const source = StellarAccountAddress.make("GB5LCXFTBHXJ32XQBHX4EQKQPCHZRHU3XXHHN54QE3O3QTAN6RQZ3XEE")
+    const recorded = xdr.LedgerCloseMeta.fromXdr(recordedLedger("quasar", "getLedgers-binance").metadataXdr, "base64")
+    assert.strictEqual(recorded.type, "v2")
+    if (recorded.type !== "v2") return
+    const txProcessing = recorded.value.txProcessing.map((tx) =>
+      new xdr.TransactionResultMetaV1({
+        ...tx,
+        feeProcessing: [],
+        txApplyProcessing: xdr.TransactionMeta.operations([])
+      })
+    )
+    const meta = xdr.LedgerCloseMeta.v2(new xdr.LedgerCloseMetaV2({ ...recorded.value, txProcessing })).toXdr("base64")
+    // charged 17269 up front, so 1168310068 - 17269 before the refund
+    const found = Option.map(accountBefore(meta, source), (state) => "balance" in state && state.balance)
+    assert.deepStrictEqual(found, Option.some(BigInt(1168292799)))
+  })
+
+  it("throws when the account's first change is not its state or its creation", () => {
+    const meta = ledgerMeta([operation([xdr.LedgerEntryChange.ledgerEntryUpdated(account(A, 5))])])
+    assert.throws(() => accountBefore(meta, A), /expected the account's state first/)
   })
 })
