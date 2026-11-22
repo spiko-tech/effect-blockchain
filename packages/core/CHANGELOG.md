@@ -1,5 +1,14 @@
 # @effect-blockchain/core
 
+## 0.3.0
+
+### Minor Changes
+
+- [#119](https://github.com/spiko-tech/effect-blockchain/pull/119) [`95dbf54`](https://github.com/spiko-tech/effect-blockchain/commit/95dbf54e9731e86edb85a675429c586320b8a747) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Keep the transient reason when endpoints fail in sequence
+  
+  - When several endpoints fail, the `<Chain>RpcError` takes its `reason`, `method`, `endpoint` and `code` from the last error with a transient reason (`JsonRpc.isTransient`), else from the last error. A call that failed `Pruned` after an earlier transient failure now fails with the transient reason, so a `retry` that runs only while the reason is transient retries it.
+  - `cause` still holds every endpoint's error in order, `WrongNetwork` still stops the fallback at once, and a single endpoint's error is unchanged.
+
 ## 0.2.0
 
 ### Minor Changes

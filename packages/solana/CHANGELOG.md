@@ -1,5 +1,19 @@
 # @effect-blockchain/solana
 
+## 0.6.0
+
+### Minor Changes
+
+- [#116](https://github.com/spiko-tech/effect-blockchain/pull/116) [`82ac02a`](https://github.com/spiko-tech/effect-blockchain/commit/82ac02afa9cc363abf48a6cf530574e2d292c6b9) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Retry transient failures in every `SolanaIndexer` fetch
+  
+  - `SolanaIndexer.fetchTransactions`, `SolanaIndexer.fetchTransactionBatch` and `SolanaIndexer.fetchNativeBalance` take `retry` in their options. It retries each `getSignaturesForAddress` page, `getTransaction`, `getBalance` or `getSlot` failing with a transient reason (`JsonRpc.isTransient`), so a retry keeps the pages and transactions already read. It is off by default.
+  - The JSDoc of the three methods states their request cost.
+
+### Patch Changes
+
+- Updated dependencies [[`95dbf54`](https://github.com/spiko-tech/effect-blockchain/commit/95dbf54e9731e86edb85a675429c586320b8a747)]:
+  - @effect-blockchain/core@0.3.0
+
 ## 0.5.0
 
 ### Minor Changes
