@@ -327,6 +327,69 @@ describe("StellarIndexer.fetchNativeBalance", () => {
     ))
 })
 
+const fetchAll = (blocks: ReadonlyArray<number>, archive?: boolean) =>
+  Effect.gen(function*() {
+    return yield* (yield* StellarIndexer.StellarIndexer).fetchNativeBalances({
+      address: A,
+      blocks: blocks.map(b),
+      archive
+    })
+  })
+
+describe("StellarIndexer.fetchNativeBalances", () => {
+  it.effect("reads blocks around two changes in one walk, with one getLedgers call per change", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(fetchAll([110, 115, 120]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(50), b(70), b(60)])
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1]])
+      assert.strictEqual(state.accounts, 1)
+    }))
+  })
+
+  it.effect("returns the balances in the order of blocks, duplicates included", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(fetchAll([120, 106, 115, 106]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(60), b(50), b(70), b(50)])
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1]])
+    }))
+  })
+
+  it.effect("reads the account entry at the head, without getLedgers, for blocks at or after its last change", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(fetchAll([150, 118, 200]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(60), b(60), b(60)])
+      assert.deepStrictEqual(state.pages, [])
+    }))
+  })
+
+  it.effect("reads 0 for a block before the ledger that created the account", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(fetchAll([100, 110]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(0), b(50)])
+      assert.deepStrictEqual(state.pages, [[b(118), 1], [b(112), 1], [b(105), 1]])
+    }))
+  })
+
+  it.effect("returns no balance and makes no call for no blocks", () => {
+    const { layer, state } = fakeRpc(b(200), history)
+    return provide(fetchAll([]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [])
+      assert.strictEqual(state.accounts, 0)
+      assert.deepStrictEqual(state.pages, [])
+    }))
+  })
+
+  it.effect("with archive, reads the ledgers from the archive endpoints and the entry from the regular ones", () => {
+    const { layer, state } = fakeRpc(b(200), history, { archive: true })
+    return provide(fetchAll([106, 115], true), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(50), b(70)])
+      assert.deepStrictEqual(state.pages, [])
+      assert.deepStrictEqual(state.archivePages, [[b(118), 1], [b(112), 1]])
+      assert.strictEqual(state.accounts, 1)
+    }))
+  })
+})
+
 describe("StellarIndexer.streamNativeBalance", () => {
   it.effect("samples every step, unchanged ones included, and ends at the last sample not above toBlock", () => {
     const { layer, state } = fakeRpc(b(200), history)
