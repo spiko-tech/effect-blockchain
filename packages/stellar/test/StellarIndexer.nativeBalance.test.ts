@@ -388,6 +388,48 @@ describe("StellarIndexer.fetchNativeBalances", () => {
       assert.strictEqual(state.accounts, 1)
     }))
   })
+
+  it.effect("reads the account entry from an endpoint that has reached the highest block", () => {
+    // 40 until 120, 50 until 180, then 70; endpoint "a" has reached 150 and endpoint "b" 250
+    const endpoints = [
+      { name: "a", head: b(150), balance: 50, lastModifiedLedger: b(120) },
+      { name: "b", head: b(250), balance: 70, lastModifiedLedger: b(180) }
+    ]
+    const metas = new Map([
+      [b(120), ledgerMeta([operation(update(A, 40, 50, 90))])],
+      [b(180), ledgerMeta([operation(update(A, 50, 70, 120))])]
+    ])
+    const minLedgers = new Array<bigint | undefined>()
+    const layer = Layer.mock(StellarRpc.StellarRpc)({
+      network: "Stellar",
+      getLedgers: (page) =>
+        "cursor" in page ? Effect.die("unused") : Effect.succeed({
+          ledgers: [{
+            sequence: page.startLedger,
+            closeTime: 1700000000,
+            metadataXdr: metas.get(page.startLedger) ?? ""
+          }],
+          cursor: StellarRpc.StellarLedgersCursor.make({ endpoint: "b", cursor: String(page.startLedger) }),
+          latestLedger: b(250),
+          oldestLedger: b(1)
+        }),
+      getLedgerEntries: ({ minLedger }) =>
+        Effect.suspend(() => {
+          minLedgers.push(minLedger)
+          const endpoint = endpoints.find(({ head }) => minLedger === undefined || head >= minLedger)
+          if (endpoint === undefined) return Effect.die("no endpoint has reached minLedger")
+          const xdr = account(A, endpoint.balance).data.toXdr("base64")
+          return Effect.succeed({
+            entries: [{ xdr, lastModifiedLedger: endpoint.lastModifiedLedger }],
+            latestLedger: endpoint.head
+          })
+        })
+    })
+    return provide(fetchAll([100, 200]), layer).pipe(Effect.map((balances) => {
+      assert.deepStrictEqual(balances, [b(40), b(70)])
+      assert.deepStrictEqual(minLedgers, [b(200)])
+    }))
+  })
 })
 
 describe("StellarIndexer.streamNativeBalance", () => {

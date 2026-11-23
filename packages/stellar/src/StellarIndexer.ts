@@ -472,7 +472,8 @@ export const layer = (options: {
             }
           )
         return Effect.flatMap(
-          retrying(account(address, lowest), retry),
+          // an endpoint behind the highest block would miss its changes after the endpoint's head
+          retrying(account(address, Arr.max(blocks, BigInt_.Order)), retry),
           ({ account, latestLedger }) =>
             account === undefined
               ? Effect.succeed(Arr.of({ balance: BigInt(0), until: latestLedger, since: lowest }))
