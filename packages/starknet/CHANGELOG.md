@@ -1,5 +1,14 @@
 # @effect-blockchain/starknet
 
+## 0.7.0
+
+### Minor Changes
+
+- [#123](https://github.com/spiko-tech/effect-blockchain/pull/123) [`952b383`](https://github.com/spiko-tech/effect-blockchain/commit/952b383d6eccdac1e24a2d500bac58c0557a9b75) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read native balances at many blocks in one call
+  
+  - `StarknetIndexer.fetchNativeBalances({ address, blocks, concurrency?, retry? })` returns the STRK balances in the order of `blocks`, with one `balanceOf` call per distinct block and none for an empty `blocks`. `concurrency` is 1 by default.
+  - `StarknetIndexer.fetchNativeBalance` reads through `fetchNativeBalances` with one block.
+
 ## 0.6.0
 
 ### Minor Changes
