@@ -1,5 +1,13 @@
 # @effect-blockchain/stellar
 
+## 0.9.1
+
+### Patch Changes
+
+- [#125](https://github.com/spiko-tech/effect-blockchain/pull/125) [`cb0b3e7`](https://github.com/spiko-tech/effect-blockchain/commit/cb0b3e7695a8638a47041535e163ad9cee06b249) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read the account entry at the highest requested block in `StellarIndexer.fetchNativeBalances`
+  
+  - The `getLedgerEntries` call sends `minLedger` at the highest of `blocks` instead of the lowest, so an endpoint that has not reached the highest block no longer answers, and the balances at the higher blocks include every change up to them.
+
 ## 0.9.0
 
 ### Minor Changes
