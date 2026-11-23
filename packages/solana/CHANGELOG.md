@@ -1,5 +1,14 @@
 # @effect-blockchain/solana
 
+## 0.7.0
+
+### Minor Changes
+
+- [#123](https://github.com/spiko-tech/effect-blockchain/pull/123) [`952b383`](https://github.com/spiko-tech/effect-blockchain/commit/952b383d6eccdac1e24a2d500bac58c0557a9b75) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read native balances at many blocks in one call
+  
+  - `SolanaIndexer.fetchNativeBalances({ address, blocks, retry? })` returns the balances in the order of `blocks`. It lists the signatures of the address once, down to the lowest block, and reads each distinct transaction once, so a balance history costs requests in proportion to its changes.
+  - `SolanaIndexer.fetchNativeBalance` reads through `fetchNativeBalances` with one block, with the same answers and requests as before.
+
 ## 0.6.0
 
 ### Minor Changes

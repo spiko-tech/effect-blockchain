@@ -1,5 +1,14 @@
 # @effect-blockchain/stellar
 
+## 0.9.0
+
+### Minor Changes
+
+- [#122](https://github.com/spiko-tech/effect-blockchain/pull/122) [`c6b36cf`](https://github.com/spiko-tech/effect-blockchain/commit/c6b36cfa2fa81d0a6b592abe7edeb0ddf511454a) Thanks [@nicolas-assouad-spiko](https://github.com/nicolas-assouad-spiko)! - Read native balances at many ledgers in one walk
+  
+  - `StellarIndexer.fetchNativeBalances` returns the native balance of an account at the end of each of `blocks`, in the order of `blocks`. It costs the requests of a single `fetchNativeBalance` at the lowest block, whatever the number of blocks, and none for an empty `blocks`. It takes `archive` and `retry` like `fetchNativeBalance`.
+  - `StellarIndexer.fetchNativeBalance` reads through the same walk with one block.
+
 ## 0.8.0
 
 ### Minor Changes
