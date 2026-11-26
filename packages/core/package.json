@@ -44,8 +44,8 @@
     "coverage": "vitest --coverage"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.4",
-    "effect": "4.1.4"
+    "@effect/vitest": "4.1.5",
+    "effect": "4.1.5"
   },
   "peerDependencies": {
     "effect": "^4.0.0"

@@ -49,9 +49,9 @@
     "@effect-blockchain/core": "workspace:*"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.4",
+    "@effect/vitest": "4.1.5",
     "@stellar/stellar-sdk": "17.4.0",
-    "effect": "4.1.4"
+    "effect": "4.1.5"
   },
   "peerDependencies": {
     "@stellar/stellar-sdk": "^17.0.0",
