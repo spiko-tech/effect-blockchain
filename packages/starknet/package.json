@@ -48,8 +48,8 @@
     "@effect-blockchain/core": "workspace:*"
   },
   "devDependencies": {
-    "@effect/vitest": "4.1.4",
-    "effect": "4.1.4",
+    "@effect/vitest": "4.1.5",
+    "effect": "4.1.5",
     "starknet": "^10.8.0"
   },
   "peerDependencies": {
